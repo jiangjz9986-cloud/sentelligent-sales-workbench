@@ -372,6 +372,35 @@ describe("remote Clawbot agent adapter", () => {
     assert.deepEqual(replay.result, { status: "accepted", ...acceptedReply.result });
   });
 
+  it("suppresses flagged payment-batch replies while retaining debug text", async () => {
+    const debugText = "已收到付款凭证，共识别 3 笔，正在逐笔发送待确认记账信息。";
+    const agent = createRemoteClawbotAgent({
+      backendUrl: "https://sales.example.test",
+      apiToken: "test-secret-token",
+      fetchImpl: async () => jsonResponse({
+        status: "review_required",
+        text: debugText,
+        suppressSynchronousReply: true,
+        result: { batchSize: 3 },
+      }),
+    });
+
+    const reply = await agent.chat({
+      conversationId: "c-payment-batch",
+      text: "",
+      senderId: "sender-1",
+      messageId: `weixin:delivery:v1:${"f".repeat(64)}`,
+      chatType: "direct",
+      deliveryTimestampMs: 1786500000123,
+      media: { type: "image", filePath: await mediaPath(), mimeType: "image/png", fileName: "batch.png" },
+    });
+
+    assert.equal(reply.text, "");
+    assert.equal(reply.debugText, debugText);
+    assert.equal(reply.suppressSynchronousReply, true);
+    assert.deepEqual(reply.result, { batchSize: 3 });
+  });
+
   it("rejects malformed or expanded 409 response shapes as permanent safe errors", async () => {
     let responseBody = { status: "clarify", text: "valid", debug: { path: "/private/db" } };
     let rawResponse = null;

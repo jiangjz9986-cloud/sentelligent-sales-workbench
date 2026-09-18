@@ -759,6 +759,7 @@ describe("weixin sales workbench agent", () => {
                 entryId: "entry-accepted-1",
                 expenseId: "expense-accepted-1",
                 paymentId: "payment-accepted-1",
+                suppressSynchronousReply: true,
               },
             },
           };
@@ -789,6 +790,8 @@ describe("weixin sales workbench agent", () => {
 
       assert.equal(response.status, 200);
       assert.equal(body.text.startsWith("已确认并录入"), true);
+      assert.equal(body.suppressSynchronousReply, true);
+      assert.equal(body.debugText, body.text);
       assert.deepEqual(body.result, {
         status: "accepted",
         entryId: "entry-accepted-1",

@@ -664,6 +664,7 @@ export function createAssistantToolHandlers({
             items: existingItems,
             pending: existingResults[0]?.pending ?? null,
             pendingItems: existingResults.map((result) => result.pending).filter(Boolean),
+            suppressSynchronousReply: true,
           };
         }
       }
@@ -897,6 +898,7 @@ export function createAssistantToolHandlers({
         pending: results[0]?.pending ?? null,
         pendingItems: results.map((result) => result.pending).filter(Boolean),
         ...(inbox ? { documentInboxId: inbox.id } : {}),
+        suppressSynchronousReply: true,
       };
     },
 

@@ -4293,6 +4293,9 @@ export function createServer(options = {}) {
       bindingsRepository: weixinBindingsRepository,
       confirmationSecret: assistantConfirmationSecret,
       ...(options.shortcutBookkeepingAssistantIdFactory ? { idFactory: options.shortcutBookkeepingAssistantIdFactory } : {}),
+      ...(options.shortcutBookkeepingAssistantBatchWindowMs !== undefined
+        ? { batchWindowMs: options.shortcutBookkeepingAssistantBatchWindowMs }
+        : {}),
       clock: options.shortcutBookkeepingAssistantClock ?? assistantClock,
     });
   const renderWeixinOutboxMessage = (outboxItem) => {
@@ -5093,6 +5096,15 @@ export function createServer(options = {}) {
           && !Array.isArray(runtimeBody.result)
           ? runtimeBody.result
           : null;
+        const suppressSynchronousReply = runtimeBody.suppressSynchronousReply === true
+          || toolResult?.suppressSynchronousReply === true;
+        const publicText = typeof runtimeBody.text === "string"
+          ? runtimeBody.text
+          : typeof toolResult?.text === "string"
+            ? toolResult.text
+            : typeof runtimeBody.message === "string"
+              ? runtimeBody.message
+              : "处理完成。";
         const acceptedBookkeepingResult = toolResult
           && (
             (toolResult.status === "accepted" && typeof toolResult.entryId === "string" && toolResult.entryId.trim())
@@ -5115,14 +5127,10 @@ export function createServer(options = {}) {
           : null;
         const publicBody = {
           status: runtimeBody.status ?? (result.status >= 400 ? "error" : "ok"),
-          text: typeof runtimeBody.text === "string"
-            ? runtimeBody.text
-            : typeof toolResult?.text === "string"
-              ? toolResult.text
-            : typeof runtimeBody.message === "string"
-              ? runtimeBody.message
-              : "处理完成。",
+          text: publicText,
           ...(acceptedBookkeepingResult ? { result: acceptedBookkeepingResult } : {}),
+          ...(suppressSynchronousReply ? { suppressSynchronousReply: true } : {}),
+          ...(suppressSynchronousReply ? { debugText: publicText } : {}),
           ...(runtimeBody.toolName ? { toolName: runtimeBody.toolName } : {}),
           ...(runtimeBody.actionId ? { actionId: runtimeBody.actionId } : {}),
           ...(runtimeBody.risk ? { risk: runtimeBody.risk } : {}),

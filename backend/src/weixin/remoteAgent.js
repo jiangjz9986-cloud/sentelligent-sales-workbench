@@ -196,6 +196,20 @@ function suppressDurableAcceptedReceipt(body) {
   return { ...body, text: "" };
 }
 
+function suppressFlaggedSynchronousReply(body) {
+  if (body?.suppressSynchronousReply !== true) return body;
+  const debugText = typeof body.text === "string" && body.text.trim()
+    ? body.text
+    : typeof body.debugText === "string" && body.debugText.trim()
+      ? body.debugText
+      : null;
+  return {
+    ...body,
+    text: "",
+    ...(debugText ? { debugText } : {}),
+  };
+}
+
 async function normalizeMedia(request) {
   if (!request.media) return null;
   try {
@@ -301,7 +315,8 @@ export function createRemoteClawbotAgent(options = {}) {
         throw new RemoteAgentError("REMOTE_AGENT_REQUEST_FAILED", SAFE_FAILURE_MESSAGE, { permanent });
       }
       try {
-        return suppressDurableAcceptedReceipt(parseResponseBody(responseText));
+        const parsed = parseResponseBody(responseText);
+        return suppressDurableAcceptedReceipt(suppressFlaggedSynchronousReply(parsed));
       } catch (error) {
         if (error instanceof RemoteAgentError) throw error;
         throw new RemoteAgentError("REMOTE_AGENT_INVALID_RESPONSE");

@@ -930,7 +930,8 @@ describe("小小微信图片记账与自然语言确认闭环", () => {
     });
 
     assert.equal(received.status, "ok");
-    assert.match(received.text, /付款凭证/u);
+    assert.equal(received.text, "");
+    assert.match(received.debugText, /付款凭证/u);
     const draft = await leaseOutbox();
     assert.match(draft.item.message, /【小小提醒！新增一条待记账信息】/u);
     assert.match(draft.item.message, /类型：支出/u);
@@ -2007,6 +2008,8 @@ describe("小小微信图片记账与自然语言确认闭环", () => {
     const received = await sendImage("weixin-multi-image-1");
     assert.equal(received.response.status, 200);
     assert.match(received.body.text, /共识别 2 笔/u);
+    assert.equal(received.body.suppressSynchronousReply, true);
+    assert.equal(received.body.debugText, received.body.text);
 
     const configured = await request("/api/integrations/weixin-agent/events", {
       method: "POST",
