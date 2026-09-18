@@ -299,7 +299,7 @@ function expenseItem(expense, ledgerRow, fallbackRegion) {
     paymentProofCount: ledgerRow.visible.paymentProofs.length,
     invoiceState: invoicePending ? "pending" : "ready",
     invoiceLabel: ledgerRow.visible.invoiceLabel ?? "待补",
-    action: invoicePending ? "补票" : "查看",
+    action: "查看",
     needsReview: ledgerRow.needsReview,
     original: expense,
   };

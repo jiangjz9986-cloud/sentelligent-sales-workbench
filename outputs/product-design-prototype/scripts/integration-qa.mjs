@@ -524,6 +524,7 @@ async function openChromeCdp() {
   try {
     chrome = spawnManaged(chromePath, [
       "--headless=new",
+      "--no-sandbox",
       "--disable-gpu",
       "--no-first-run",
       "--no-default-browser-check",
@@ -1826,6 +1827,9 @@ async function runViewport(cdp, url, viewport, historicalSolution, historicalIti
         const ledgerOpened = ledgerTab.getAttribute('aria-selected') === 'true'
           && Boolean(ledgerWorkbench);
         const ledgerChildFunctionCount = expensePage.querySelectorAll('.expense-ledger-child-card').length;
+        const ledgerChildFunctionsPresent = ledgerChildFunctionCount >= 1 && ledgerChildFunctionCount <= 2
+          && Boolean(expensePage.querySelector('#expense-ledger-advances'));
+        const proofListRemovedFromLedger = !expensePage.querySelector('.expense-ledger-child-card .expense-proof-list');
         const legacyExportAbsent = !expensePage.querySelector('[data-testid="expense-tab-export"]')
           && !expensePage.querySelector('.expense-organizer-view');
         const reimbursementActions = expensePage.querySelector('[data-testid="ledger-reimbursement-actions"]');
@@ -1862,11 +1866,69 @@ async function runViewport(cdp, url, viewport, historicalSolution, historicalIti
             return [...expenseEditor.querySelectorAll('label')]
               .some((label) => label.htmlFor === control.id && label.textContent?.trim());
           });
-        const closeExpenseEditorButton = [...expenseEditor.querySelectorAll('button')]
+        const setExpenseControlValue = (control, value) => {
+          if (!control) return false;
+          const prototype = control instanceof HTMLSelectElement
+            ? HTMLSelectElement.prototype
+            : control instanceof HTMLTextAreaElement
+              ? HTMLTextAreaElement.prototype
+              : HTMLInputElement.prototype;
+          const setter = Object.getOwnPropertyDescriptor(prototype, 'value')?.set;
+          setter?.call(control, value);
+          control.dispatchEvent(new Event('input', { bubbles: true }));
+          control.dispatchEvent(new Event('change', { bubbles: true }));
+          return true;
+        };
+        const findExpenseLabeledControl = (labelText) => [...expenseEditor.querySelectorAll('label')]
+          .find((label) => label.textContent?.includes(labelText))
+          ?.querySelector('input, select, textarea');
+        setExpenseControlValue(findExpenseLabeledControl('费用事由'), 'Chrome详情卡验收');
+        setExpenseControlValue(findExpenseLabeledControl('默认收款方'), '验收商户');
+        setExpenseControlValue(findExpenseLabeledControl('实付金额'), '188.00');
+        setExpenseControlValue(findExpenseLabeledControl('计入报销金额'), '188.00');
+        const saveExpenseButton = [...expenseEditor.querySelectorAll('button')]
+          .find((button) => button.textContent?.includes('保存费用'));
+        if (!saveExpenseButton) throw new Error('Missing travel expense save button');
+        saveExpenseButton.click();
+        await waitUntil(() => !document.querySelector('.expense-drawer[role="dialog"]'), 10000);
+        const expenseRowAction = await waitUntil(
+          () => document.querySelector('[data-ledger-primary-action]'),
+          10000,
+        );
+        expenseRowAction.click();
+        const expenseDetail = await waitUntil(
+          () => document.querySelector('.expense-detail-card[role="dialog"]'),
+          5000,
+        );
+        const expenseDetailText = expenseDetail.textContent ?? '';
+        const detailCardComplete = [
+          '记账详情',
+          '费用信息',
+          '付款记录',
+          '付款凭证',
+          'Chrome详情卡验收',
+          '¥188.00',
+        ].every((text) => expenseDetailText.includes(text));
+        const proofListRemovedFromDetailParent = !expensePage.querySelector('.expense-ledger-child-card .expense-proof-list');
+        const detailScroller = expenseDetail.querySelector('.expense-detail-scroll');
+        const detailScrollWorks = Boolean(detailScroller)
+          && detailScroller.scrollHeight >= detailScroller.clientHeight;
+        const editDetailButton = [...expenseDetail.querySelectorAll('button')]
+          .find((button) => button.textContent?.includes('编辑记账'));
+        if (!editDetailButton) throw new Error('Missing expense detail edit button');
+        editDetailButton.click();
+        const detailEditor = await waitUntil(
+          () => document.querySelector('.expense-drawer[role="dialog"]'),
+          3000,
+        );
+        const closeDetailEditorButton = [...detailEditor.querySelectorAll('button')]
           .find((button) => button.getAttribute('aria-label') === '关闭费用录入');
-        if (!closeExpenseEditorButton) throw new Error('Missing travel expense editor close button');
-        closeExpenseEditorButton.click();
+        if (!closeDetailEditorButton) throw new Error('Missing expense detail editor close button');
+        closeDetailEditorButton.click();
         await waitUntil(() => !document.querySelector('.expense-drawer[role="dialog"]'), 3000);
+        await waitUntil(() => document.querySelector('.expense-detail-card[role="dialog"]'), 3000);
+        document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+        await waitUntil(() => !document.querySelector('.expense-detail-card[role="dialog"]'), 3000);
         window.__qaExpense = {
           pageOpened: Boolean(expensePage),
           loadedWithoutAlert: !expensePage.querySelector('.expense-loading')
@@ -1878,7 +1940,8 @@ async function runViewport(cdp, url, viewport, historicalSolution, historicalIti
             && /^\\d{4}-W\\d{2}$/.test(naturalWeekInput.value),
           weekValue: naturalWeekInput?.value ?? '',
           ledgerOpened,
-          ledgerChildFunctionsPresent: ledgerChildFunctionCount === 2,
+          ledgerChildFunctionsPresent,
+          proofListRemovedFromLedger,
           legacyExportAbsent,
           reimbursementActionsPresent,
           regionSettingsOpened: Boolean(regionDialog),
@@ -1887,6 +1950,10 @@ async function runViewport(cdp, url, viewport, historicalSolution, historicalIti
           editorControlCount: expenseEditorControls.length,
           editorLabelsComplete: expenseEditorLabelsComplete,
           editorClosed: !document.querySelector('.expense-drawer[role="dialog"]'),
+          detailCardComplete,
+          detailScrollWorks,
+          proofListRemovedFromDetailParent,
+          detailClosedWithEscape: !document.querySelector('.expense-detail-card[role="dialog"]'),
         };
 
         [...document.querySelectorAll('.nav-item')].find((button) => button.textContent.includes('快速记录'))?.click();
@@ -3084,7 +3151,8 @@ async function main() {
         assert.equal(result.expenseFlow.tabsPresent, true, "desktop travel expense page should expose exactly the expected reimbursement tabs");
         assert.equal(result.expenseFlow.naturalWeekInput, true, "desktop travel expense page should use a populated natural-week input");
         assert.equal(result.expenseFlow.ledgerOpened, true, "desktop travel expense page should open the scheme-three ledger workspace by default");
-        assert.equal(result.expenseFlow.ledgerChildFunctionsPresent, true, "desktop ledger should retain payment proofs and advances as its two child functions since the WeChat review card was removed in v0.8.2");
+        assert.equal(result.expenseFlow.ledgerChildFunctionsPresent, true, "desktop ledger should retain received advances and show the WeChat proof inbox only when needed");
+        assert.equal(result.expenseFlow.proofListRemovedFromLedger, true, "desktop ledger should not render a full payment-proof list below the table");
         assert.equal(result.expenseFlow.legacyExportAbsent, true, "desktop travel expense page must not expose a standalone reimbursement output tab");
         assert.equal(result.expenseFlow.reimbursementActionsPresent, true, "desktop ledger should expose only print and Excel expense-list actions");
         assert.equal(result.expenseFlow.regionSettingsOpened, true, "desktop ledger should open the weekly region settings card");
@@ -3093,6 +3161,10 @@ async function main() {
         assert.ok(result.expenseFlow.editorControlCount > 0, "desktop travel expense editor should render form controls");
         assert.equal(result.expenseFlow.editorLabelsComplete, true, "desktop travel expense editor controls should all have readable labels");
         assert.equal(result.expenseFlow.editorClosed, true, "desktop travel expense editor should close without saving");
+        assert.equal(result.expenseFlow.detailCardComplete, true, "desktop expense row should open a complete detail card");
+        assert.equal(result.expenseFlow.detailScrollWorks, true, "desktop expense detail card should keep its internal content scrollable");
+        assert.equal(result.expenseFlow.proofListRemovedFromDetailParent, true, "desktop ledger should not keep a full proof list beneath the table");
+        assert.equal(result.expenseFlow.detailClosedWithEscape, true, "desktop expense detail card should close on Escape");
         assert.match(result.weeklyDraftText, /本周重点进展/, "desktop flow should render a backend weekly draft");
         assert.equal(result.weeklyEditor.saved, true, "desktop weekly page should save edited weekly report content");
         assert.equal(result.weeklyEditor.ready, true, "desktop weekly page should mark weekly report as ready");

@@ -132,11 +132,14 @@ async function assertExpensePageReady(page) {
   const ledgerTab = page.getByTestId("expense-tab-ledger");
   assert.equal(await ledgerTab.getAttribute("aria-selected"), "true");
   await expensePage.getByTestId("expense-ledger-workbench").waitFor();
-  assert.equal(
-    await expensePage.locator(".expense-ledger-child-card").count(),
-    2,
-    "scheme-three ledger keeps payment proofs and received advances; the WeChat review card was removed in v0.8.2",
-  );
+  const childCards = expensePage.locator(".expense-ledger-child-card");
+  const childCardCount = await childCards.count();
+  assert.ok(childCardCount >= 1 && childCardCount <= 2, "ledger should keep received advances and show the WeChat proof inbox only when needed");
+  assert.equal(await expensePage.locator("#expense-ledger-advances").count(), 1);
+  const proofInbox = expensePage.locator("#expense-ledger-proof-inbox");
+  if (await proofInbox.count()) {
+    assert.equal(await proofInbox.locator("summary").innerText().then((text) => text.includes("微信待处理凭证")), true);
+  }
 
   const naturalWeekInput = expensePage.locator('input[type="week"]');
   await naturalWeekInput.waitFor();
