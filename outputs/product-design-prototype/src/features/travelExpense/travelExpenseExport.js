@@ -245,8 +245,10 @@ export function buildExpenseListTotals(rows = [], { matches = [] } = {}) {
     safeAddCents(total, row?.amountCents, "expenseTotalCents")
   ), 0);
   const substituteInvoiceTotalCents = matches.reduce((total, match) => {
-    if (match?.state !== "confirmed" || match?.matchMethod !== "rule_candidate") return total;
+    if (match?.state !== "confirmed") return total;
     if (!includedExpenseIds.has(match.expenseId)) return total;
+    const row = rows.find((candidate) => candidate.expenseId === match.expenseId);
+    if (row?.invoiceLabel !== "替票") return total;
     return safeAddCents(total, match.allocatedCents, "substituteInvoiceTotalCents");
   }, 0);
   return {

@@ -89,7 +89,9 @@ function text(entries, name) {
 
 function createExport() {
   return buildExpenseListExport({
-    expenses,
+    expenses: expenses.map((expense) => (
+      expense.id === "lodging-1" ? { ...expense, invoiceType: "substitute" } : expense
+    )),
     context: {
       matches: [{
         id: "substitute-1",

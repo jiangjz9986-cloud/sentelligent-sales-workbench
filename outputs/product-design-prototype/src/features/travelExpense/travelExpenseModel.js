@@ -189,10 +189,17 @@ export function deriveExpenseInvoiceStates(expense, {
     confirmation?.expenseId === expense.id && activeNoInvoiceConfirmation(confirmation)
   ));
   const attachments = safeItems(expense.attachments ?? [], "attachments");
-  const hasSubstitute = expenseMatches.some((match) => match.matchMethod === "rule_candidate")
-    || attachments.some((attachment) => attachment.kind === "substitute");
-  const hasElectronic = expenseMatches.some((match) => match.matchMethod !== "rule_candidate")
-    || attachments.some((attachment) => attachment.kind === "invoice");
+  const explicitInvoiceType = String(expense.invoiceType ?? "").trim();
+  // Match provenance is deliberately independent from ticket type. A
+  // rule_candidate is an automatic match source and must not become a
+  // substitute invoice unless the expense was explicitly marked as such.
+  const hasSubstitute = explicitInvoiceType === "substitute";
+  const hasElectronic = explicitInvoiceType === "electronic"
+    || explicitInvoiceType === "paper"
+    || (explicitInvoiceType !== "substitute" && (
+      expenseMatches.length > 0
+      || attachments.some((attachment) => attachment.kind === "invoice")
+    ));
 
   let confirmedCents = 0;
   for (const match of expenseMatches) {

@@ -21,6 +21,13 @@ const MATCH_METHODS = new Set(["manual_code", "manual_selection", "rule_candidat
 const MATCH_STATES = new Set(["suggested", "confirmed", "rejected", "revoked"]);
 const CANDIDATE_STATUSES = new Set(["suggested", "accepted", "rejected", "expired"]);
 const AUTO_MATCH_MAX_DATE_DISTANCE_DAYS = 31;
+const BUSINESS_TIME_ZONE = "Asia/Shanghai";
+const BUSINESS_DATE_FORMATTER = new Intl.DateTimeFormat("en-CA", {
+  year: "numeric",
+  month: "2-digit",
+  day: "2-digit",
+  timeZone: BUSINESS_TIME_ZONE,
+});
 const FIELD_KEYS = new Set([
   "invoiceCode",
   "invoiceNumber",
@@ -133,6 +140,24 @@ function calendarDayDistance(first, second) {
   return Math.abs(
     Date.parse(`${first}T00:00:00.000Z`) - Date.parse(`${second}T00:00:00.000Z`),
   ) / 86_400_000;
+}
+
+function businessDateOnly(value) {
+  if (!value) return null;
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return null;
+  const parts = Object.fromEntries(BUSINESS_DATE_FORMATTER.formatToParts(parsed)
+    .filter((part) => part.type !== "literal")
+    .map((part) => [part.type, part.value]));
+  return `${parts.year}-${parts.month}-${parts.day}`;
+}
+
+// Invoice documents persist a calendar date, while payments persist an instant.
+// Enforce the ordering at calendar-day precision until invoice issue time is
+// added to the shared document contract.
+function invoiceIssuedOnOrAfterPaymentDate(issuedOn, paidAt, fallbackDate = null) {
+  const paymentDate = businessDateOnly(paidAt) ?? fallbackDate;
+  return !paymentDate || (typeof issuedOn === "string" && issuedOn >= paymentDate);
 }
 
 function nowIso(clock) {
@@ -632,6 +657,18 @@ export function createInvoiceRepository(db, {
     `).get({ $expenseId: expenseId }).total);
   }
 
+  function latestExpensePaidAt(expenseId) {
+    const payments = db.prepare(`
+      SELECT paid_at
+      FROM travel_expense_payments
+      WHERE expense_id = $expenseId
+    `).all({ $expenseId: expenseId });
+    return payments
+      .map((row) => row.paid_at)
+      .filter((paidAt) => !Number.isNaN(Date.parse(paidAt)))
+      .sort((left, right) => Date.parse(right) - Date.parse(left))[0] ?? null;
+  }
+
   function confirmedExpenseCoverageCents(expenseId) {
     return Number(db.prepare(`
       SELECT COALESCE(SUM(match.allocated_cents), 0) AS total
@@ -1025,13 +1062,17 @@ export function createInvoiceRepository(db, {
       const reimbursement = Number(expense.reimbursement_cents);
       const methodCoverage = db.prepare(`
         SELECT
-          COALESCE(SUM(CASE WHEN match.match_method = 'rule_candidate' THEN match.allocated_cents ELSE 0 END), 0) AS substitute_cents,
-          COALESCE(SUM(CASE WHEN match.match_method <> 'rule_candidate' THEN match.allocated_cents ELSE 0 END), 0) AS electronic_cents
+          COALESCE(SUM(CASE WHEN expense.invoice_type = 'substitute' THEN match.allocated_cents ELSE 0 END), 0) AS substitute_cents,
+          COALESCE(SUM(CASE WHEN expense.invoice_type IS NULL OR expense.invoice_type <> 'substitute' THEN match.allocated_cents ELSE 0 END), 0) AS electronic_cents
         FROM invoice_matches match
         JOIN invoice_documents invoice
           ON invoice.id = match.invoice_id
          AND invoice.owner = match.owner
          AND invoice.deleted_at IS NULL
+        JOIN travel_expenses expense
+          ON expense.id = match.expense_id
+         AND expense.owner = match.owner
+         AND expense.deleted_at IS NULL
         WHERE match.owner = $owner
           AND match.expense_id = $expenseId
           AND match.state = 'confirmed'
@@ -1113,16 +1154,27 @@ export function createInvoiceRepository(db, {
         WHERE owner = $owner AND week_start = $weekStart AND status = 'suggested'
       `).run({ $owner: owner, $weekStart: weekStart, $now: timestamp });
 
+      // A replacement invoice is a user-selected expense policy, not a side
+      // effect of a no-invoice confirmation. Aggregate each explicitly marked
+      // substitute expense and let the remaining uncovered amount drive the
+      // warehouse search.
       const targets = db.prepare(`
-        SELECT confirmation.expense_id, confirmation.payment_id, confirmation.amount_snapshot_cents,
+        SELECT expense.id AS expense_id, NULL AS payment_id,
+               COALESCE(SUM(payment.reimbursement_cents), 0) AS amount_snapshot_cents,
                expense.occurred_on, expense.category
-        FROM travel_expense_no_invoice_confirmations confirmation
-        JOIN travel_expenses expense ON expense.id = confirmation.expense_id
-        WHERE confirmation.owner = $owner AND confirmation.revoked_at IS NULL
+        FROM travel_expenses expense
+        JOIN travel_expense_payments payment ON payment.expense_id = expense.id
+        WHERE expense.owner = $owner
           AND expense.deleted_at IS NULL
+          AND expense.invoice_type = 'substitute'
           AND expense.occurred_on BETWEEN $weekStart AND date($weekStart, '+6 days')
-        ORDER BY expense.occurred_on, confirmation.created_at, confirmation.id
-      `).all({ $owner: owner, $weekStart: weekStart });
+        GROUP BY expense.id
+        HAVING COALESCE(SUM(payment.reimbursement_cents), 0) > 0
+        ORDER BY expense.occurred_on, expense.id
+      `).all({ $owner: owner, $weekStart: weekStart }).map((target) => ({
+        ...target,
+        paid_at: latestExpensePaidAt(target.expense_id),
+      }));
       const invoices = db.prepare(`
         SELECT invoice.*,
                COALESCE((
@@ -1153,7 +1205,6 @@ export function createInvoiceRepository(db, {
       `).all({ $owner: owner });
       const usedInvoiceIds = new Set();
       const expenseRemainders = new Map();
-      const paymentRemainders = new Map();
       const created = [];
 
       for (const target of targets) {
@@ -1167,26 +1218,11 @@ export function createInvoiceRepository(db, {
           expenseRemainders.get(target.expense_id),
           Number(target.amount_snapshot_cents),
         );
-        if (target.payment_id) {
-          if (!paymentRemainders.has(target.payment_id)) {
-            const payment = db.prepare(`
-              SELECT reimbursement_cents
-              FROM travel_expense_payments
-              WHERE id = $id AND expense_id = $expenseId
-            `).get({ $id: target.payment_id, $expenseId: target.expense_id });
-            paymentRemainders.set(
-              target.payment_id,
-              payment
-                ? Math.max(0, Number(payment.reimbursement_cents) - confirmedPaymentCoverageCents(target.payment_id))
-                : 0,
-            );
-          }
-          remaining = Math.min(remaining, paymentRemainders.get(target.payment_id));
-        }
         if (remaining <= 0) continue;
         const ranked = invoices
           .filter((invoice) => !usedInvoiceIds.has(invoice.id))
           .filter((invoice) => invoice.issued_on
+            && invoiceIssuedOnOrAfterPaymentDate(invoice.issued_on, target.paid_at, target.occurred_on)
             && calendarDayDistance(invoice.issued_on, target.occurred_on) <= AUTO_MATCH_MAX_DATE_DISTANCE_DAYS)
           .filter((invoice) => categoriesCompatible(invoice.suggested_category, target.category))
           .map((invoice) => {
@@ -1200,6 +1236,7 @@ export function createInvoiceRepository(db, {
               + (amountFit ? 20 : 10)));
             const rationale = [
               `date_within_${dayDistance}_days`,
+              "invoice_on_or_after_payment_date",
               categoryExact ? "category_exact" : "category_compatible",
               amountFit ? "amount_within_missing" : "partial_amount_only",
             ];
@@ -1283,12 +1320,6 @@ export function createInvoiceRepository(db, {
             target.expense_id,
             expenseRemainders.get(target.expense_id) - proposedCents,
           );
-          if (target.payment_id) {
-            paymentRemainders.set(
-              target.payment_id,
-              paymentRemainders.get(target.payment_id) - proposedCents,
-            );
-          }
           created.push(candidateFromRow(db.prepare(`
             SELECT * FROM invoice_match_candidates WHERE id = $id
           `).get({ $id: id })));
@@ -1325,7 +1356,7 @@ export function createInvoiceRepository(db, {
       }
       const rows = db.prepare(`
         SELECT expense.id AS expense_id, expense.reference_code, expense.occurred_on,
-               expense.category, payment.id AS payment_id,
+               expense.category, payment.id AS payment_id, payment.paid_at,
                payment.reimbursement_cents,
                COALESCE((
                  SELECT SUM(match.allocated_cents)
@@ -1370,6 +1401,11 @@ export function createInvoiceRepository(db, {
         const weekPriority = Boolean(priorityWeekStart && row.occurred_on >= priorityWeekStart && row.occurred_on <= priorityEnd);
         const dayDistance = calendarDayDistance(invoice.issued_on, row.occurred_on);
         const dateWindowEligible = dayDistance <= AUTO_MATCH_MAX_DATE_DISTANCE_DAYS;
+        const dateOrderEligible = invoiceIssuedOnOrAfterPaymentDate(
+          invoice.issued_on,
+          row.paid_at,
+          row.occurred_on,
+        );
         return {
           expenseId: row.expense_id,
           expenseReferenceCode: row.reference_code,
@@ -1382,10 +1418,14 @@ export function createInvoiceRepository(db, {
           weekPriority,
           dayDistance,
           dateWindowEligible,
+          dateOrderEligible,
           rationale: [
             exactAmount ? "amount_exact" : "amount_partial_or_different",
             weekPriority ? "priority_week" : "outside_priority_week",
             `issued_date_distance_${dayDistance}_days`,
+            dateOrderEligible
+              ? "invoice_on_or_after_payment_date"
+              : "invoice_before_payment_date",
             dateWindowEligible
               ? `date_within_${AUTO_MATCH_MAX_DATE_DISTANCE_DAYS}_day_window`
               : `date_outside_${AUTO_MATCH_MAX_DATE_DISTANCE_DAYS}_day_window`,
@@ -1399,9 +1439,11 @@ export function createInvoiceRepository(db, {
           || left.expenseId.localeCompare(right.expenseId));
 
       const exact = candidates.filter((candidate) => candidate.exactAmount);
-      const exactPriority = exact.filter((candidate) => candidate.weekPriority);
+      const exactPriority = exact.filter((candidate) => candidate.weekPriority && candidate.dateOrderEligible);
       const exactCrossWeekWithinWindow = exact.filter(
-        (candidate) => !candidate.weekPriority && candidate.dateWindowEligible,
+        (candidate) => !candidate.weekPriority
+          && candidate.dateWindowEligible
+          && candidate.dateOrderEligible,
       );
       const exactPool = exactPriority.length ? exactPriority : exactCrossWeekWithinWindow;
       if (exactPool.length === 1) {
@@ -1431,6 +1473,8 @@ export function createInvoiceRepository(db, {
         candidates: candidates.slice(0, 5),
         reason: exactPool.length > 1
           ? "multiple_exact_amounts"
+          : exact.length > 0 && exact.every((candidate) => !candidate.dateOrderEligible)
+            ? "invoice_before_payment_date"
           : exact.length > 0 && exact.every((candidate) => !candidate.weekPriority && !candidate.dateWindowEligible)
             ? "exact_amount_outside_date_window"
             : "no_unique_exact_amount",
@@ -1454,6 +1498,11 @@ export function createInvoiceRepository(db, {
     const invoice = activeInvoice.get({ $id: candidate.invoice_id, $owner: owner });
     const expense = activeExpenseById(candidate.expense_id, owner);
     if (!invoice || !expense) return null;
+    // Candidate acceptance is allowed only for an expense whose ticket state
+    // was explicitly set to substitute by the user. A suggestion itself must
+    // never promote an ordinary invoice or a no-invoice confirmation into a
+    // substitute invoice.
+    if (expense.invoice_type !== "substitute") return null;
     if (
       !invoice.issued_on
       || calendarDayDistance(invoice.issued_on, expense.occurred_on) > AUTO_MATCH_MAX_DATE_DISTANCE_DAYS
@@ -1469,18 +1518,7 @@ export function createInvoiceRepository(db, {
     ) {
       return null;
     }
-    const confirmation = db.prepare(`
-      SELECT 1
-      FROM travel_expense_no_invoice_confirmations
-      WHERE owner = $owner AND expense_id = $expenseId AND revoked_at IS NULL
-        AND (($paymentId IS NULL AND payment_id IS NULL) OR payment_id = $paymentId)
-      LIMIT 1
-    `).get({
-      $owner: owner,
-      $expenseId: candidate.expense_id,
-      $paymentId: candidate.payment_id,
-    });
-    if (!confirmation) return null;
+    let candidatePaidAt = latestExpensePaidAt(expense.id);
     const proposedCents = Number(candidate.proposed_cents);
     if (
       proposedCents <= 0
@@ -1491,7 +1529,7 @@ export function createInvoiceRepository(db, {
     }
     if (candidate.payment_id) {
       const payment = db.prepare(`
-        SELECT reimbursement_cents
+        SELECT reimbursement_cents, paid_at
         FROM travel_expense_payments
         WHERE id = $id AND expense_id = $expenseId
       `).get({ $id: candidate.payment_id, $expenseId: expense.id });
@@ -1501,6 +1539,10 @@ export function createInvoiceRepository(db, {
       ) {
         return null;
       }
+      candidatePaidAt = payment.paid_at;
+    }
+    if (!invoiceIssuedOnOrAfterPaymentDate(invoice.issued_on, candidatePaidAt, expense.occurred_on)) {
+      return null;
     }
     return { expense, invoice };
   }

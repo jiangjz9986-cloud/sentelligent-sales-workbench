@@ -68,7 +68,7 @@ export function WeeklyExpenseOverview({ summary, coverage = null, week, onNaviga
       <section className="expense-invoice-week-summary" aria-label="本周发票统计">
         <header><div><strong>本周发票统计</strong><p>发票、替票和无票分别记录；候选组合仍需人工确认。</p></div><button className="expense-text-button" type="button" onClick={() => onNavigate("invoices")}>查看发票管理<ArrowRight size={14} /></button></header>
         <div className="invoice-coverage-strip">
-          <span><small>电子发票覆盖</small><strong>{formatCny(coverage?.electronicInvoiceCoverageCents ?? 0)}</strong></span>
+          <span><small>普通发票覆盖</small><strong>{formatCny(coverage?.electronicInvoiceCoverageCents ?? 0)}</strong></span>
           <span><small>替票覆盖</small><strong>{formatCny(coverage?.substituteInvoiceCoverageCents ?? 0)}</strong></span>
           <span><small>无票金额</small><strong>{formatCny(coverage?.noInvoiceConfirmedCents ?? 0)}</strong></span>
           <span className="warning"><small>尚缺发票</small><strong>{formatCny(coverage?.missingInvoiceCents ?? 0)}</strong></span>

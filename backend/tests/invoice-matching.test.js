@@ -67,6 +67,10 @@ function createExpense(overrides = {}) {
   });
 }
 
+function createSubstituteExpense(overrides = {}) {
+  return createExpense({ invoiceType: "substitute", ...overrides });
+}
+
 function invoiceRecognition(overrides = {}) {
   return {
     status: "unmatched",
@@ -202,8 +206,30 @@ describe("invoice matching and weekly coverage", () => {
     assert.equal(invoiceRepository.getInvoice(invoice.id, { owner: "owner-a" }).status, "unmatched");
   });
 
-  it("rejects removing a payment referenced by invoice workflow evidence", () => {
+  it("does not automatically match an exact amount when the invoice predates payment", () => {
     const expense = createExpense({
+      occurredOn: "2026-08-05",
+      payments: [payment({ paidAt: "2026-08-05T18:00:00+08:00" })],
+    });
+    const invoice = createInvoice("invoice-before-payment", {
+      issuedOn: "2026-08-04",
+    });
+
+    const result = invoiceRepository.autoMatchInvoice({
+      owner: "owner-a",
+      actor: "owner-a",
+      invoiceId: invoice.id,
+      priorityWeekStart: "2026-08-03",
+    });
+
+    assert.equal(result.status, "review_required");
+    assert.equal(result.reason, "invoice_before_payment_date");
+    assert.equal(result.candidates[0].dateOrderEligible, false);
+    assert.deepEqual(invoiceRepository.listMatches({ owner: "owner-a", invoiceId: invoice.id }), []);
+  });
+
+  it("rejects removing a payment referenced by invoice workflow evidence", () => {
+    const expense = createSubstituteExpense({
       payments: [
         payment({ amountCents: 1000, reimbursementCents: 1000 }),
         payment({ paidAt: "2026-08-04T13:30:00+08:00" }),
@@ -418,8 +444,13 @@ describe("invoice matching and weekly coverage", () => {
 
   it("separates electronic and substitute coverage and reports unused warehouse value", () => {
     const expense = createExpense({
-      purpose: "电子票与替票混合住宿",
+      purpose: "电子发票住宿",
       payments: [payment({ amountCents: 10000, reimbursementCents: 10000 })],
+    });
+    const substituteExpense = createSubstituteExpense({
+      occurredOn: "2026-08-05",
+      purpose: "人工选择替票住宿",
+      payments: [payment({ paidAt: "2026-08-05T18:00:00+08:00", amountCents: 2000, reimbursementCents: 2000 })],
     });
     const electronic = createInvoice("coverage-electronic", { totalCents: 3000 });
     const substitute = createInvoice("coverage-substitute", { totalCents: 2000 });
@@ -438,8 +469,8 @@ describe("invoice matching and weekly coverage", () => {
       owner: "owner-a",
       actor: "owner-a",
       invoiceId: substitute.id,
-      expenseReferenceCode: expense.referenceCode,
-      paymentId: expense.payments[0].id,
+      expenseReferenceCode: substituteExpense.referenceCode,
+      paymentId: substituteExpense.payments[0].id,
       allocatedCents: 2000,
       matchMethod: "rule_candidate",
     });
@@ -449,15 +480,15 @@ describe("invoice matching and weekly coverage", () => {
       weekStart: "2026-08-03",
     }), {
       weekStart: "2026-08-03",
-      reimbursementCents: 10000,
+      reimbursementCents: 12000,
       confirmedCoverageCents: 5000,
       electronicInvoiceCoverageCents: 3000,
       substituteInvoiceCoverageCents: 2000,
-      missingInvoiceCents: 5000,
+      missingInvoiceCents: 7000,
       noInvoiceConfirmedCents: 0,
-      unacknowledgedMissingCents: 5000,
+      unacknowledgedMissingCents: 7000,
       invoiceWarehouseAvailableCents: 8000,
-      expenseCount: 1,
+      expenseCount: 2,
     });
   });
 
@@ -720,7 +751,7 @@ describe("invoice matching and weekly coverage", () => {
   });
 
   it("caps generated candidates at the expense remainder across payment confirmations", () => {
-    const expense = createExpense({
+    const expense = createSubstituteExpense({
       payments: [
         payment({ amountCents: 6000, reimbursementCents: 6000 }),
         payment({ paidAt: "2026-08-04T19:00:00+08:00", amountCents: 4000, reimbursementCents: 4000 }),
@@ -771,7 +802,7 @@ describe("invoice matching and weekly coverage", () => {
   });
 
   it("blocks invoice edits while an active rule candidate exists", () => {
-    const expense = createExpense();
+    const expense = createSubstituteExpense();
     invoiceRepository.confirmNoInvoice({
       owner: "owner-a",
       actor: "owner-a",
@@ -803,7 +834,7 @@ describe("invoice matching and weekly coverage", () => {
   });
 
   it("revalidates rule candidates against current invoice facts before acceptance", () => {
-    const expense = createExpense();
+    const expense = createSubstituteExpense();
     invoiceRepository.confirmNoInvoice({
       owner: "owner-a",
       actor: "owner-a",
@@ -836,8 +867,62 @@ describe("invoice matching and weekly coverage", () => {
     assert.equal(invoiceRepository.listMatches({ owner: "owner-a" }).length, 0);
   });
 
+  it("generates replacement candidates only after manual substitute selection", () => {
+    const ordinaryExpense = createExpense({ invoiceType: "electronic" });
+    invoiceRepository.confirmNoInvoice({
+      owner: "owner-a",
+      actor: "owner-a",
+      expenseId: ordinaryExpense.id,
+      paymentId: ordinaryExpense.payments[0].id,
+      reason: "普通发票待补",
+    });
+    const substituteExpense = createSubstituteExpense();
+    const invoice = createInvoice("manual-substitute-only");
+
+    const candidates = invoiceRepository.generateMatchCandidates({
+      owner: "owner-a",
+      actor: "owner-a",
+      weekStart: "2026-08-03",
+    });
+
+    assert.deepEqual(candidates.map((candidate) => [candidate.expenseId, candidate.invoiceId, candidate.paymentId]), [
+      [substituteExpense.id, invoice.id, null],
+    ]);
+    assert.equal(invoiceRepository.listMatchCandidates({
+      owner: "owner-a",
+      weekStart: "2026-08-03",
+      expenseId: ordinaryExpense.id,
+    }).length, 0);
+  });
+
+  it("rechecks the manual substitute selection before accepting a candidate", () => {
+    const expense = createSubstituteExpense();
+    const invoice = createInvoice("manual-substitute-recheck");
+    const [candidate] = invoiceRepository.generateMatchCandidates({
+      owner: "owner-a",
+      actor: "owner-a",
+      weekStart: "2026-08-03",
+    });
+    db.prepare(`
+      UPDATE travel_expenses
+      SET invoice_type = 'electronic', version = version + 1
+      WHERE id = $id
+    `).run({ $id: expense.id });
+
+    assert.throws(
+      () => invoiceRepository.acceptMatchCandidate(candidate.id, {
+        owner: "owner-a",
+        actor: "owner-a",
+        expectedVersion: candidate.version,
+      }),
+      (error) => error instanceof InvoiceMatchConflictError
+        && error.code === "CANDIDATE_STALE",
+    );
+    assert.equal(invoiceRepository.listMatches({ owner: "owner-a", invoiceId: invoice.id }).length, 0);
+  });
+
   it("generates date- and category-compatible suggestions without confirming or overfilling", () => {
-    const expense = createExpense();
+    const expense = createSubstituteExpense();
     invoiceRepository.confirmNoInvoice({
       owner: "owner-a",
       actor: "owner-a",
@@ -930,7 +1015,7 @@ describe("invoice matching and weekly coverage", () => {
       matchMethod: "manual_selection",
     });
 
-    const noInvoiceExpense = createExpense({
+    const noInvoiceExpense = createSubstituteExpense({
       occurredOn: "2026-08-06",
       purpose: "无票住宿",
       payments: [payment({ paidAt: "2026-08-06T18:00:00+08:00" })],
@@ -969,7 +1054,7 @@ describe("invoice matching and weekly coverage", () => {
   });
 
   it("accepts or rejects a suggested candidate with optimistic versioning", () => {
-    const acceptedExpense = createExpense();
+    const acceptedExpense = createSubstituteExpense();
     invoiceRepository.confirmNoInvoice({
       owner: "owner-a",
       actor: "owner-a",
@@ -1004,7 +1089,7 @@ describe("invoice matching and weekly coverage", () => {
       InvoiceVersionConflictError,
     );
 
-    const rejectedExpense = createExpense({
+    const rejectedExpense = createSubstituteExpense({
       occurredOn: "2026-08-05",
       purpose: "拒绝候选住宿",
       payments: [payment({ paidAt: "2026-08-05T18:00:00+08:00" })],
@@ -1039,6 +1124,7 @@ describe("invoice matching and weekly coverage", () => {
       payments: [payment({ amountCents: 3000, reimbursementCents: 3000 })],
     });
     const partialInvoice = createInvoice("partial-remainder", {
+      issuedOn: "2026-08-06",
       amountExTaxCents: 9434,
       taxCents: 566,
       totalCents: 10000,
@@ -1052,7 +1138,7 @@ describe("invoice matching and weekly coverage", () => {
       matchMethod: "manual_selection",
     });
 
-    const firstWeekExpense = createExpense({
+    const firstWeekExpense = createSubstituteExpense({
       occurredOn: "2026-08-06",
       purpose: "第一周缺票住宿",
       payments: [payment({
@@ -1076,7 +1162,7 @@ describe("invoice matching and weekly coverage", () => {
     });
     assert.deepEqual(firstWeek.map((item) => [item.invoiceId, item.proposedCents]), [[partialInvoice.id, 7000]]);
 
-    const secondWeekExpense = createExpense({
+    const secondWeekExpense = createSubstituteExpense({
       occurredOn: "2026-08-11",
       purpose: "第二周缺票住宿",
       payments: [payment({

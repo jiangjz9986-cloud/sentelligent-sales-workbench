@@ -465,7 +465,7 @@ describe("confirmed seven-column expense list export", () => {
         id: "electronic-1",
         expenseId: "expense-2",
         state: "confirmed",
-        matchMethod: "manual",
+        matchMethod: "rule_candidate",
         allocatedCents: 2400,
       },
       {
@@ -483,7 +483,9 @@ describe("confirmed seven-column expense list export", () => {
         allocatedCents: 500,
       },
     ];
-    const rows = buildExpenseListRows(expenses, { matches });
+    const rows = buildExpenseListRows(expenses.map((expense) => (
+      expense.id === "expense-1" ? { ...expense, invoiceType: "substitute" } : expense
+    )), { matches });
 
     assert.deepEqual(buildExpenseListTotals(rows, { matches }), {
       expenseTotalTitle: "费用合计",
@@ -493,7 +495,12 @@ describe("confirmed seven-column expense list export", () => {
       substituteInvoiceTotalCents: 17990,
       substituteInvoiceTotalLabel: "¥179.90",
     });
-    assert.deepEqual(buildExpenseListExport({ expenses, context: { matches } }).totals, {
+    assert.deepEqual(buildExpenseListExport({
+      expenses: expenses.map((expense) => (
+        expense.id === "expense-1" ? { ...expense, invoiceType: "substitute" } : expense
+      )),
+      context: { matches },
+    }).totals, {
       expenseTotalTitle: "费用合计",
       expenseTotalCents: 6400,
       expenseTotalLabel: "¥64.00",

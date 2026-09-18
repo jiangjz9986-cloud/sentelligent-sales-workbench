@@ -280,7 +280,7 @@ describe("six-field expense ledger", () => {
   });
 
   it("derives electronic, substitute, no-invoice, and still-missing states without auto-confirming", () => {
-    const expense = expenseWithPayments(payments, { id: "expense-states" });
+    const expense = expenseWithPayments(payments, { id: "expense-states", invoiceType: "substitute" });
     const states = deriveExpenseInvoiceStates(expense, {
       matches: [
         {
@@ -309,12 +309,27 @@ describe("six-field expense ledger", () => {
     });
 
     assert.deepEqual(states.map((item) => item.id), [
-      "electronic_invoice",
       "substitute_invoice",
       "no_invoice",
       "invoice_pending",
     ]);
     assert.equal(states.find((item) => item.id === "invoice_pending").amountCents, 500);
+  });
+
+  it("does not derive a substitute state from an automatic rule match", () => {
+    const expense = expenseWithPayments(payments, { id: "automatic-match-only" });
+    const states = deriveExpenseInvoiceStates(expense, {
+      matches: [{
+        id: "automatic-match",
+        expenseId: expense.id,
+        state: "confirmed",
+        matchMethod: "rule_candidate",
+        allocatedCents: 1000,
+      }],
+    });
+
+    assert.deepEqual(states.map((item) => item.id), ["electronic_invoice", "invoice_pending"]);
+    assert.equal(states.some((item) => item.id === "substitute_invoice"), false);
   });
 
   it("falls back to the legacy purpose when older rows have no notes", () => {

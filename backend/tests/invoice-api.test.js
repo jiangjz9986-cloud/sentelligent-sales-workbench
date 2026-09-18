@@ -457,7 +457,7 @@ describe("authenticated invoice API", () => {
 
   it("confirms no-invoice status and generates suggestions without auto-confirming", async () => {
     await startHarness();
-    const expense = await createExpense();
+    const expense = await createExpense({ invoiceType: "substitute" });
     const otherExpense = await createExpense({
       occurredOn: "2026-08-12",
       purpose: "Another trip expense",
@@ -536,6 +536,7 @@ describe("authenticated invoice API", () => {
     const noInvoiceExpense = await createExpense({
       occurredOn: "2026-08-05",
       purpose: "刷新无票状态",
+      invoiceType: "substitute",
       payments: [{
         ...expenseBody().payments[0],
         paidAt: "2026-08-05T18:00:00+08:00",
@@ -582,8 +583,15 @@ describe("authenticated invoice API", () => {
   });
 
   it("accepts and rejects candidates with versioned idempotent audit records", async () => {
-    await startHarness();
-    const acceptedExpense = await createExpense();
+    await startHarness({
+      invoiceRecognizer: async () => recognized({
+        fields: {
+          ...recognized().fields,
+          issuedOn: "2026-08-05",
+        },
+      }),
+    });
+    const acceptedExpense = await createExpense({ invoiceType: "substitute" });
     await request(`/api/travel-expenses/${encodeURIComponent(acceptedExpense.id)}/no-invoice`, {
       method: "POST",
       headers: { "If-Match": '"1"', "Idempotency-Key": "candidate-accept-no-invoice" },
@@ -628,6 +636,7 @@ describe("authenticated invoice API", () => {
     const rejectedExpense = await createExpense({
       occurredOn: "2026-08-05",
       purpose: "拒绝候选住宿",
+      invoiceType: "substitute",
       payments: [{
         ...expenseBody().payments[0],
         paidAt: "2026-08-05T18:00:00+08:00",

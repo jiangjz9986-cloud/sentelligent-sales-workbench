@@ -8,7 +8,7 @@
 
 | 项目 | 状态 |
 | --- | --- |
-| 当前版本 | 当前工作树版本字段为 `0.13.3`；生产 `current` 已绑定 immutable release `sentelligent-sales-workbench-44e6d36c5aa9`，源码提交为 `44e6d36c5aa9b30285ee63ce9b3a48a3e197edf9`，AI 平台按 P1 `disabled/local-simulated` 边界运行 |
+| 当前版本 | 当前工作树版本字段为 `0.13.4`；生产 `current` 已绑定 immutable release `sentelligent-sales-workbench-44e6d36c5aa9`，源码提交为 `44e6d36c5aa9b30285ee63ce9b3a48a3e197edf9`，AI 平台按 P1 `disabled/local-simulated` 边界运行 |
 | 模型边界 | 本次开发、测试和 Mac Chrome 验收使用 Codex `gpt-5.6-luna / max`；业务系统 AI 助手使用 DeepSeek provider `deepseek`、model `deepseek-flash`，两者不混用 |
 | 生产身份 | 以服务器 `releases/` 当前 `current` 指向目录的 manifest（完整 commit）为准；`docs/releases/vX.Y.Z.md` 逐版保存部署证据表 |
 | 发布方式 | 常规发布必须来自已合并的 `origin/main`、唯一正式 tag 和 GitHub Release 生成的 Linux/x64 不可变制品；历史本地 exact-commit 授权例外只适用于 `v0.6.15` 至 `v0.6.24` |
