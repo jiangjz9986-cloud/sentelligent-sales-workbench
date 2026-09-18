@@ -91,6 +91,40 @@ test("enqueue is idempotent, hashes the key, and rejects confirmation secrets", 
   });
 });
 
+test("supports a short intake window without leasing the first batch draft early", () => {
+  withDatabase((db) => {
+    const clock = makeClock();
+    const repository = createWeixinConfirmationOutboxRepository(db, {
+      clock: clock.now,
+      idFactory: () => "outbox-batch-window",
+    });
+    const availableAt = new Date(clock.now().getTime() + 3_000).toISOString();
+    const created = repository.enqueue({
+      owner: "owner-1",
+      conversationId: "conversation-1",
+      idempotencyKey: "batch-window-1",
+      payload: { kind: "confirmation", batchId: "batch-1" },
+      availableAt,
+    });
+    assert.equal(created.availableAt, availableAt);
+    assert.equal(repository.leaseNext({ renderMessage: () => "too early" }), null);
+
+    const extended = new Date(clock.now().getTime() + 5_000).toISOString();
+    const deferred = repository.deferQueued(created.id, extended);
+    assert.equal(deferred.availableAt, extended);
+    clock.advance(4_999);
+    assert.equal(repository.leaseNext({ renderMessage: () => "still too early" }), null);
+    clock.advance(1);
+    const lease = repository.leaseNext({ renderMessage: (item) => item.payload.batchId });
+    assert.equal(lease.message, "batch-1");
+    repository.ackSuccess(lease.item.id, { leaseToken: lease.leaseToken });
+
+    const sent = repository.deferQueued(created.id, new Date(clock.now().getTime() + 10_000).toISOString());
+    assert.equal(sent.status, "sent");
+    assert.equal(sent.availableAt, extended);
+  });
+});
+
 test("lease renders only in memory, fences concurrent workers, and acknowledges success", () => {
   withDatabase((db) => {
     const clock = makeClock();

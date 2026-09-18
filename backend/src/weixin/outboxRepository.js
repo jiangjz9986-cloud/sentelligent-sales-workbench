@@ -28,6 +28,12 @@ function iso(clock) {
   return date.toISOString();
 }
 
+function timestamp(value, name) {
+  const date = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(date.getTime())) throw new TypeError(`${name} must be a valid timestamp`);
+  return date.toISOString();
+}
+
 function hash(value) {
   return createHash("sha256").update(String(value), "utf8").digest("hex");
 }
@@ -107,6 +113,9 @@ export function createWeixinConfirmationOutboxRepository(db, {
     const payloadHash = hash(encoded);
     const keyHash = hash(idempotencyKey);
     const now = iso(clock);
+    const availableAt = input.availableAt === undefined || input.availableAt === null
+      ? now
+      : timestamp(input.availableAt, "availableAt");
     return withImmediateTransaction(db, () => {
       const existing = selectByKey.get({ $owner: owner, $keyHash: keyHash });
       if (existing) {
@@ -121,8 +130,8 @@ export function createWeixinConfirmationOutboxRepository(db, {
           id, owner, conversation_id, idempotency_key_hash, payload_json, payload_hash,
           status, attempt_count, available_at, created_at, updated_at
         ) VALUES ($id, $owner, $conversationId, $keyHash, $payloadJson, $payloadHash,
-          'queued', 0, $now, $now, $now)
-      `).run({ $id: id, $owner: owner, $conversationId: conversationId, $keyHash: keyHash, $payloadJson: encoded, $payloadHash: payloadHash, $now: now });
+          'queued', 0, $availableAt, $now, $now)
+      `).run({ $id: id, $owner: owner, $conversationId: conversationId, $keyHash: keyHash, $payloadJson: encoded, $payloadHash: payloadHash, $availableAt: availableAt, $now: now });
       return { ...item(selectById.get({ $id: id })), replayed: false };
     });
   }
@@ -313,6 +322,23 @@ export function createWeixinConfirmationOutboxRepository(db, {
     });
   }
 
+  // Extend a queued item's availability while a short inbound batch is still
+  // collecting. A leased or already-sent message is left untouched: once the
+  // provider has seen it, the runtime must not pretend it can be withdrawn.
+  function deferQueued(idValue, availableAtValue) {
+    const id = text(idValue, "id", 200);
+    const availableAt = timestamp(availableAtValue, "availableAt");
+    const now = iso(clock);
+    return withImmediateTransaction(db, () => {
+      db.prepare(`
+        UPDATE weixin_confirmation_outbox
+        SET available_at = $availableAt, updated_at = $now
+        WHERE id = $id AND status = 'queued' AND available_at < $availableAt
+      `).run({ $id: id, $availableAt: availableAt, $now: now });
+      return item(selectById.get({ $id: id }));
+    });
+  }
+
   // Close queued or leased messages that refer to an older bookkeeping
   // draft. A correction/cancellation must never leave a stale confirmation
   // message waiting to be delivered after the user has already acted on it.
@@ -418,6 +444,7 @@ export function createWeixinConfirmationOutboxRepository(db, {
     defer,
     discardLeased,
     requeueFailed,
+    deferQueued,
     closePending,
     discardExpiredOpsAlerts,
     isLeaseCurrent,

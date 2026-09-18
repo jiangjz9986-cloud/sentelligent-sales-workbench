@@ -26,6 +26,7 @@ export const SHORTCUT_ADVANCE_ALLOCATION_KIND = "advance_allocation";
 const CONFIRMATION_WARNING = "WEIXIN_CONFIRMATION_REQUIRED";
 const MAX_MESSAGE_LENGTH = 20_000;
 const SHORTCUT_PENDING_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+const DEFAULT_BOOKKEEPING_BATCH_WINDOW_MS = 3_000;
 const DRAFT_REFERENCE_RE = /BK-[0-9A-F]{12}|(?:编号\s*[：:]\s*)([0-9]{12})/u;
 const EXPLICIT_TRIP_REGION_SOURCES = new Set(["text", "user_correction"]);
 
@@ -249,7 +250,11 @@ function draftFromEntry(entry) {
   });
 }
 
-function renderDraftMessage(entry, { prefix = "检测到一笔新记账，请确认！", reference = null } = {}) {
+function renderDraftMessage(entry, {
+  prefix = "检测到一笔新记账，请确认！",
+  reference = null,
+  batchPosition = null,
+} = {}) {
   const draft = draftFromEntry(entry);
   const { analysis } = entryAnalysis(entry);
   const fields = draft.fields;
@@ -272,7 +277,14 @@ function renderDraftMessage(entry, { prefix = "检测到一笔新记账，请确
   const aiStatus = reviewWarnings.length
     ? `待复核：${[...new Set(reviewWarnings.slice(0, 4).map(warningText))].join("、")}`
     : "已识别，待你确认";
+  const batchLines = batchPosition?.total > 1
+    ? [
+        `已收到付款凭证，共识别 ${batchPosition.total} 笔，正在逐笔发送待确认记账信息。当前为第 ${batchPosition.sequence} 笔`,
+        "",
+      ]
+    : [];
   const lines = [
+    ...batchLines,
     "【小小提醒！新增一条待记账信息】",
     `编号：${number}`,
     `类型：${entryType}`,
@@ -542,6 +554,8 @@ export function createShortcutBookkeepingAssistantRuntime({
   outboxRepository,
   bindingsRepository,
   idFactory = randomUUID,
+  batchIdFactory = randomUUID,
+  batchWindowMs = config?.nodeEnv === "production" ? DEFAULT_BOOKKEEPING_BATCH_WINDOW_MS : 0,
   clock = () => new Date(),
   confirmationSecret,
 } = {}) {
@@ -551,6 +565,10 @@ export function createShortcutBookkeepingAssistantRuntime({
   if (!bindingsRepository || typeof bindingsRepository.activeByAccount !== "function") {
     throw new TypeError("bindingsRepository is required for the shortcut WeChat assistant runtime");
   }
+  if (!Number.isSafeInteger(batchWindowMs) || batchWindowMs < 0 || batchWindowMs > 60_000) {
+    throw new TypeError("batchWindowMs must be a safe integer between 0 and 60000");
+  }
+  if (typeof batchIdFactory !== "function") throw new TypeError("batchIdFactory must be a function");
   const secret = secretBuffer(confirmationSecret);
   const enabled = config?.weixinBookkeepingConfirmationEnabled === true;
 
@@ -604,6 +622,149 @@ export function createShortcutBookkeepingAssistantRuntime({
       channel: SHORTCUT_BOOKKEEPING_CHANNEL,
       conversationId: row.conversation_id,
     });
+  }
+
+  function batchDeadline(lastReceivedAt) {
+    const parsed = Date.parse(String(lastReceivedAt ?? ""));
+    if (!Number.isFinite(parsed)) return null;
+    return new Date(parsed + batchWindowMs).toISOString();
+  }
+
+  function batchItemForAction(account, actionId) {
+    const normalizedAccount = requiredText(account, "account", 200);
+    const normalizedActionId = requiredText(actionId, "actionId", 200);
+    const statement = db.prepare(`
+      SELECT batch.id AS batch_id,
+             batch.owner,
+             batch.conversation_id,
+             batch.status AS batch_status,
+             batch.started_at,
+             batch.last_received_at,
+             item.action_id,
+             item.sequence,
+             (
+               SELECT COUNT(*)
+               FROM weixin_bookkeeping_batch_items total_item
+               WHERE total_item.batch_id = item.batch_id
+             ) AS total
+      FROM weixin_bookkeeping_batch_items item
+      JOIN weixin_bookkeeping_batches batch ON batch.id = item.batch_id
+      WHERE item.owner = $owner AND item.action_id = $actionId
+      LIMIT 1
+    `);
+    // A narrow compatibility harness may provide only the legacy action query
+    // surface. In that case no batch can be observed, so preserve the old
+    // single-receipt behavior; real SQLite connections always expose `.get`.
+    if (!statement || typeof statement.get !== "function") return null;
+    return statement.get({ $owner: normalizedAccount, $actionId: normalizedActionId });
+  }
+
+  function openBatchForConversation(account, conversationId, now) {
+    const cutoff = new Date(Date.parse(now) - batchWindowMs).toISOString();
+    return db.prepare(`
+      SELECT batch.*
+      FROM weixin_bookkeeping_batches batch
+      WHERE batch.owner = $owner
+        AND batch.conversation_id = $conversationId
+        AND batch.status = 'open'
+        AND batch.last_received_at >= $cutoff
+        AND EXISTS (
+          SELECT 1
+          FROM weixin_bookkeeping_batch_items item
+          JOIN assistant_pending_actions action ON action.id = item.action_id
+          WHERE item.batch_id = batch.id
+            AND item.owner = $owner
+            AND action.owner = $owner
+            AND action.channel = $channel
+            AND action.action_type = $actionType
+            AND action.status IN ('pending', 'confirmed', 'processing')
+        )
+      ORDER BY batch.last_received_at DESC, batch.id DESC
+      LIMIT 1
+    `).get({
+      $owner: requiredText(account, "account", 200),
+      $conversationId: requiredText(conversationId, "conversationId", 300),
+      $cutoff: cutoff,
+      $channel: SHORTCUT_BOOKKEEPING_CHANNEL,
+      $actionType: SHORTCUT_BOOKKEEPING_ACTION,
+    });
+  }
+
+  function deferBatchOutbox(batchId, lastReceivedAt) {
+    if (batchWindowMs <= 0 || typeof outboxRepository.deferQueued !== "function") return;
+    const availableAt = batchDeadline(lastReceivedAt);
+    if (!availableAt) return;
+    const rows = db.prepare(`
+      SELECT id
+      FROM weixin_confirmation_outbox
+      WHERE status = 'queued'
+        AND json_extract(payload_json, '$.batchId') = $batchId
+    `).all({ $batchId: requiredText(batchId, "batchId", 200) });
+    for (const row of rows) {
+      try {
+        outboxRepository.deferQueued(row.id, availableAt);
+      } catch {
+        // The outbox remains durable; a concurrent lease or provider retry is
+        // allowed to win rather than blocking financial capture.
+      }
+    }
+  }
+
+  // Attach an action to the most recent short-lived intake batch, or create a
+  // new one. The transaction makes concurrent image events converge on one
+  // batch instead of producing two competing batch counts.
+  function ensureBatchMembership({ account, action, receivedAt = iso(clock) } = {}) {
+    const payload = actionPayload(action);
+    if (!payload || payload.kind === SHORTCUT_ADVANCE_ALLOCATION_KIND) return null;
+    const normalizedAccount = requiredText(account, "account", 200);
+    const conversationId = conversationFor(normalizedAccount);
+    const actionId = requiredText(action.id, "actionId", 200);
+    const existing = batchItemForAction(normalizedAccount, actionId);
+    if (existing) return { ...existing, added: false };
+    const now = receivedAt instanceof Date ? receivedAt.toISOString() : iso(() => new Date(receivedAt));
+    const result = withImmediateTransaction(db, () => {
+      const rechecked = batchItemForAction(normalizedAccount, actionId);
+      if (rechecked) return { ...rechecked, added: false };
+      let batch = openBatchForConversation(normalizedAccount, conversationId, now);
+      if (!batch) {
+        const generated = requiredText(batchIdFactory(), "batchId", 200);
+        const id = `weixin-bookkeeping-batch:${generated}`;
+        db.prepare(`
+          INSERT INTO weixin_bookkeeping_batches (
+            id, owner, conversation_id, status, started_at, last_received_at,
+            created_at, updated_at
+          ) VALUES ($id, $owner, $conversationId, 'open', $now, $now, $now, $now)
+        `).run({ $id: id, $owner: normalizedAccount, $conversationId: conversationId, $now: now });
+        batch = db.prepare("SELECT * FROM weixin_bookkeeping_batches WHERE id = $id").get({ $id: id });
+      }
+      const nextSequence = Number(db.prepare(`
+        SELECT COALESCE(MAX(sequence), 0) + 1 AS next_sequence
+        FROM weixin_bookkeeping_batch_items
+        WHERE batch_id = $batchId
+      `).get({ $batchId: batch.id }).next_sequence);
+      db.prepare(`
+        INSERT INTO weixin_bookkeeping_batch_items (
+          batch_id, owner, action_id, sequence, created_at
+        ) VALUES ($batchId, $owner, $actionId, $sequence, $now)
+      `).run({
+        $batchId: batch.id,
+        $owner: normalizedAccount,
+        $actionId: actionId,
+        $sequence: nextSequence,
+        $now: now,
+      });
+      db.prepare(`
+        UPDATE weixin_bookkeeping_batches
+        SET last_received_at = $now, updated_at = $now
+        WHERE id = $batchId AND owner = $owner
+      `).run({ $batchId: batch.id, $owner: normalizedAccount, $now: now });
+      return {
+        ...batchItemForAction(normalizedAccount, actionId),
+        added: true,
+      };
+    });
+    if (result?.added) deferBatchOutbox(result.batch_id, result.last_received_at);
+    return result;
   }
 
   function sourceDocumentFor(entry, account) {
@@ -1019,6 +1180,13 @@ export function createShortcutBookkeepingAssistantRuntime({
     const entry = shortcutBookkeepingRepository.getReview(payload.entryId, { owner: account });
     if (!entry || entry.status !== "review_required") return null;
 
+    const batch = kind === SHORTCUT_ADVANCE_ALLOCATION_KIND
+      ? null
+      : batchItemForAction(account, head.id);
+    const batchPayload = batch
+      ? { batchId: batch.batch_id }
+      : {};
+
     const latest = outboxRepository.latestForEntry?.({ owner: account, entryId: payload.entryId });
     const latestPayload = latest?.payload;
     const currentVersion = Number(head.version);
@@ -1033,17 +1201,70 @@ export function createShortcutBookkeepingAssistantRuntime({
         // remains authoritative and a later correction will receive a new key.
       }
     }
-    return enqueue(account, conversationFor(account), head, payload.entryId, kind, extraPayload);
+    const availableAt = kind === "confirmation" && batchWindowMs > 0
+      ? batchDeadline(batch?.last_received_at)
+      : null;
+    return enqueue(
+      account,
+      conversationFor(account),
+      head,
+      payload.entryId,
+      kind,
+      { ...batchPayload, ...extraPayload },
+      { availableAt },
+    );
   }
 
   function advanceBookkeepingQueue(account) {
+    let outbox = null;
     try {
-      return enqueueQueueHead(account);
+      outbox = enqueueQueueHead(account);
     } catch {
       // Financial state is authoritative. Delivery is durable and retried by
       // the worker/reconciliation pass when the binding or outbox is ready.
-      return null;
+      outbox = null;
     }
+    try {
+      const now = iso(clock);
+      db.prepare(`
+        UPDATE weixin_bookkeeping_batches
+        SET status = 'completed', updated_at = $now
+        WHERE owner = $owner
+          AND status = 'open'
+          AND EXISTS (
+            SELECT 1
+            FROM weixin_bookkeeping_batch_items item
+            WHERE item.batch_id = weixin_bookkeeping_batches.id
+              AND item.owner = $owner
+          )
+          AND NOT EXISTS (
+            SELECT 1
+            FROM weixin_bookkeeping_batch_items item
+            JOIN assistant_pending_actions action ON action.id = item.action_id
+            WHERE item.batch_id = weixin_bookkeeping_batches.id
+              AND item.owner = $owner
+              AND action.owner = $owner
+              AND action.channel = $channel
+              AND action.action_type = $actionType
+              AND action.status IN ('pending', 'processing', 'confirmed')
+          )
+      `).run({
+        $owner: requiredText(account, "account", 200),
+        $channel: SHORTCUT_BOOKKEEPING_CHANNEL,
+        $actionType: SHORTCUT_BOOKKEEPING_ACTION,
+        $now: now,
+      });
+    } catch {
+      // Batch status is bookkeeping metadata; it must never block a durable
+      // confirmation or make a successful financial write look like a failure.
+    }
+    try {
+      enqueueCompletedBatchReceipts(account);
+    } catch {
+      // Summary delivery is durable but best effort here. The reconciliation
+      // pass calls this same recovery path after a restart or provider outage.
+    }
+    return outbox;
   }
 
   function activeAdvanceAllocationActions(account, { limit = 3 } = {}) {
@@ -1063,7 +1284,15 @@ export function createShortcutBookkeepingAssistantRuntime({
     return rows.map((row) => getShortcutAction(account, row.id)).filter(Boolean);
   }
 
-  function enqueue(account, conversationId, action, entryId, kind = "confirmation", extraPayload = {}) {
+  function enqueue(
+    account,
+    conversationId,
+    action,
+    entryId,
+    kind = "confirmation",
+    extraPayload = {},
+    { availableAt = null } = {},
+  ) {
     const accepted = kind === "accepted";
     const version = accepted ? 1 : Number(action?.version ?? 1);
     return outboxRepository.enqueue({
@@ -1071,7 +1300,121 @@ export function createShortcutBookkeepingAssistantRuntime({
       conversationId,
       idempotencyKey: `shortcut-bookkeeping:${entryId}:${kind}:v${version}`,
       payload: { actionId: action.id, entryId, version, kind, ...extraPayload },
+      ...(availableAt ? { availableAt } : {}),
     });
+  }
+
+  function batchReceiptRows(account, batchId) {
+    return db.prepare(`
+      SELECT batch.id AS batch_id,
+             batch.owner,
+             batch.conversation_id,
+             batch.status AS batch_status,
+             item.sequence,
+             item.action_id,
+             action.status AS action_status,
+             entry.id AS entry_id,
+             entry.status AS entry_status,
+             entry.entry_type,
+             entry.occurred_on,
+             entry.note,
+             entry.purpose,
+             entry.amount_cents,
+             entry.expense_id,
+             expense.reference_code AS expense_reference_code,
+             expense.occurred_on AS expense_occurred_on,
+             expense.notes AS expense_notes
+      FROM weixin_bookkeeping_batches batch
+      JOIN weixin_bookkeeping_batch_items item
+        ON item.batch_id = batch.id
+       AND item.owner = batch.owner
+      LEFT JOIN assistant_pending_actions action
+        ON action.id = item.action_id
+       AND action.owner = item.owner
+       AND action.channel = $channel
+       AND action.action_type = $actionType
+      LEFT JOIN shortcut_bookkeeping_entries entry
+        ON entry.id = json_extract(action.payload_json, '$.entryId')
+       AND entry.owner = item.owner
+      LEFT JOIN travel_expenses expense
+        ON expense.id = entry.expense_id
+       AND expense.owner = entry.owner
+      WHERE batch.id = $batchId AND batch.owner = $owner
+      ORDER BY item.sequence ASC
+    `).all({
+      $batchId: requiredText(batchId, "batchId", 200),
+      $owner: requiredText(account, "account", 200),
+      $channel: SHORTCUT_BOOKKEEPING_CHANNEL,
+      $actionType: SHORTCUT_BOOKKEEPING_ACTION,
+    });
+  }
+
+  function activeBookkeepingQueueExists(account) {
+    return Boolean(db.prepare(`
+      SELECT 1
+      FROM assistant_pending_actions
+      WHERE owner = $owner
+        AND channel = $channel
+        AND action_type = $actionType
+        AND status IN ('pending', 'processing', 'confirmed')
+        AND COALESCE(json_extract(payload_json, '$.kind'), 'confirmation') <> $allocationKind
+      LIMIT 1
+    `).get({
+      $owner: requiredText(account, "account", 200),
+      $channel: SHORTCUT_BOOKKEEPING_CHANNEL,
+      $actionType: SHORTCUT_BOOKKEEPING_ACTION,
+      $allocationKind: SHORTCUT_ADVANCE_ALLOCATION_KIND,
+    }));
+  }
+
+  function maybeEnqueueBatchAcceptedReceipt({ account, batchId } = {}) {
+    const normalizedAccount = requiredText(account, "account", 200);
+    const normalizedBatchId = requiredText(batchId, "batchId", 200);
+    const rows = batchReceiptRows(normalizedAccount, normalizedBatchId);
+    if (rows.length < 2) return null;
+    if (rows.some((row) => !row.action_id || !row.entry_id)) return null;
+    if (rows.some((row) => !["executed", "cancelled"].includes(row.action_status))) return null;
+    if (rows.some((row) => !["accepted", "rejected"].includes(row.entry_status))) return null;
+    if (activeBookkeepingQueueExists(normalizedAccount)) return null;
+
+    const acceptedRows = rows.filter((row) => row.entry_status === "accepted");
+    if (acceptedRows.length === 0) return null;
+    const conversationId = conversationForOrNull(normalizedAccount);
+    if (!conversationId) return null;
+    return outboxRepository.enqueue({
+      owner: normalizedAccount,
+      conversationId,
+      idempotencyKey: `shortcut-bookkeeping-batch:${normalizedBatchId}:accepted:v1`,
+      payload: {
+        kind: "accepted_batch",
+        batchId: normalizedBatchId,
+        batchVersion: 1,
+        entryIds: acceptedRows.map((row) => row.entry_id),
+      },
+    });
+  }
+
+  function enqueueCompletedBatchReceipts(account) {
+    const rows = db.prepare(`
+      SELECT id
+      FROM weixin_bookkeeping_batches
+      WHERE owner = $owner
+        AND status = 'completed'
+        AND (
+          SELECT COUNT(*)
+          FROM weixin_bookkeeping_batch_items item
+          WHERE item.batch_id = weixin_bookkeeping_batches.id
+            AND item.owner = $owner
+        ) > 1
+      ORDER BY updated_at ASC, id ASC
+    `).all({ $owner: requiredText(account, "account", 200) });
+    return rows.map((row) => {
+      try {
+        return maybeEnqueueBatchAcceptedReceipt({ account, batchId: row.id });
+      } catch {
+        return null;
+      }
+    }).filter(Boolean);
   }
 
   function closePendingOutbox({ account, conversationId, actionId, entryId, errorCode }) {
@@ -1201,13 +1544,20 @@ export function createShortcutBookkeepingAssistantRuntime({
     let outbox = null;
     if (deliveryConversationId) {
       try {
-        outbox = enqueue(
-          normalizedAccount,
-          deliveryConversationId,
-          settledAction ?? action,
-          entryId,
-          terminalKind,
-        );
+        outbox = decision === "accepted"
+          ? enqueueAcceptedReceipt({
+              account: normalizedAccount,
+              scope: { conversationId: deliveryConversationId },
+              action: settledAction ?? action,
+              entry,
+            })
+          : enqueue(
+              normalizedAccount,
+              deliveryConversationId,
+              settledAction ?? action,
+              entryId,
+              terminalKind,
+            );
       } catch {
         // Accepted receipts are reconciled before every worker lease. Rejected
         // decisions are likewise retried by the terminal-review reconciliation.
@@ -1230,7 +1580,7 @@ export function createShortcutBookkeepingAssistantRuntime({
     return { action: settledAction, outbox, ...settled };
   }
 
-  function startReview({ account, entry }) {
+  function startReview({ account, entry, receivedAt = iso(clock) }) {
     const conversationId = conversationFor(account);
     const conversation = sessionRepository.getOrCreate({
       owner: account,
@@ -1239,6 +1589,7 @@ export function createShortcutBookkeepingAssistantRuntime({
     });
     const existing = findActionForEntry(account, entry.id);
     if (existing) {
+      ensureBatchMembership({ account, action: existing, receivedAt });
       const outbox = enqueueQueueHead(account, { expectedActionId: existing.id });
       return { action: existing, conversationId, outbox, replayed: true };
     }
@@ -1255,6 +1606,7 @@ export function createShortcutBookkeepingAssistantRuntime({
       confirmationCode: stateCredential,
       expiresAt,
     });
+    ensureBatchMembership({ account, action, receivedAt });
     const outbox = enqueueQueueHead(account, { expectedActionId: action.id });
     return { action, conversationId, outbox, replayed: false };
   }
@@ -1318,6 +1670,36 @@ export function createShortcutBookkeepingAssistantRuntime({
     }
     if (payload.kind === "ops_alert") {
       return renderOpsAlertOutboxMessage(outboxItem, { clock });
+    }
+    if (payload.kind === "accepted_batch") {
+      if (payload.batchVersion !== 1) throw new Error("accepted_batch_version_invalid");
+      const batchId = requiredText(payload.batchId, "batchId", 200);
+      const rows = batchReceiptRows(outboxItem.owner, batchId);
+      const acceptedRows = rows.filter((row) => row.entry_status === "accepted");
+      const expectedEntryIds = Array.isArray(payload.entryIds)
+        ? payload.entryIds.map((entryId) => requiredText(entryId, "entryId", 200))
+        : [];
+      const actualEntryIds = acceptedRows.map((row) => row.entry_id);
+      if (rows.length < 2
+        || rows.some((row) => !row.action_id || !row.entry_id)
+        || rows.some((row) => !["executed", "cancelled"].includes(row.action_status))
+        || rows.some((row) => !["accepted", "rejected"].includes(row.entry_status))
+        || expectedEntryIds.length !== actualEntryIds.length
+        || expectedEntryIds.some((entryId, index) => entryId !== actualEntryIds[index])) {
+        throw new Error("accepted_batch_incomplete");
+      }
+      const lines = acceptedRows.map((row, index) => {
+        const occurredOn = dateOnly(row.expense_occurred_on ?? row.occurred_on);
+        const dateLabel = occurredOn
+          ? `${occurredOn.slice(0, 4)}年${Number(occurredOn.slice(5, 7))}月${Number(occurredOn.slice(8, 10))}日`
+          : "日期待确认";
+        const note = fieldText(row.expense_notes ?? row.note ?? row.purpose, "本次记账");
+        return `${index + 1}. ${dateLabel}${note}，${formatMoney(Number(row.amount_cents))}`;
+      });
+      return [
+        `本次已确认并录入小小记账，共 ${acceptedRows.length} 笔：`,
+        ...lines,
+      ].join("\n");
     }
     if (payload.kind === SHORTCUT_ADVANCE_ALLOCATION_KIND) {
       const row = db.prepare(`
@@ -1399,6 +1781,9 @@ export function createShortcutBookkeepingAssistantRuntime({
       throw stale;
     }
     if (payload.kind === "cancelled") return `已取消小小记账 ${entry.id}，未写入费用和付款凭证。`;
+    const batch = payload.kind === "confirmation" || payload.kind === "region_refresh"
+      ? batchItemForAction(outboxItem.owner, action.id)
+      : null;
     return renderDraftMessage(entry, {
       prefix: payload.kind === "confirmation"
         ? "检测到一笔新记账，请确认！"
@@ -1409,6 +1794,9 @@ export function createShortcutBookkeepingAssistantRuntime({
         Number(payload.version),
         secret,
       ),
+      batchPosition: batch
+        ? { sequence: Number(batch.sequence), total: Number(batch.total) }
+        : null,
     });
   }
 
@@ -1421,6 +1809,10 @@ export function createShortcutBookkeepingAssistantRuntime({
   }
 
   function enqueueAcceptedReceipt({ account, scope, action, entry }) {
+    const batch = batchItemForAction(account, action.id);
+    if (batch?.total > 1) {
+      return maybeEnqueueBatchAcceptedReceipt({ account, batchId: batch.batch_id });
+    }
     try {
       enqueue(
         account,
@@ -1451,6 +1843,17 @@ export function createShortcutBookkeepingAssistantRuntime({
       WHERE action.channel = $channel
         AND action.action_type = $actionType
         AND entry.status IN ('accepted', 'rejected')
+        AND NOT EXISTS (
+          SELECT 1
+          FROM weixin_bookkeeping_batch_items batch_item
+          WHERE batch_item.owner = action.owner
+            AND batch_item.action_id = action.id
+            AND (
+              SELECT COUNT(*)
+              FROM weixin_bookkeeping_batch_items batch_size
+              WHERE batch_size.batch_id = batch_item.batch_id
+            ) > 1
+        )
         AND NOT EXISTS (
           SELECT 1 FROM weixin_confirmation_outbox outbox
           WHERE outbox.owner = action.owner
@@ -1718,7 +2121,14 @@ export function createShortcutBookkeepingAssistantRuntime({
         accepted: completed.item,
         requestId: action.id,
       });
-      try { enqueue(account, conversationFor(account), { ...action, version: Number(action.version) + 1 }, target.entryId, "accepted"); } catch { /* financial write remains durable; replay can enqueue again */ }
+      try {
+        enqueueAcceptedReceipt({
+          account,
+          scope,
+          action: { ...action, version: Number(action.version) + 1 },
+          entry: accepted,
+        });
+      } catch { /* financial write remains durable; replay can enqueue again */ }
       advanceBookkeepingQueue(account);
       if (completed.advance || accepted.advanceId) {
         try {
