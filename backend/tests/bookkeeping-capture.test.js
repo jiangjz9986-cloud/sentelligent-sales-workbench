@@ -109,14 +109,14 @@ describe("微信小小记账识别", () => {
   it("classifies the exact Shanghai meal windows at or below 40 yuan", () => {
     const cases = [
       ["03:59", 3_000, "其他", null, null],
-      ["04:00", 1, "餐饮", "早餐", "8.25济南早餐"],
-      ["10:59", 4_000, "餐饮", "早餐", "8.25济南早餐"],
-      ["11:00", 3_000, "餐饮", "午餐", "8.25济南午餐"],
-      ["15:59", 4_000, "餐饮", "午餐", "8.25济南午餐"],
+      ["04:00", 1, "餐饮", "早餐", "8.25济南出差早餐"],
+      ["10:59", 4_000, "餐饮", "早餐", "8.25济南出差早餐"],
+      ["11:00", 3_000, "餐饮", "午餐", "8.25济南出差午餐"],
+      ["15:59", 4_000, "餐饮", "午餐", "8.25济南出差午餐"],
       ["16:00", 3_000, "其他", null, null],
       ["16:59", 3_000, "其他", null, null],
-      ["17:00", 3_000, "餐饮", "晚餐", "8.25济南晚餐"],
-      ["23:59", 4_000, "餐饮", "晚餐", "8.25济南晚餐"],
+      ["17:00", 3_000, "餐饮", "晚餐", "8.25济南出差晚餐"],
+      ["23:59", 4_000, "餐饮", "晚餐", "8.25济南出差晚餐"],
       ["00:00", 3_000, "其他", null, null],
     ];
     for (const [paidTime, amountCents, category, subcategory, note] of cases) {
@@ -180,7 +180,7 @@ describe("微信小小记账识别", () => {
     });
     assert.deepEqual(
       { category: restaurant.category, subcategory: restaurant.subcategory, note: restaurant.note },
-      { category: "餐饮", subcategory: "晚餐", note: "8.25济南晚餐" },
+      { category: "餐饮", subcategory: "晚餐", note: "8.25济南出差晚餐" },
     );
     assert.doesNotMatch(restaurant.warnings.join(","), /large_meal_context_unknown/u);
 
@@ -278,7 +278,7 @@ describe("微信小小记账识别", () => {
     });
     assert.equal(result.subcategory, "晚餐");
     assert.equal(result.expense.paidAt, "2026-08-25T22:51:00+08:00");
-    assert.equal(result.note, "8.25济南晚餐");
+    assert.equal(result.note, "8.25济南出差晚餐");
     assert.doesNotMatch(result.warnings.join(","), /missing_(?:date|amount|category)/u);
   });
 
@@ -295,7 +295,7 @@ describe("微信小小记账识别", () => {
       },
       expenseAnalysis: { expense: { purpose: "到济宁出差用餐" }, warnings: [] },
     });
-    assert.equal(explicit.note, "8.25济宁午餐");
+    assert.equal(explicit.note, "8.25济宁出差午餐");
     assert.doesNotMatch(explicit.warnings.join(","), /missing_trip_region/u);
 
     const missing = buildBookkeepingAnalysis({
@@ -310,7 +310,7 @@ describe("微信小小记账识别", () => {
       },
       expenseAnalysis: { expense: { purpose: "出差用餐" }, warnings: [] },
     });
-    assert.equal(missing.note, "8.25午餐");
+    assert.equal(missing.note, "8.25出差午餐");
     assert.match(missing.warnings.join(","), /missing_trip_region/u);
 
     const missingDate = buildBookkeepingAnalysis({
@@ -351,7 +351,7 @@ describe("微信小小记账识别", () => {
       expenseAnalysis: { expense: { purpose: "出差用餐" }, warnings: [] },
       tripRegionResolver: () => "济南",
     });
-    assert.equal(merchantRegion.note, "8.25济南午餐");
+    assert.equal(merchantRegion.note, "8.25济南出差午餐");
     assert.equal(merchantRegion.noteAutomation.tripRegionSource, "itinerary");
 
     const explicitTrip = buildBookkeepingAnalysis({
@@ -367,7 +367,7 @@ describe("微信小小记账识别", () => {
       },
       expenseAnalysis: { expense: { purpose: "到济宁出差" }, warnings: [] },
     });
-    assert.equal(explicitTrip.note, "8.25济宁午餐");
+    assert.equal(explicitTrip.note, "8.25济宁出差午餐");
     assert.equal(explicitTrip.noteAutomation.tripRegionSource, "text");
 
     const colloquialTrip = buildBookkeepingAnalysis({
@@ -383,7 +383,7 @@ describe("微信小小记账识别", () => {
       },
       expenseAnalysis: { expense: { purpose: "去济南出差" }, warnings: [] },
     });
-    assert.equal(colloquialTrip.note, "8.25济南午餐");
+    assert.equal(colloquialTrip.note, "8.25济南出差午餐");
     assert.equal(colloquialTrip.noteAutomation.tripRegionSource, "text");
 
     for (const narrative of [
@@ -406,7 +406,7 @@ describe("微信小小记账识别", () => {
         expenseAnalysis: { expense: { purpose: narrative }, warnings: [] },
         tripRegionResolver: () => "潍坊",
       });
-      assert.equal(failClosed.note, "8.25潍坊午餐", narrative);
+      assert.equal(failClosed.note, "8.25潍坊出差午餐", narrative);
       assert.equal(failClosed.noteAutomation.tripRegionSource, "itinerary", narrative);
     }
   });
@@ -433,6 +433,6 @@ describe("微信小小记账识别", () => {
     });
     assert.equal(result.category, "餐饮");
     assert.equal(result.subcategory, "午餐");
-    assert.equal(result.note, "8.25济南午餐");
+    assert.equal(result.note, "8.25济南出差午餐");
   });
 });

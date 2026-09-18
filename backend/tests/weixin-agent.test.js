@@ -725,6 +725,84 @@ describe("weixin sales workbench agent", () => {
     }
   });
 
+  it("maps the accepted runtime result so the remote agent can suppress the synchronous receipt", async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), "sentelligent-weixin-result-mapping-"));
+    tempDirectories.push(tempDir);
+    const databaseUrl = join(tempDir, "result-mapping.sqlite");
+    const owner = "assistantowner";
+    const sender = "sender-1";
+    const machineToken = ["result", "mapping", "machine", "token"].join("-");
+    const seedDb = openDatabase({ databaseUrl });
+    seedWeixinBinding(seedDb, { account: owner, senderId: sender, financialEnabled: true });
+    seedDb.close();
+
+    const server = createServer({
+      databaseUrl,
+      seed: false,
+      nodeEnv: "test",
+      authRequired: false,
+      weixinAgentApiToken: machineToken,
+      weixinAgentOwner: owner,
+      weixinBookkeepingConfirmationEnabled: true,
+      weixinBookkeepingOwner: owner,
+      weixinBookkeepingSenderId: sender,
+      weixinAllowedSenderIds: [sender],
+      assistantConfirmationSecret: Buffer.alloc(32, 0x43),
+      assistantOrchestrator: {
+        async handle() {
+          return {
+            status: 200,
+            body: {
+              status: "ok",
+              text: "已确认并录入小小记账：2026年9月18日9.18东营出差午餐：继振、海鹏，金额 28.00 元。",
+              result: {
+                entryId: "entry-accepted-1",
+                expenseId: "expense-accepted-1",
+                paymentId: "payment-accepted-1",
+                suppressSynchronousReply: true,
+              },
+            },
+          };
+        },
+      },
+    });
+    await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const baseUrl = `http://127.0.0.1:${server.address().port}`;
+
+    try {
+      const sourceMessageId = "result-mapping-message";
+      const response = await fetch(`${baseUrl}/api/integrations/weixin-agent/events`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${machineToken}`,
+          "Content-Type": "application/json",
+          "Idempotency-Key": `weixin:${sourceMessageId}`,
+        },
+        body: JSON.stringify({
+          conversationId: "conversation-result-mapping",
+          text: "确认",
+          sourceMessageId,
+          senderId: sender,
+          chatType: "direct",
+        }),
+      });
+      const body = JSON.parse(await response.text());
+
+      assert.equal(response.status, 200);
+      assert.equal(body.text.startsWith("已确认并录入"), true);
+      assert.equal(body.suppressSynchronousReply, true);
+      assert.equal(body.debugText, body.text);
+      assert.deepEqual(body.result, {
+        status: "accepted",
+        entryId: "entry-accepted-1",
+        expenseId: "expense-accepted-1",
+        paymentId: "payment-accepted-1",
+      });
+    } finally {
+      await new Promise((resolve) => server.close(resolve));
+    }
+  });
+
   it("bounds chunked workbench responses before buffering them in memory", async () => {
     const chunk = new Uint8Array(600 * 1024);
     let reads = 0;

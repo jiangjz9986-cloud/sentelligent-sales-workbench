@@ -452,6 +452,17 @@ verify_preflight_report() {
       }
 
       const report = JSON.parse(content.toString("utf8"));
+      const expectedRelease = resolve(process.env.PREFLIGHT_EXPECTED_RELEASE);
+      const previousManifestPath = resolve(expectedRelease, "release-manifest.json");
+      const previousManifestLexical = lstatSync(previousManifestPath, { bigint: true });
+      if (!previousManifestLexical.isFile() || previousManifestLexical.isSymbolicLink()) {
+        throw new Error("Previous release manifest must be a regular non-symbolic file");
+      }
+      const previousManifestRealPath = realpathSync.native(previousManifestPath);
+      if (normalize(previousManifestRealPath) !== normalize(previousManifestPath)) {
+        throw new Error("Previous release manifest path must be canonical");
+      }
+      const previousManifest = JSON.parse(readFileSync(previousManifestRealPath, "utf8"));
       const contractModulePath = resolve(process.env.PREFLIGHT_CONTRACT_MODULE);
       const contract = await import(pathToFileURL(contractModulePath).href);
       const contractIds = contract.PRODUCTION_PREFLIGHT_CHECK_IDS;
@@ -505,6 +516,9 @@ verify_preflight_report() {
         !/^[a-f0-9]{64}$/.test(String(report.scope?.machineIdSha256 ?? ""))
       ) {
         throw new Error("Preflight report scope does not match the current release, database, or host identity");
+      }
+      if (report.scope.expectedCommit !== previousManifest.source?.commit) {
+        throw new Error("Preflight report expectedCommit does not match the previous release manifest");
       }
       const after = lstatSync(realPath, { bigint: true });
       for (const field of ["dev", "ino", "mode", "nlink", "size", "mtimeNs", "ctimeNs"]) {

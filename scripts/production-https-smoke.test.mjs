@@ -128,7 +128,7 @@ function createHappyFetch({
         databaseIdentity: DATABASE_IDENTITY,
         aiAnalysisMode: "model",
         modelProvider: "deepseek",
-        modelName: "DeepSeek-V4-Flash",
+        modelName: "deepseek-flash",
         modelReady: true,
         authEnabled: true,
       }, 200, includeSecurityHeaders ? FIXTURE_SECURITY_HEADERS : {});

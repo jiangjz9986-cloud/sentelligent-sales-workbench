@@ -20,7 +20,7 @@ test("business session enforces admin and CSRF before signed platform proxy and 
       nodeEnv: "production", databasePath: ":memory:", authSecret: AUTH, taskAdmissionEnabled: true,
       credentialEncryptionKey: Buffer.alloc(32, 101).toString("base64url"),
       providerAllowedOrigins: ["https://api.deepseek.com"],
-      providerPolicies: [{ id: "provider-deepseek", baseUrl: "https://api.deepseek.com", credentialEnv: "AI_PROVIDER_DEEPSEEK_KEY", models: [{ name: "deepseek-v4-flash", taskTypes: ["quick-record.analyze"], maxOutputTokens: 3200 }] }],
+      providerPolicies: [{ id: "provider-deepseek", baseUrl: "https://api.deepseek.com", credentialEnv: "AI_PROVIDER_DEEPSEEK_KEY", models: [{ name: "deepseek-flash", taskTypes: ["quick-record.analyze"], maxOutputTokens: 3200 }] }],
     },
     autoStart: false, logger: { error() {} },
   });

@@ -1,3 +1,5 @@
+import { DEEPSEEK_FLASH_MODEL } from "../../../shared/deepseekContract.mjs";
+
 const CATEGORY_RULES = [
   ["breakfast", /早餐|早饭|早点/],
   ["lunch", /午餐|午饭|中餐/],
@@ -367,7 +369,7 @@ export async function analyzeExpenseText(rawText, options = {}) {
   if (!options.modelClient || ruleResult.expense === null) return ruleResult;
 
   const provider = String(options.modelProvider ?? "deepseek").trim() || "deepseek";
-  const model = String(options.modelName ?? "deepseek-chat").trim() || "deepseek-chat";
+  const model = String(options.modelName ?? DEEPSEEK_FLASH_MODEL).trim() || DEEPSEEK_FLASH_MODEL;
   const timeoutMs = Number.isSafeInteger(options.modelTimeoutMs) && options.modelTimeoutMs > 0
     ? options.modelTimeoutMs
     : 30_000;

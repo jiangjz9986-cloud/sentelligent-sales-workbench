@@ -1,11 +1,13 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, realpathSync, writeFileSync, readFileSync, symlinkSync, linkSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, realpathSync, writeFileSync, readFileSync, symlinkSync, linkSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { DatabaseSync } from "node:sqlite";
 import { test } from "node:test";
 import { privateFile, atomicReplace, backupSqlite } from "./production-io.mjs";
 import { hashBytes } from "./production-contract.mjs";
+import { openAiPlatformDatabase } from "../../ai-platform/src/db/index.js";
+import { platformDatabaseIsEmpty } from "./production-host.mjs";
 
 test("protected files reject links and drift before a configuration replacement", () => {
   const root = realpathSync(mkdtempSync(join(tmpdir(), "transition-files-")));
@@ -37,7 +39,20 @@ test("SQLite backup captures committed WAL data without overwriting an existing 
     assert.match(result.sha256, /^[0-9a-f]{64}$/);
     const snapshot = new DatabaseSync(destination, { readOnly: true });
     try { assert.equal(snapshot.prepare("SELECT value FROM records").get().value, "committed"); } finally { snapshot.close(); }
+    assert.equal(existsSync(`${destination}-wal`), false);
+    assert.equal(existsSync(`${destination}-shm`), false);
+    assert.equal(existsSync(`${destination}-journal`), false);
     await assert.rejects(backupSqlite(path, destination), /exist/i);
     assert.equal(hashBytes(readFileSync(destination)), result.sha256);
   } finally { db.close(); rmSync(root, { recursive: true, force: true }); }
+});
+
+test("platform cleanup checks the current AI platform table names", () => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "transition-platform-db-")));
+  const path = join(root, "ai-platform.sqlite");
+  const db = openAiPlatformDatabase(path);
+  db.close();
+  try {
+    assert.equal(platformDatabaseIsEmpty(path), true);
+  } finally { rmSync(root, { recursive: true, force: true }); }
 });

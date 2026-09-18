@@ -43,6 +43,7 @@ describe("WeChat confirmation outbox worker boundary", () => {
         },
       },
       pollMs: 500,
+      clock: () => Date.parse("2026-09-08T12:00:00.000Z"),
       abortSignal: controller.signal,
     });
     await pump;
@@ -58,6 +59,29 @@ describe("WeChat confirmation outbox worker boundary", () => {
     assert.doesNotMatch(String(calls[1].options.body), /123456|machine-secret/u);
     assert.doesNotMatch(String(calls[2].options.body), /123456|machine-secret/u);
     assert.equal(JSON.parse(calls[2].options.body).providerMessageId, "provider-outbound-1");
+  });
+
+  it("posts context expiry through a dedicated no-attempt release while preserving worker auth", async () => {
+    let request;
+    const client = createWeixinOutboxHttpClient({
+      backendUrl: "http://127.0.0.1:8787",
+      apiToken: "machine-secret",
+      workerId: "worker-expired",
+      fetchImpl: async (url, options) => {
+        request = { url, options };
+        return response(200, JSON.stringify({ item: { id: "outbox-expired", status: "queued", attemptCount: 0, lastErrorCode: "WEIXIN_CONTEXT_EXPIRED" } }));
+      },
+    });
+    await client.releaseLeaseWithoutAttempt({ id: "outbox-expired", leaseToken: "test-expired-token" });
+    assert.equal(client.defer, client.releaseLeaseWithoutAttempt);
+    assert.equal(request.options.headers.Authorization, "Bearer machine-secret");
+    assert.equal(request.options.headers["X-Weixin-Worker-Id"], "worker-expired");
+    assert.deepEqual(JSON.parse(request.options.body), {
+      id: "outbox-expired",
+      leaseToken: "test-expired-token",
+      ok: false,
+      errorCode: "WEIXIN_CONTEXT_EXPIRED",
+    });
   });
 
   it("paces a recovered backlog instead of sending every queued item in one burst", async () => {
@@ -165,6 +189,126 @@ describe("WeChat confirmation outbox worker boundary", () => {
     });
     assert.equal(calls.length, 1);
     assert.equal(Object.hasOwn(calls[0], "expiresAt"), false);
+  });
+
+  it("fails closed when a ready SDK report has an expired context", async () => {
+    const controller = new AbortController();
+    let sendCalls = 0;
+    let reportedDelivery;
+    await runWeixinOutboxPump({
+      client: {
+        async lease(delivery) {
+          reportedDelivery = delivery;
+          controller.abort();
+          return null;
+        },
+        async ack() { assert.fail("expired readiness must not ack"); },
+        async isCurrent() { return true; },
+      },
+      bot: {
+        getDeliveryStatus() {
+          return { ready: true, status: "ready", expiresAt: "2026-09-08T12:04:58.729Z" };
+        },
+        async sendMessage() { sendCalls += 1; },
+      },
+      pollMs: 500,
+      clock: () => Date.parse("2026-09-08T12:05:00.000Z"),
+      abortSignal: controller.signal,
+    });
+    assert.deepEqual(reportedDelivery, {
+      ready: false,
+      status: "not_ready",
+      reason: "context_token_expired",
+      expiresAt: "2026-09-08T12:04:58.729Z",
+    });
+    assert.equal(sendCalls, 0);
+  });
+
+  it("releases a context-expired lease without calling ordinary ack", async () => {
+    const controller = new AbortController();
+    const acknowledgements = [];
+    const releases = [];
+    await runWeixinOutboxPump({
+      client: {
+        async lease() {
+          return {
+            item: { id: "outbox-context-expired", owner: "owner", conversationId: "scope", deliveryScope: "scope", message: "draft" },
+            leaseToken: "test-context-expired-token",
+          };
+        },
+        async ack(value) { acknowledgements.push(value); },
+        async releaseLeaseWithoutAttempt(value) {
+          releases.push(value);
+          controller.abort();
+        },
+        async isCurrent() { return true; },
+      },
+      bot: {
+        getDeliveryStatus() { return { ready: true, status: "ready" }; },
+        async sendMessage() {
+          const error = new Error("context details must not be persisted");
+          error.code = "WEIXIN_CONTEXT_EXPIRED";
+          throw error;
+        },
+      },
+      pollMs: 500,
+      abortSignal: controller.signal,
+    });
+    assert.deepEqual(acknowledgements, []);
+    assert.deepEqual(releases, [{
+      id: "outbox-context-expired",
+      leaseToken: "test-context-expired-token",
+      errorCode: "WEIXIN_CONTEXT_EXPIRED",
+    }]);
+  });
+
+  it("releases a legacy-backend lease when readiness is already context-expired", async () => {
+    const controller = new AbortController();
+    const acknowledgements = [];
+    const releases = [];
+    let reportedDelivery;
+    await runWeixinOutboxPump({
+      client: {
+        async lease(delivery) {
+          reportedDelivery = delivery;
+          return {
+            item: { id: "legacy-expired", owner: "owner", conversationId: "scope", message: "draft" },
+            leaseToken: "test-expired-token",
+          };
+        },
+        async ack(value) { acknowledgements.push(value); },
+        async releaseLeaseWithoutAttempt(value) {
+          releases.push(value);
+          controller.abort();
+        },
+        async isCurrent() { assert.fail("an expired lease must be released before lease verification"); },
+      },
+      bot: {
+        getDeliveryStatus() {
+          return {
+            ready: false,
+            status: "not_ready",
+            reason: "context_token_expired",
+            expiresAt: "2026-09-08T12:04:58.729Z",
+          };
+        },
+        async sendMessage() { assert.fail("an expired context must not send"); },
+      },
+      pollMs: 500,
+      abortSignal: controller.signal,
+    });
+    assert.deepEqual(reportedDelivery, {
+      ready: false,
+      status: "not_ready",
+      reason: "context_token_expired",
+      expiresAt: "2026-09-08T12:04:58.729Z",
+    });
+    assert.deepEqual(acknowledgements, []);
+    assert.deepEqual(releases, [{
+      id: "legacy-expired",
+      leaseToken: "test-expired-token",
+      errorCode: "WEIXIN_CONTEXT_EXPIRED",
+    }]);
   });
 
   it("acks a bounded retry code when the SDK reports provider rejection", async () => {

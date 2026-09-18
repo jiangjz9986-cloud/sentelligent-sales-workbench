@@ -197,6 +197,87 @@ describe("WeChat worker wiring", () => {
     assert.equal(leaseRequest.options.headers["X-Weixin-Delivery-Scope"], "weixin:multi:v1");
   });
 
+  it("maps an SDK context-expiry race to a fenced no-attempt release", async () => {
+    const postBodies = [];
+    let statusCalls = 0;
+    let sendCalls = 0;
+    let releaseWait;
+    const waitForRelease = new Promise((resolve) => { releaseWait = resolve; });
+    const scope = shortcutBookkeepingConversationId("assistant-owner", "sender-1");
+    const sdk = {
+      start() {
+        return {
+          getDeliveryStatus() {
+            statusCalls += 1;
+            return statusCalls === 1
+              ? { ready: true, status: "ready", expiresAt: "2099-01-01T00:00:00.000Z" }
+              : { ready: true, status: "ready", expiresAt: "2020-01-01T00:00:00.000Z" };
+          },
+          isDeliveryTarget(senderId) { return senderId === "sender-1"; },
+          async sendMessageTo() { sendCalls += 1; },
+          async wait() { await waitForRelease; },
+        };
+      },
+    };
+
+    await runWeixinWorker(["start"], {
+      sdk,
+      fetchImpl: async (_url, options) => {
+        if (options.method === "GET") {
+          return new Response(JSON.stringify({
+            item: {
+              id: "outbox-context-expired-race",
+              owner: "assistant-owner",
+              conversationId: scope,
+              deliveryScope: scope,
+              targetSenderId: "sender-1",
+              message: "synthetic bookkeeping draft",
+            },
+            leaseToken: "test-context-expired-token",
+          }), { status: 200, headers: { "Content-Type": "application/json" } });
+        }
+        const body = JSON.parse(options.body);
+        postBodies.push(body);
+        if (body.check === true) {
+          return new Response(JSON.stringify({ current: true }), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+        releaseWait();
+        return new Response(JSON.stringify({
+          item: {
+            id: body.id,
+            status: "queued",
+            attemptCount: 0,
+            lastErrorCode: "WEIXIN_CONTEXT_EXPIRED",
+          },
+        }), { status: 200, headers: { "Content-Type": "application/json" } });
+      },
+      configOverrides: {
+        nodeEnv: "test",
+        authRequired: false,
+        authSessionSecret: Buffer.alloc(32, 19).toString("base64url"),
+        weixinAgentApiToken: syntheticLabel("worker", "context-expired", "token"),
+        weixinAgentBackendUrl: "https://sales.example.test",
+        weixinAgentOwner: "assistant-owner",
+        weixinBookkeepingConfirmationEnabled: true,
+      },
+    });
+
+    assert.ok(statusCalls >= 2);
+    assert.equal(sendCalls, 0);
+    assert.deepEqual(postBodies, [
+      { id: "outbox-context-expired-race", leaseToken: "test-context-expired-token", check: true },
+      {
+        id: "outbox-context-expired-race",
+        leaseToken: "test-context-expired-token",
+        ok: false,
+        errorCode: "WEIXIN_CONTEXT_EXPIRED",
+      },
+    ]);
+  });
+
   it("terminally rejects a tampered lease target and acks unreachable targets as retryable", async () => {
     const acks = [];
     let phase = "tampered";

@@ -1,4 +1,5 @@
 import { documentVisionPrompt as promptFor } from "../../../shared/documentVisionPrompts.mjs";
+import { DEEPSEEK_FLASH_MODEL } from "../../../shared/deepseekContract.mjs";
 
 const IMAGE_MEDIA_TYPES = new Set(["image/jpeg", "image/png", "image/webp"]);
 const PDF_MEDIA_TYPE = "application/pdf";
@@ -7,7 +8,7 @@ const MAX_VISION_IMAGES = 4;
 const MAX_VISION_IMAGE_BYTES = 8 * 1024 * 1024;
 const MAX_VISION_TOTAL_BYTES = 20 * 1024 * 1024;
 
-export const DEFAULT_DOCUMENT_VISION_MODEL = "deepseek-v4-flash-vision-exp";
+export const DEFAULT_DOCUMENT_VISION_MODEL = DEEPSEEK_FLASH_MODEL;
 
 
 class DocumentVisionError extends Error {

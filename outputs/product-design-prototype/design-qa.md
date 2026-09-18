@@ -389,7 +389,7 @@
 - Default provider configuration is DeepSeek-compatible:
   - `MODEL_PROVIDER=deepseek`
   - `DEEPSEEK_BASE_URL=https://api.deepseek.com`
-  - `DEEPSEEK_MODEL=deepseek-v4-flash`
+  - `DEEPSEEK_MODEL=deepseek-flash`
 - Model JSON output is parsed and validated before writing `ai_insights`.
 - Missing key falls back to `source=mock_missing_model_key`; provider failure falls back to `source=mock_model_fallback`.
 

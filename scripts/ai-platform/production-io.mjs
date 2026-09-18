@@ -4,7 +4,7 @@ import { dirname } from "node:path";
 import { hostname } from "node:os";
 import { parseEnv } from "node:util";
 import { randomUUID } from "node:crypto";
-import { DatabaseSync, backup } from "node:sqlite";
+import { DatabaseSync } from "node:sqlite";
 import { readStableRegularFile } from "../production-preflight.mjs";
 import { createServiceToken } from "../../ai-platform/src/auth/internalAuth.js";
 import { createRequestBinding } from "../../shared/aiPlatformRequestAuth.mjs";
@@ -96,8 +96,12 @@ export async function backupSqlite(path, destination) {
   const source = new DatabaseSync(path, { readOnly: true });
   try {
     if (source.prepare("PRAGMA quick_check").get().quick_check !== "ok" || source.prepare("PRAGMA foreign_key_check").all().length) throw new Error("database integrity failed");
+    source.exec("PRAGMA busy_timeout = 5000");
     writeExclusive(destination, "");
-    await backup(source, destination);
+    // VACUUM INTO produces a standalone DELETE-journal snapshot. The online
+    // backup API can preserve WAL sidecars at the destination, which makes
+    // the snapshot unsuitable for the fail-closed production preflight.
+    source.prepare("VACUUM INTO ?").run(destination);
   } finally { source.close(); }
   const check = new DatabaseSync(destination, { readOnly: true });
   try {
@@ -107,25 +111,38 @@ export async function backupSqlite(path, destination) {
 }
 export async function platformRequest(path, { method = "GET", body = undefined, timeout = 200_000 } = {}) {
   if (!/^\/(?:operations(?:\/(?:drain|resume|policy|policy-preview))?)$/u.test(path)) throw new Error("unsupported deployment API operation");
-  const env = parseEnvironment(PLATFORM_ENV);
-  const target = "/internal/ai/v1" + path;
-  const payload = body === undefined ? "" : JSON.stringify(body);
-  const token = createServiceToken({
-    secret: env.AI_PLATFORM_AUTH_SECRET,
-    issuer: env.AI_PLATFORM_TRUSTED_ISSUER ?? "sentelligent-sales-backend",
-    subject: "production-transition", owner: "production-transition", actor: "production-transition",
-    scopes: ["ai:ops:read", "ai:ops:write"], ttlSeconds: 300,
-    requestBinding: createRequestBinding({ method, path: target, body: payload }),
-  });
-  const response = await socketFetch(PRODUCTION_AI_SOCKET)("http://127.0.0.1:18997" + target, {
-    method, signal: AbortSignal.timeout(timeout), redirect: "error",
-    headers: { Authorization: "Bearer " + token, ...(body === undefined ? {} : { "Content-Type": "application/json" }) },
-    ...(body === undefined ? {} : { body: payload }),
-  });
-  if (!response.ok) {
-    await response.body?.cancel?.();
-    throw Object.assign(new Error("platform operation failed"), { code: "PLATFORM_OPERATION_FAILED" });
+  const retryableRead = method === "GET" && path === "/operations";
+  const maxAttempts = retryableRead ? 3 : 1;
+  let lastError;
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    try {
+      const env = parseEnvironment(PLATFORM_ENV);
+      const target = "/internal/ai/v1" + path;
+      const payload = body === undefined ? "" : JSON.stringify(body);
+      const token = createServiceToken({
+        secret: env.AI_PLATFORM_AUTH_SECRET,
+        issuer: env.AI_PLATFORM_TRUSTED_ISSUER ?? "sentelligent-sales-backend",
+        subject: "production-transition", owner: "production-transition", actor: "production-transition",
+        scopes: ["ai:ops:read", "ai:ops:write"], ttlSeconds: 300,
+        requestBinding: createRequestBinding({ method, path: target, body: payload }),
+      });
+      const response = await socketFetch(PRODUCTION_AI_SOCKET)("http://127.0.0.1:18997" + target, {
+        method, signal: AbortSignal.timeout(timeout), redirect: "error",
+        headers: { Authorization: "Bearer " + token, ...(body === undefined ? {} : { "Content-Type": "application/json" }) },
+        ...(body === undefined ? {} : { body: payload }),
+      });
+      if (!response.ok) {
+        await response.body?.cancel?.();
+        throw Object.assign(new Error("platform operation failed"), { code: "PLATFORM_OPERATION_FAILED" });
+      }
+      const text = await readBoundedResponseText(response, { maxBytes: 1024 * 1024 });
+      return JSON.parse(text).item;
+    } catch (error) {
+      lastError = error;
+      const retryableCode = ["EPIPE", "ECONNRESET", "ECONNREFUSED", "UND_ERR_SOCKET"].includes(error?.code);
+      if (!retryableRead || !retryableCode || attempt + 1 >= maxAttempts) throw error;
+      await new Promise((resolve) => setTimeout(resolve, 50 * (attempt + 1)));
+    }
   }
-  const text = await readBoundedResponseText(response, { maxBytes: 1024 * 1024 });
-  return JSON.parse(text).item;
+  throw lastError;
 }

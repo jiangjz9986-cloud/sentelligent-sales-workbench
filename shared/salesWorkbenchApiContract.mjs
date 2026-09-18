@@ -420,6 +420,7 @@ export const SALES_WORKBENCH_API_SCHEMAS = {
     itineraryId: "nullableString",
     customerId: "nullableString",
     invoiceStatus: "string",
+    invoiceType: "nullableString",
     notes: "nullableString",
     tripRegion: "nullableString",
     tripRegionSource: "nullableString",

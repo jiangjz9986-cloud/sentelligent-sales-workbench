@@ -109,6 +109,24 @@ export function calculatePaymentProofContain({
   };
 }
 
+export function calculatePaymentProofDimensions({
+  sourceWidth,
+  sourceHeight,
+  maxWidth = PAYMENT_PROOF_THUMBNAIL.width,
+  maxHeight = PAYMENT_PROOF_THUMBNAIL.height,
+} = {}) {
+  positiveInteger(sourceWidth, "sourceWidth");
+  positiveInteger(sourceHeight, "sourceHeight");
+  positiveInteger(maxWidth, "maxWidth");
+  positiveInteger(maxHeight, "maxHeight");
+  const scale = Math.min(1, maxWidth / sourceWidth, maxHeight / sourceHeight);
+  return {
+    width: Math.max(1, Math.min(maxWidth, Math.round(sourceWidth * scale))),
+    height: Math.max(1, Math.min(maxHeight, Math.round(sourceHeight * scale))),
+    scale,
+  };
+}
+
 function createCanvas(width, height) {
   if (typeof globalThis.OffscreenCanvas === "function") {
     return new globalThis.OffscreenCanvas(width, height);
@@ -290,14 +308,13 @@ async function renderFirstPdfPage(blob, { canvasFactory }) {
     if (!(baseViewport?.width > 0) || !(baseViewport?.height > 0)) {
       fail("pdf-page-dimensions-invalid", "PDF 付款凭证第一页尺寸无效");
     }
-    const scale = Math.min(
-      1,
-      PAYMENT_PROOF_THUMBNAIL.width / baseViewport.width,
-      PAYMENT_PROOF_THUMBNAIL.height / baseViewport.height,
-    );
-    const viewport = page.getViewport({ scale });
-    const width = Math.max(1, Math.min(PAYMENT_PROOF_THUMBNAIL.width, Math.round(viewport.width)));
-    const height = Math.max(1, Math.min(PAYMENT_PROOF_THUMBNAIL.height, Math.round(viewport.height)));
+    const dimensions = calculatePaymentProofDimensions({
+      sourceWidth: Math.round(baseViewport.width),
+      sourceHeight: Math.round(baseViewport.height),
+    });
+    const viewport = page.getViewport({ scale: dimensions.scale });
+    const width = dimensions.width;
+    const height = dimensions.height;
     canvas = requireCanvas(canvasFactory(width, height), width, height, "pdf-canvas-unavailable");
     const context = get2dContext(canvas, "pdf-canvas-unavailable");
     paintWhite(context, width, height);
@@ -366,7 +383,7 @@ async function sameBytes(leftBlob, rightBlob) {
   return left.every((value, index) => value === right[index]);
 }
 
-async function validateEncodedJpeg(encoded, sourceBlob, bitmapFactory) {
+async function validateEncodedJpeg(encoded, sourceBlob, bitmapFactory, expectedDimensions) {
   if (!isBlob(encoded) || normalizedMediaType(encoded.type) !== PAYMENT_PROOF_THUMBNAIL.mediaType || encoded.size < 8) {
     fail("jpeg-output-invalid", "付款凭证缩略图未生成有效的 JPEG 文件");
   }
@@ -377,8 +394,8 @@ async function validateEncodedJpeg(encoded, sourceBlob, bitmapFactory) {
   const bytes = new Uint8Array(await encoded.arrayBuffer());
   const dimensions = readJpegDimensions(bytes);
   if (
-    dimensions?.width !== PAYMENT_PROOF_THUMBNAIL.width
-    || dimensions?.height !== PAYMENT_PROOF_THUMBNAIL.height
+    dimensions?.width !== expectedDimensions.width
+    || dimensions?.height !== expectedDimensions.height
   ) {
     fail("jpeg-dimensions-invalid", "付款凭证缩略图 JPEG 尺寸校验失败");
   }
@@ -388,8 +405,8 @@ async function validateEncodedJpeg(encoded, sourceBlob, bitmapFactory) {
     decoded = await bitmapFactory(encoded, { stage: "output-validation" });
     const verified = normalizedDrawable(decoded, "jpeg-decode-invalid");
     if (
-      verified.width !== PAYMENT_PROOF_THUMBNAIL.width
-      || verified.height !== PAYMENT_PROOF_THUMBNAIL.height
+      verified.width !== expectedDimensions.width
+      || verified.height !== expectedDimensions.height
     ) {
       fail("jpeg-dimensions-invalid", "付款凭证缩略图解码尺寸校验失败");
     }
@@ -407,7 +424,7 @@ async function validateEncodedJpeg(encoded, sourceBlob, bitmapFactory) {
  *
  * The source must be a controlled API Blob declared as JPEG, PNG, WebP, or PDF.
  * The first PDF page is rendered. Every successful result is painted onto a
- * new 360x240 white canvas with contain semantics and JPEG quality 0.72. Any
+ * new aspect-ratio-preserving canvas capped at 360x240 and JPEG quality 0.72. Any
  * decode, render, encode, type, or dimension problem rejects instead of ever
  * returning the source bytes.
  */
@@ -459,26 +476,25 @@ export async function createPaymentProofThumbnail(blob, {
       );
     }
 
-    outputCanvas = requireCanvas(
-      canvasFactory(PAYMENT_PROOF_THUMBNAIL.width, PAYMENT_PROOF_THUMBNAIL.height),
-      PAYMENT_PROOF_THUMBNAIL.width,
-      PAYMENT_PROOF_THUMBNAIL.height,
-    );
-    const context = get2dContext(outputCanvas, "canvas-unavailable");
-    paintWhite(context, PAYMENT_PROOF_THUMBNAIL.width, PAYMENT_PROOF_THUMBNAIL.height);
-    context.imageSmoothingEnabled = true;
-    context.imageSmoothingQuality = "high";
-    const placement = calculatePaymentProofContain({
+    const dimensions = calculatePaymentProofDimensions({
       sourceWidth: source.width,
       sourceHeight: source.height,
     });
+    outputCanvas = requireCanvas(
+      canvasFactory(dimensions.width, dimensions.height),
+      dimensions.width,
+      dimensions.height,
+    );
+    const context = get2dContext(outputCanvas, "canvas-unavailable");
+    context.imageSmoothingEnabled = true;
+    context.imageSmoothingQuality = "high";
     try {
       context.drawImage(
         source.drawable,
-        placement.x,
-        placement.y,
-        placement.width,
-        placement.height,
+        0,
+        0,
+        dimensions.width,
+        dimensions.height,
       );
     } catch (error) {
       fail("canvas-draw-failed", "付款凭证缩略图绘制失败", error);
@@ -491,7 +507,7 @@ export async function createPaymentProofThumbnail(blob, {
       if (error instanceof PaymentProofThumbnailError) throw error;
       fail("jpeg-encode-failed", "付款凭证缩略图 JPEG 编码失败", error);
     }
-    const bytes = await validateEncodedJpeg(encoded, blob, bitmapFactory);
+    const bytes = await validateEncodedJpeg(encoded, blob, bitmapFactory, dimensions);
     return output === "uint8array" ? bytes : encoded;
   } finally {
     closeResource(sourceOwner);

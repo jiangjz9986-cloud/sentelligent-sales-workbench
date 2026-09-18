@@ -134,14 +134,12 @@ describe("travel expense feature boundary", () => {
     assert.match(invoices, /title=\{noInvoiceConfirmationTitle\}/);
     assert.match(invoices, /const candidateResourcesReady =/);
     assert.match(invoices, /const confirmedCentsByExpense = new Map\(\)/);
-    assert.match(invoices, /const confirmedCentsByPayment = new Map\(\)/);
-    assert.match(invoices, /const hasActiveCandidateConfirmation = confirmations\.some/);
-    assert.match(invoices, /const hasCandidateTarget = confirmations\.some/);
-    assert.match(invoices, /confirmation\.amountSnapshotCents > 0/);
-    assert.match(invoices, /expense\.id !== confirmation\.expenseId/);
-    assert.match(invoices, /expense\.payments\.find\(\(item\) => item\.id === confirmation\.paymentId\)/);
-    assert.match(invoices, /payment\.reimbursementCents > \(confirmedCentsByPayment\.get\(payment\.id\) \?\? 0\)/);
-    assert.match(invoices, /本周无票记录对应的付款已变更或已被发票覆盖，请刷新后重新确认/);
+    assert.match(invoices, /const hasCandidateTarget = expenses\.some/);
+    assert.match(invoices, /expense\.invoiceType !== "substitute"/);
+    assert.doesNotMatch(invoices, /confirmedCentsByPayment/);
+    assert.doesNotMatch(invoices, /hasActiveCandidateConfirmation/);
+    assert.doesNotMatch(invoices, /const hasCandidateTarget = confirmations\.some/);
+    assert.doesNotMatch(invoices, /confirmation\.amountSnapshotCents > 0/);
     assert.match(invoices, /const hasUnmatchedInvoiceBalance = invoices\.some/);
     assert.match(invoices, /coverage\.invoiceWarehouseAvailableCents > 0/);
     assert.match(invoices, /const hasSuggestedCandidate = candidates\.some/);
@@ -174,7 +172,7 @@ describe("travel expense feature boundary", () => {
     assert.equal(ledger.includes('<th scope="col">来源</th>'), false);
     assert.doesNotMatch(ledger, /SourceState/);
     assert.doesNotMatch(ledger, /<dt>来源<\/dt>/);
-    assert.match(ledger, /maxDimension=\{360\}/);
+    assert.match(ledger, /maxDimension=\{720\}/);
     assert.match(ledger, /data-ledger-state=\{item\.formal \? "formal" : "pending"\}/);
     assert.match(ledger, /尚未计入本周合计/);
   });
@@ -371,6 +369,7 @@ describe("travel expense feature boundary", () => {
     const page = await source("src/features/travelExpense/TravelExpensePage.jsx");
     const ledger = await source("src/features/travelExpense/ExpenseLedgerWorkbench.jsx");
     const ledgerCss = await source("src/features/travelExpense/expenseLedgerWorkbench.css");
+    const proofCss = await source("src/features/travelExpense/travelExpense.css");
     const model = await source("src/features/travelExpense/expenseLedgerWorkbenchModel.js");
     const regionCard = await source("src/features/travelExpense/TripRegionSettingsCard.jsx");
     const regionCss = await source("src/features/travelExpense/tripRegionSettingsCard.css");
@@ -403,12 +402,28 @@ describe("travel expense feature boundary", () => {
     assert.match(page, /saveTravelExpenseRegionProfile/);
     assert.match(model, /paymentProofs: ledgerRow\.visible\.paymentProofs/);
     assert.match(ledger, /<AuthenticatedImageFrame/);
-    assert.match(ledgerCss, /object-fit: contain/);
-    assert.match(ledger, /共 \{item\.paymentProofCount\} 份/);
-    assert.match(page, /focusExpenseId=\{proofFocusExpenseId\}/);
-    assert.match(page, /onFocusExpenseHandled=\{handleProofFocusHandled\}/);
-    assert.match(page, /const handleProofFocusHandled = useCallback/);
+    assert.match(ledgerCss, /object-fit: fill/);
+    assert.doesNotMatch(ledger, /共 \{item\.paymentProofCount\} 份/);
+    assert.doesNotMatch(ledger, /ledger-proof-preview-meta/);
+    assert.match(ledger, /role: "button"/);
+    assert.match(ledger, /"aria-label": proofLabel/);
+    assert.match(proofCss, /\.expense-proof-files\s*\{[\s\S]*?grid-template-columns:\s*minmax\(0,\s*1fr\);/s);
+    assert.match(proofCss, /\.expense-proof-file\s*\{[\s\S]*?grid-template-columns:\s*minmax\(0,\s*360px\)\s+minmax\(0,\s*1fr\);/s);
+    assert.match(proofCss, /\.expense-proof-file-preview\s*\{[\s\S]*?width:\s*100%;[\s\S]*?height:\s*64px;[\s\S]*?aspect-ratio:\s*45\s*\/\s*8;/s);
+    assert.match(proofCss, /@media \(max-width: 430px\)[\s\S]*?\.expense-proof-file\s*\{\s*grid-template-columns:\s*minmax\(0,\s*1fr\);/s);
+    assert.match(proofCss, /\.expense-proof-file-preview > \.authenticated-image-frame\s*\{[\s\S]*?width:\s*100%;[\s\S]*?height:\s*100%;/s);
+    assert.match(proofCss, /\.expense-proof-file-preview img\s*\{[\s\S]*?object-fit:\s*fill;/s);
+    assert.match(page, /<ExpenseDetailCard/);
+    assert.match(page, /setDetailExpenseId\(item\.id\)/);
+    assert.match(page, /<PaymentProofCenter showProofs=\{false\}/);
+    assert.doesNotMatch(page, /focusExpenseId=\{proofFocusExpenseId\}/);
+    assert.doesNotMatch(page, /onFocusExpenseHandled=\{handleProofFocusHandled\}/);
     const proofs = await source("src/features/travelExpense/PaymentProofCenter.jsx");
+    assert.match(proofs, /compact = false/);
+    assert.match(proofs, /expenseIds = null/);
+    assert.match(proofs, /showInbox = true/);
+    assert.match(proofs, /showProofs = true/);
+    assert.match(proofs, /const visibleExpenses = useMemo/);
     assert.match(proofs, /data-proof-expense-id=\{expense\.id\}/);
     assert.match(proofs, /data-proof-open/);
     assert.match(proofs, /target\.scrollIntoView\(\{ behavior: "smooth", block: "center" \}\)/);
@@ -519,7 +534,8 @@ describe("travel expense feature boundary", () => {
     // Prefill reaches the drawer only for the linked opening; manual entry and
     // closing always clear it.
     assert.match(page, /prefill=\{draftPrefill\}/);
-    assert.match(page, /setEditingExpense\(null\); setDraftPrefill\(null\); setEditorOpen\(true\);/);
+    assert.match(page, /setEditingExpense\(null\);[\s\S]*?setDraftPrefill\(\{[\s\S]*?defaultExpenseOccurredOn/);
+    assert.match(page, /selectedDate: selectedLedgerDate/);
     assert.match(page, /setEditorOpen\(false\); setEditingExpense\(null\); setDraftPrefill\(null\);/);
     // Region mismatch is advisory only: a warning plus a settings shortcut,
     // never an automatic region-profile write.
@@ -527,9 +543,9 @@ describe("travel expense feature boundary", () => {
     assert.match(page, /data-testid="expense-draft-region-warning"/);
     assert.match(page, /打开区域设置/);
     assert.match(page, /week\.start === draftWeekStart/);
-    assert.match(editor, /function createDraft\(expense, weekStart, prefill = null\)/);
-    assert.match(editor, /occurredOn: prefill\?\.occurredOn \?\? weekStart/);
-    assert.match(editor, /category: prefill \? "transport" : "breakfast"/);
+    assert.match(editor, /function createDraft\(expense, weekStart, prefill = null, regionProfile = null\)/);
+    assert.match(editor, /const occurredOn = expense\?\.occurredOn \?\? prefill\?\.occurredOn \?\? weekStart/);
+    assert.match(editor, /const category = expense\?\.category \?\? \(prefill \? "transport" : "breakfast"\)/);
     assert.match(app, /expenseDraft=\{expenseDraftFromFilters\(routeFilters\)\}/);
     assert.match(app, /onExpenseDraftConsumed=\{consumeExpenseDraftRoute\}/);
     assert.match(app, /function consumeExpenseDraftRoute\(\) \{[\s\S]*?writeBrowserRoute\(route, workspaceRef, \{ replace: true \}\);[\s\S]*?\}/);

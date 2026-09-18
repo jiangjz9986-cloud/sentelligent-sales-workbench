@@ -360,7 +360,7 @@ describe("主动助手真实对象验收", () => {
       leaseMs: 1_000,
       retryBaseMs: 10,
       modelProvider: "deepseek",
-      modelName: "deepseek-v4-flash",
+      modelName: "deepseek-flash",
       modelRetryLimit: 0,
       modelCacheTtlMs: 86_400_000,
       modelOwnerDailyLimit: 5,

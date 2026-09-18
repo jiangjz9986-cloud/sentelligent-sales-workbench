@@ -31,7 +31,8 @@ const WRITABLE_FIELDS = Object.freeze({
     "title", "visitDate", "status", "departureAddress", "departureCity", "departureLocation", "departureAt", "stops",
   ]),
   travelExpense: Object.freeze([
-    "occurredOn", "category", "purpose", "merchant", "itineraryId", "customerId", "notes", "payments",
+    "occurredOn", "category", "purpose", "merchant", "itineraryId", "customerId", "invoiceType",
+    "tripRegion", "tripRegionSource", "notes", "payments",
   ]),
   travelExpensePayment: Object.freeze([
     "id", "paidAt", "merchant", "amountCents", "reimbursementCents", "fundingSource",

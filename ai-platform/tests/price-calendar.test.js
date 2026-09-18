@@ -2,13 +2,19 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { priceAtAttempt, normalizePriceCalendar } from "../src/budgets/priceCalendar.js";
 import { calculateCostMicro } from "../src/budgets/ledger.js";
+import {
+  DEEPSEEK_FLASH_PRICE_CALENDAR,
+  DEEPSEEK_FLASH_PRICING_MICRO_CNY_PER_1K,
+} from "../../shared/deepseekContract.mjs";
 
-const peak = { input_micro_per_1k: 3000, output_micro_per_1k: 9000, cached_input_micro_per_1k: 100, audio_micro_per_minute: 0, image_micro_per_page: 0 };
-const calendar = {
-  schemaVersion: "price-calendar-v1", timeZone: "Asia/Shanghai", weekdays: [1, 2, 3, 4, 5],
-  peakWindows: [{ startMinute: 540, endMinute: 720 }, { startMinute: 840, endMinute: 1080 }],
-  offPeakRates: { input_micro_per_1k: 1500, output_micro_per_1k: 4500, cached_input_micro_per_1k: 50, audio_micro_per_minute: 0, image_micro_per_page: 0 },
+const peak = {
+  input_micro_per_1k: DEEPSEEK_FLASH_PRICING_MICRO_CNY_PER_1K.peak.input,
+  output_micro_per_1k: DEEPSEEK_FLASH_PRICING_MICRO_CNY_PER_1K.peak.output,
+  cached_input_micro_per_1k: DEEPSEEK_FLASH_PRICING_MICRO_CNY_PER_1K.peak.cachedInput,
+  audio_micro_per_minute: 0,
+  image_micro_per_page: 0,
 };
+const calendar = structuredClone(DEEPSEEK_FLASH_PRICE_CALENDAR);
 
 test("immutable price policy uses supplier-attempt time and Shanghai weekday boundaries", () => {
   const price = { ...peak, pricing_policy_json: JSON.stringify(calendar) };
@@ -18,8 +24,11 @@ test("immutable price policy uses supplier-attempt time and Shanghai weekday bou
     ["2026-09-10T10:00:00Z", "off-peak"], ["2026-09-12T02:00:00Z", "off-peak"],
   ]) assert.equal(priceAtAttempt(price, instant).pricingTier, tier);
   const usage = { inputTokens: 1000, outputTokens: 1000, cachedInputTokens: 1000 };
-  assert.equal(calculateCostMicro(usage, priceAtAttempt(price, "2026-09-10T02:00:00Z")).costMicro, 12100);
-  assert.equal(calculateCostMicro(usage, priceAtAttempt(price, "2026-09-10T12:00:00Z")).costMicro, 6050);
-  assert.equal(price.input_micro_per_1k, 3000);
-  assert.throws(() => normalizePriceCalendar({ ...calendar, offPeakRates: { ...calendar.offPeakRates, input_micro_per_1k: 6000 } }, peak), /invalid/);
+  assert.equal(calculateCostMicro(usage, priceAtAttempt(price, "2026-09-10T02:00:00Z")).costMicro, 10040);
+  assert.equal(calculateCostMicro(usage, priceAtAttempt(price, "2026-09-10T12:00:00Z")).costMicro, 5020);
+  assert.equal(price.input_micro_per_1k, 2000);
+  assert.equal(calendar.offPeakRates.input_micro_per_1k, 1000);
+  assert.equal(calendar.offPeakRates.output_micro_per_1k, 4000);
+  assert.equal(calendar.offPeakRates.cached_input_micro_per_1k, 20);
+  assert.throws(() => normalizePriceCalendar({ ...calendar, offPeakRates: { ...calendar.offPeakRates, input_micro_per_1k: 3000 } }, peak), /invalid/);
 });

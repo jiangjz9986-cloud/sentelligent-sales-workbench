@@ -2,6 +2,7 @@ import { spawnSync } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import {
   closeSync,
+  copyFileSync,
   existsSync,
   fsyncSync,
   linkSync,
@@ -30,7 +31,7 @@ import {
 } from "node:path";
 import { fileURLToPath } from "node:url";
 import { TextDecoder } from "node:util";
-import { gzipSync } from "node:zlib";
+import { gunzipSync, gzipSync } from "node:zlib";
 
 const defaultRoot = resolve(import.meta.dirname, "..");
 const GIT_OUTPUT_LIMIT_BYTES = 256 * 1024 * 1024;
@@ -1392,6 +1393,81 @@ function npmCliInvocation(environment, nodeExecutable) {
   );
 }
 
+function copyNpmCacheSeed(sourceRoot, destinationRoot) {
+  if (!sourceRoot || !existsSync(sourceRoot)) return false;
+  const sourceStat = lstatSync(sourceRoot);
+  if (!sourceStat.isDirectory()) {
+    throw new Error("Npm cache seed must be a directory");
+  }
+
+  const pending = [{ source: sourceRoot, destination: destinationRoot }];
+  while (pending.length > 0) {
+    const current = pending.pop();
+    mkdirSync(current.destination, { recursive: true });
+    for (const entry of readdirSync(current.source, { withFileTypes: true })) {
+      const sourcePath = join(current.source, entry.name);
+      const destinationPath = join(current.destination, entry.name);
+      const entryStat = lstatSync(sourcePath);
+      if (entryStat.isSymbolicLink()) {
+        throw new Error(`Npm cache seed cannot contain symbolic links: ${sourcePath}`);
+      }
+      if (entryStat.isDirectory()) {
+        pending.push({ source: sourcePath, destination: destinationPath });
+        continue;
+      }
+      if (!entryStat.isFile()) {
+        throw new Error(`Npm cache seed contains an unsupported entry: ${sourcePath}`);
+      }
+      mkdirSync(dirname(destinationPath), { recursive: true });
+      copyFileSync(sourcePath, destinationPath);
+    }
+  }
+  return true;
+}
+
+function runNpmCi({
+  npm,
+  cwd,
+  environment,
+  cacheRoot,
+  userConfigPath,
+  globalConfigPath,
+  includeDev = false,
+  cacheSeeded,
+}) {
+  const installOptions = [
+    "--ignore-scripts",
+    ...(includeDev ? ["--include=dev"] : ["--omit=dev", "--install-links"]),
+    "--no-audit",
+    "--no-fund",
+    "--cache",
+    cacheRoot,
+    "--userconfig",
+    userConfigPath,
+    "--globalconfig",
+    globalConfigPath,
+  ];
+  const cacheModes = cacheSeeded
+    ? ["--offline", "--prefer-offline"]
+    : ["--prefer-offline"];
+  let result;
+  for (const cacheMode of cacheModes) {
+    result = spawnSync(
+      npm.command,
+      [...npm.argsPrefix, "ci", ...installOptions.slice(0, 4), cacheMode, ...installOptions.slice(4)],
+      {
+        cwd,
+        encoding: "utf8",
+        env: npm.environment ?? environment,
+        timeout: 300_000,
+        windowsHide: true,
+      },
+    );
+    if (result.status === 0 || cacheMode === "--prefer-offline") break;
+  }
+  return result;
+}
+
 function installFrontendDependencies({
   checkoutRoot,
   commit,
@@ -1399,6 +1475,7 @@ function installFrontendDependencies({
   packageJson,
   temporaryRoot,
   nodeExecutable,
+  cacheSeedRoot,
 }) {
   const lockfilePath = join(frontendRoot, "package-lock.json");
   const committedLockfile = existsSync(lockfilePath)
@@ -1454,6 +1531,7 @@ function installFrontendDependencies({
   const userConfigPath = join(temporaryRoot, "empty-user-npmrc");
   const globalConfigPath = join(temporaryRoot, "empty-global-npmrc");
   mkdirSync(cacheRoot, { recursive: true });
+  const cacheSeeded = copyNpmCacheSeed(cacheSeedRoot, cacheRoot);
   writeFileSync(userConfigPath, "", { flag: "wx" });
   writeFileSync(globalConfigPath, "", { flag: "wx" });
   const installEnvironment = npmInstallEnvironment(
@@ -1463,30 +1541,16 @@ function installFrontendDependencies({
     nodeExecutable,
   );
   const npm = npmCliInvocation(installEnvironment, nodeExecutable);
-  const result = spawnSync(
-    npm.command,
-    [
-      ...npm.argsPrefix,
-      "ci",
-      "--ignore-scripts",
-      "--include=dev",
-      "--no-audit",
-      "--no-fund",
-      "--cache",
-      cacheRoot,
-      "--userconfig",
-      userConfigPath,
-      "--globalconfig",
-      globalConfigPath,
-    ],
-    {
-      cwd: frontendRoot,
-      encoding: "utf8",
-      env: npm.environment ?? installEnvironment,
-      timeout: 300_000,
-      windowsHide: true,
-    },
-  );
+  const result = runNpmCi({
+    npm,
+    cwd: frontendRoot,
+    environment: installEnvironment,
+    cacheRoot,
+    userConfigPath,
+    globalConfigPath,
+    includeDev: true,
+    cacheSeeded,
+  });
   if (result.status !== 0) {
     const message = result.error?.message || result.stderr || result.stdout;
     throw new Error(
@@ -1520,6 +1584,7 @@ function installComponentProductionDependencies({
   temporaryRoot,
   nodeExecutable,
   componentPath = BACKEND_PATH,
+  cacheSeedRoot,
 }) {
   if (![BACKEND_PATH, "ai-platform"].includes(componentPath)) throw new Error("Unsupported release component");
   const lockfileReleasePath = componentPath + "/package-lock.json";
@@ -1582,6 +1647,7 @@ function installComponentProductionDependencies({
   const userConfigPath = join(temporaryRoot, "empty-" + componentPath + "-user-npmrc");
   const globalConfigPath = join(temporaryRoot, "empty-" + componentPath + "-global-npmrc");
   mkdirSync(cacheRoot, { recursive: true });
+  const cacheSeeded = copyNpmCacheSeed(cacheSeedRoot, cacheRoot);
   writeFileSync(userConfigPath, "", { flag: "wx" });
   writeFileSync(globalConfigPath, "", { flag: "wx" });
   const installEnvironment = npmInstallEnvironment(
@@ -1591,31 +1657,15 @@ function installComponentProductionDependencies({
     nodeExecutable,
   );
   const npm = npmCliInvocation(installEnvironment, nodeExecutable);
-  const result = spawnSync(
-    npm.command,
-    [
-      ...npm.argsPrefix,
-      "ci",
-      "--ignore-scripts",
-      "--omit=dev",
-      "--install-links",
-      "--no-audit",
-      "--no-fund",
-      "--cache",
-      cacheRoot,
-      "--userconfig",
-      userConfigPath,
-      "--globalconfig",
-      globalConfigPath,
-    ],
-    {
-      cwd: backendRoot,
-      encoding: "utf8",
-      env: npm.environment ?? installEnvironment,
-      timeout: 300_000,
-      windowsHide: true,
-    },
-  );
+  const result = runNpmCi({
+    npm,
+    cwd: backendRoot,
+    environment: installEnvironment,
+    cacheRoot,
+    userConfigPath,
+    globalConfigPath,
+    cacheSeeded,
+  });
   if (result.status !== 0) {
     const message = result.error?.message || result.stderr || result.stdout;
     throw new Error(
@@ -1695,7 +1745,13 @@ function assertBuildDidNotMutateCommit(checkoutRoot, commit) {
   }
 }
 
-function buildFrontendFromCommit(checkoutRoot, commit, temporaryRoot, nodeExecutable) {
+function buildFrontendFromCommit(
+  checkoutRoot,
+  commit,
+  temporaryRoot,
+  nodeExecutable,
+  cacheSeedRoot,
+) {
   const frontendRoot = join(checkoutRoot, PRODUCT_FRONTEND_PATH);
   const packagePath = join(frontendRoot, "package.json");
   if (!existsSync(packagePath)) {
@@ -1725,6 +1781,7 @@ function buildFrontendFromCommit(checkoutRoot, commit, temporaryRoot, nodeExecut
       packageJson,
       temporaryRoot,
       nodeExecutable,
+      cacheSeedRoot,
     });
     const invocation = resolveNpmBuildInvocation(
       frontendRoot,
@@ -1813,6 +1870,204 @@ function sourceTreeHash(files) {
     .map(([file, hash]) => `${hash}  ${file}\n`)
     .join("");
   return hashBuffer(Buffer.from(index, "utf8"));
+}
+
+function readTarString(header, offset, length) {
+  const end = header.indexOf(0, offset);
+  const limit = offset + length;
+  return header
+    .subarray(offset, end >= offset && end < limit ? end : limit)
+    .toString("utf8");
+}
+
+function readTarOctal(header, offset, length, label) {
+  const value = readTarString(header, offset, length).trim();
+  if (!/^\d+$/.test(value)) {
+    throw new Error(`${label} must be a valid octal number`);
+  }
+  const parsed = Number.parseInt(value, 8);
+  if (!Number.isSafeInteger(parsed) || parsed < 0) {
+    throw new Error(`${label} is outside the supported range`);
+  }
+  return parsed;
+}
+
+function parsePaxRecords(content) {
+  const records = {};
+  let offset = 0;
+  while (offset < content.length) {
+    const space = content.indexOf(0x20, offset);
+    if (space <= offset) throw new Error("PAX record length is invalid");
+    const lengthText = content.subarray(offset, space).toString("ascii");
+    if (!/^\d+$/.test(lengthText)) throw new Error("PAX record length is invalid");
+    const length = Number(lengthText);
+    if (!Number.isSafeInteger(length) || length < space - offset + 3 || offset + length > content.length) {
+      throw new Error("PAX record exceeds the archive boundary");
+    }
+    const record = content.subarray(offset, offset + length);
+    if (record.at(-1) !== 0x0a) throw new Error("PAX record is not newline terminated");
+    const equals = record.indexOf(0x3d, space + 1);
+    if (equals <= space + 1) throw new Error("PAX record has no attribute name");
+    const name = record.subarray(space + 1, equals).toString("utf8");
+    const value = record.subarray(equals + 1, record.length - 1).toString("utf8");
+    if (!/^[A-Za-z][A-Za-z0-9_.-]*$/.test(name)) throw new Error("PAX attribute name is invalid");
+    records[name] = value;
+    offset += length;
+  }
+  return records;
+}
+
+function parseReleaseArchiveEntries(archiveContent) {
+  if (!Buffer.isBuffer(archiveContent) || archiveContent.length === 0) {
+    throw new Error("Release archive content is unavailable");
+  }
+  const tar = gunzipSync(archiveContent);
+  const entries = [];
+  let pendingPaxPath = null;
+  let offset = 0;
+  let sawEnd = false;
+  while (offset + 512 <= tar.length) {
+    const header = tar.subarray(offset, offset + 512);
+    if (header.every((byte) => byte === 0)) {
+      if (offset + 1024 > tar.length || !tar.subarray(offset + 512, offset + 1024).every((byte) => byte === 0)) {
+        throw new Error("Release archive has an incomplete end marker");
+      }
+      sawEnd = true;
+      break;
+    }
+    const size = readTarOctal(header, 124, 12, "Tar entry size");
+    const bodyStart = offset + 512;
+    const bodyEnd = bodyStart + size;
+    const paddedEnd = bodyStart + Math.ceil(size / 512) * 512;
+    if (bodyEnd > tar.length || paddedEnd > tar.length) {
+      throw new Error("Tar entry exceeds the archive boundary");
+    }
+    const type = header[156] === 0 ? "0" : String.fromCharCode(header[156]);
+    const body = tar.subarray(bodyStart, bodyEnd);
+    if (type === "x") {
+      const pax = parsePaxRecords(body);
+      pendingPaxPath = pax.path ?? null;
+    } else {
+      if (type !== "0") throw new Error(`Release archive contains unsupported entry type: ${type}`);
+      const headerPath = `${readTarString(header, 345, 155)}${readTarString(header, 345, 155) ? "/" : ""}${readTarString(header, 0, 100)}`;
+      entries.push({
+        path: pendingPaxPath ?? headerPath,
+        content: body,
+        mode: readTarOctal(header, 100, 8, "Tar entry mode") & 0o777,
+      });
+      pendingPaxPath = null;
+    }
+    offset = paddedEnd;
+  }
+  if (!sawEnd) throw new Error("Release archive is missing its end marker");
+  if (pendingPaxPath !== null) throw new Error("Release archive ends after an unused PAX path");
+  return entries;
+}
+
+function normalizedReleaseArchiveMode(metadata) {
+  return (metadata.mode & 0o111) !== 0 ? 0o755 : 0o644;
+}
+
+function collectReleaseInventory(root, current = root, result = new Map()) {
+  for (const entry of readdirSync(current, { withFileTypes: true })) {
+    const fullPath = join(current, entry.name);
+    const relativePath = normalizeRelativePath(relative(root, fullPath));
+    const metadata = lstatSync(fullPath);
+    if (metadata.isSymbolicLink()) {
+      throw new Error(`Release inventory contains a symbolic link: ${relativePath}`);
+    }
+    if (metadata.isDirectory()) {
+      collectReleaseInventory(root, fullPath, result);
+      continue;
+    }
+    if (!metadata.isFile() || metadata.nlink !== 1) {
+      throw new Error(`Release inventory contains an unsupported entry: ${relativePath}`);
+    }
+    result.set(relativePath, {
+      content: readFileSync(fullPath),
+      mode: normalizedReleaseArchiveMode(metadata),
+    });
+  }
+  return result;
+}
+
+function normalizeReleaseArchivePath(path) {
+  if (
+    typeof path !== "string" ||
+    !path ||
+    path.includes("\\") ||
+    path.startsWith("/") ||
+    path.split("/").some((part) => part === "" || part === "." || part === "..")
+  ) {
+    throw new Error("Release archive path is unsafe");
+  }
+  return path;
+}
+
+export function validateReleaseArchiveBinding({
+  archiveContent,
+  releaseDirectoryPath,
+  manifest,
+  enforcePosix = process.platform !== "win32",
+} = {}) {
+  try {
+    const rootDirectory = manifest?.archive?.rootDirectory;
+    if (
+      typeof rootDirectory !== "string" ||
+      !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(rootDirectory)
+    ) {
+      throw new Error("Release manifest archive root is invalid");
+    }
+    const requestedRoot = resolve(String(releaseDirectoryPath ?? ""));
+    const releaseRoot = realpathSync.native(requestedRoot);
+    if ((enforcePosix && releaseRoot !== requestedRoot) || basename(releaseRoot) !== rootDirectory) {
+      throw new Error("Release directory is not the archive root");
+    }
+    const rootMetadata = lstatSync(releaseRoot);
+    if (!rootMetadata.isDirectory() || rootMetadata.isSymbolicLink()) {
+      throw new Error("Release directory is not a regular directory");
+    }
+    if (enforcePosix && (rootMetadata.uid !== 0 || rootMetadata.gid !== 0 || (rootMetadata.mode & 0o022) !== 0)) {
+      throw new Error("Release directory has unsafe ownership or permissions");
+    }
+
+    const diskInventory = collectReleaseInventory(releaseRoot);
+    const archiveEntries = parseReleaseArchiveEntries(archiveContent);
+    if (archiveEntries.length !== manifest.archive.packagedFiles) {
+      throw new Error("Release archive entry count does not match the manifest");
+    }
+    const expectedFiles = new Map(diskInventory);
+    const seen = new Set();
+    for (const entry of archiveEntries) {
+      const archivePath = normalizeReleaseArchivePath(entry.path);
+      if (!archivePath.startsWith(`${rootDirectory}/`)) {
+        throw new Error("Release archive entry is outside its declared root");
+      }
+      const relativePath = normalizeReleaseArchivePath(archivePath.slice(rootDirectory.length + 1));
+      if (seen.has(relativePath)) throw new Error(`Release archive contains a duplicate entry: ${relativePath}`);
+      seen.add(relativePath);
+      const expected = expectedFiles.get(relativePath);
+      if (!expected) throw new Error(`Release archive contains an unverified entry: ${relativePath}`);
+      if (entry.mode !== expected.mode || !entry.content.equals(expected.content)) {
+        throw new Error(`Release archive content or mode differs from the extracted release: ${relativePath}`);
+      }
+      expectedFiles.delete(relativePath);
+    }
+    if (expectedFiles.size > 0) {
+      throw new Error("Extracted release contains files missing from the release archive");
+    }
+    return {
+      valid: true,
+      rootDirectory,
+      entries: archiveEntries.length,
+      archiveSha256: hashBuffer(archiveContent),
+    };
+  } catch (error) {
+    return {
+      valid: false,
+      message: error instanceof Error ? error.message : "Release archive binding is invalid",
+    };
+  }
 }
 
 export function buildReleaseManifest({
@@ -1966,11 +2221,11 @@ function splitTarPath(filePath) {
   throw new Error(`Release path is too long for a portable ustar archive: ${filePath}`);
 }
 
-function tarHeader(filePath, size, mtimeSeconds, type = "0") {
+function tarHeader(filePath, size, mtimeSeconds, type = "0", mode = 0o644) {
   const header = Buffer.alloc(512);
   const { name, prefix } = splitTarPath(filePath);
   writeTarString(header, name, 0, 100, "Tar path");
-  writeTarOctal(header, 0o644, 100, 8);
+  writeTarOctal(header, mode & 0o777, 100, 8);
   writeTarOctal(header, 0, 108, 8);
   writeTarOctal(header, 0, 116, 8);
   writeTarOctal(header, size, 124, 12);
@@ -2006,14 +2261,14 @@ function paxRecord(name, value) {
   }
 }
 
-function appendTarEntry(chunks, path, content, mtimeSeconds, type = "0") {
-  chunks.push(tarHeader(path, content.length, mtimeSeconds, type));
+function appendTarEntry(chunks, path, content, mtimeSeconds, type = "0", mode = 0o644) {
+  chunks.push(tarHeader(path, content.length, mtimeSeconds, type, mode));
   chunks.push(content);
   const padding = (512 - (content.length % 512)) % 512;
   if (padding) chunks.push(Buffer.alloc(padding));
 }
 
-function createTarGzip(entries, mtimeSeconds) {
+export function createTarGzip(entries, mtimeSeconds) {
   const chunks = [];
   entries.forEach((entry, index) => {
     const needsPaxPath =
@@ -2031,7 +2286,7 @@ function createTarGzip(entries, mtimeSeconds) {
       );
       headerPath = `PaxFiles/${suffix}`;
     }
-    appendTarEntry(chunks, headerPath, entry.content, mtimeSeconds);
+    appendTarEntry(chunks, headerPath, entry.content, mtimeSeconds, "0", entry.mode ?? 0o644);
   });
   chunks.push(Buffer.alloc(1024));
   return gzipSync(Buffer.concat(chunks), { level: 9, mtime: 0 });
@@ -2195,6 +2450,7 @@ export async function createReleasePackage(options = {}) {
   const worktree = createCommitWorktree(root, source.commit);
   let files;
   let contentByPath;
+  let modeByPath;
   let manifest;
   let packagingError;
   try {
@@ -2203,12 +2459,14 @@ export async function createReleasePackage(options = {}) {
       source.commit,
       worktree.temporaryRoot,
       nodeExecutable,
+      join(root, PRODUCT_FRONTEND_PATH, ".npm-cache"),
     );
     const backendBuildProvenance = installComponentProductionDependencies({
       checkoutRoot: worktree.checkoutRoot,
       commit: source.commit,
       temporaryRoot: worktree.temporaryRoot,
       nodeExecutable,
+      cacheSeedRoot: join(root, BACKEND_PATH, ".npm-cache"),
     });
     const platformBuildProvenance = installComponentProductionDependencies({
       checkoutRoot: worktree.checkoutRoot,
@@ -2216,6 +2474,7 @@ export async function createReleasePackage(options = {}) {
       temporaryRoot: worktree.temporaryRoot,
       nodeExecutable,
       componentPath: "ai-platform",
+      cacheSeedRoot: join(root, "ai-platform", ".npm-cache"),
     });
     const buildProvenance = {
       ...(frontendBuildProvenance || {}),
@@ -2232,6 +2491,14 @@ export async function createReleasePackage(options = {}) {
         tracked.has(file) && !file.startsWith(PRODUCT_DIST_PREFIX)
           ? gitFileContent(worktree.checkoutRoot, source.commit, file)
           : readFileSync(join(worktree.checkoutRoot, file)),
+      ]),
+    );
+    modeByPath = new Map(
+      files.map((file) => [
+        file,
+        normalizedReleaseArchiveMode(
+          lstatSync(join(worktree.checkoutRoot, file)),
+        ),
       ]),
     );
     assertNoReleaseSecrets(files, contentByPath);
@@ -2261,10 +2528,12 @@ export async function createReleasePackage(options = {}) {
     ...files.map((file) => ({
       path: `${rootDirectory}/${file}`,
       content: contentByPath.get(file),
+      mode: modeByPath.get(file),
     })),
     {
       path: `${rootDirectory}/release-manifest.json`,
       content: manifestContent,
+      mode: 0o644,
     },
   ].sort((left, right) => compareUtf8Paths(left.path, right.path));
 

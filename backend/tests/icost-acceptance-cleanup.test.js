@@ -93,7 +93,7 @@ function insertAcceptanceFixture(db, {
       $id, $owner, $actor, $source, $idempotencyKeyHash, $requestHash,
       $sourceId, '2026-08-05 lunch acceptance 128.50',
       '2026-08-05T12:30:00+08:00', $status, 1,
-      'deepseek', 'deepseek-chat', $analysisJson, '[]',
+      'deepseek', 'deepseek-flash', $analysisJson, '[]',
       $expenseId, $paymentId, $now, $now
     )
   `).run({

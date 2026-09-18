@@ -167,6 +167,49 @@ function parseSafeConflictReply(value) {
   return { status: body.status, text: body.text };
 }
 
+function suppressDurableAcceptedReceipt(body) {
+  const result = body?.result;
+  const hasAcceptedStatus = result?.status === "accepted";
+  // The bookkeeping runtime's first successful confirmation returns the
+  // accepted identifiers without a nested status; replayed confirmations do
+  // carry status: "accepted". Both shapes are durable outbox receipts.
+  const hasAcceptedBookkeepingIds = result?.status === undefined
+    && typeof result?.entryId === "string"
+    && result.entryId.trim()
+    && typeof result?.expenseId === "string"
+    && result.expenseId.trim()
+    && typeof result?.paymentId === "string"
+    && result.paymentId.trim();
+  if (
+    body?.status !== "ok"
+    || !result
+    || typeof result !== "object"
+    || Array.isArray(result)
+    || (!hasAcceptedStatus && !hasAcceptedBookkeepingIds)
+  ) {
+    return body;
+  }
+
+  // Accepted bookkeeping receipts are durably queued by the backend and must
+  // be delivered by the outbox worker exactly once. Returning the backend's
+  // text here would make the Weixin SDK send a synchronous mirror as well.
+  return { ...body, text: "" };
+}
+
+function suppressFlaggedSynchronousReply(body) {
+  if (body?.suppressSynchronousReply !== true) return body;
+  const debugText = typeof body.text === "string" && body.text.trim()
+    ? body.text
+    : typeof body.debugText === "string" && body.debugText.trim()
+      ? body.debugText
+      : null;
+  return {
+    ...body,
+    text: "",
+    ...(debugText ? { debugText } : {}),
+  };
+}
+
 async function normalizeMedia(request) {
   if (!request.media) return null;
   try {
@@ -272,7 +315,8 @@ export function createRemoteClawbotAgent(options = {}) {
         throw new RemoteAgentError("REMOTE_AGENT_REQUEST_FAILED", SAFE_FAILURE_MESSAGE, { permanent });
       }
       try {
-        return parseResponseBody(responseText);
+        const parsed = parseResponseBody(responseText);
+        return suppressDurableAcceptedReceipt(suppressFlaggedSynchronousReply(parsed));
       } catch (error) {
         if (error instanceof RemoteAgentError) throw error;
         throw new RemoteAgentError("REMOTE_AGENT_INVALID_RESPONSE");

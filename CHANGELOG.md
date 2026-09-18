@@ -4,6 +4,29 @@
 
 ## [Unreleased]
 
+## [0.13.3] - 2026-09-10
+
+### 医院招标主动事件幂等修复
+
+- 移除招标主动事件 payload 中不稳定的 scheduler `runId`，保持同一快照、客户和公告身份在重试时复用同一事件。
+- 对历史事件仅忽略已确认的 `runId` 差异，继续严格校验事件类型、实体和其他业务内容，避免旧生产 queued 事件在修复后产生冲突或重复。
+- 增加同一事件不同 scheduler run id 的 replay 与真实业务字段冲突回归测试。
+
+## [0.13.2] - 2026-09-10
+
+### AI 平台切换清理检查修复
+
+- 修正 AI Platform 生产准备失败清理路径使用的表名，改为当前 `task_attempts`、`usage_ledger` 和 `result_deliveries` schema，并增加空平台库回归测试。
+- 保持 P1 `local-simulated`、平台 admission 关闭、Backend 主动调度单一所有者及 PushPlus 退役边界不变。
+
+## [0.13.1] - 2026-09-10
+
+### AI 平台生产切换收尾修复
+
+- 生产 transition 的 SQLite 快照统一使用 `VACUUM INTO`，保证 WAL 在线备份是无 sidecar 的独立 DELETE-journal 文件，回滚和 postflight 预检不会被残留 `-wal/-shm` 拒绝。
+- P1 收尾读取 AI 平台 operations 时增加有界的幂等 socket 瞬态错误重试，降低服务切换后单次 `EPIPE` 导致整条 transition 进入回滚的概率。
+- 增加备份 sidecar 回归断言；保持 PushPlus 退役、Backend 主动调度单一所有者、平台 P1 local-simulated 和业务 legacy 路由边界不变。
+
 ## [0.13.0] - 2026-09-10
 
 ### AI 统一调度平台融合升级

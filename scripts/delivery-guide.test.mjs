@@ -23,7 +23,7 @@ describe("formal delivery guide", () => {
       "npm run qa:full",
       "npm run scan:secrets",
       "backend .env",
-      "DeepSeek-V4-Flash",
+      "DeepSeek-V4.1-Flash",
       "/api/audit-logs",
       "npm run wsl:stack:smoke",
     ]) {

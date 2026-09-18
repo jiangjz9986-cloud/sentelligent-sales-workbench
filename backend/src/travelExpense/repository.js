@@ -12,9 +12,12 @@ import {
   putDocumentBlob,
   withDocumentBlobWritePreflightSync,
 } from "./documentBlobStore.js";
+import { resolveTravelExpenseNote } from "./expenseNote.js";
 import { detectDocumentType, validateDocumentFileName } from "./invoiceRecognition.js";
 
 const CATEGORIES = new Set(["breakfast", "lunch", "dinner", "lodging", "transport", "hospitality", "other"]);
+const INVOICE_TYPES = new Set(["electronic", "paper", "substitute"]);
+const TRIP_REGION_SOURCES = new Set(["week_default", "date_override", "user_correction", "itinerary", "payment_text"]);
 const FUNDING_SOURCES = new Set(["personal", "company", "advance"]);
 const PAYMENT_METHODS = new Set(["wechat", "alipay", "card", "cash", "other"]);
 const ATTACHMENT_KINDS = new Set(["payment_proof", "invoice", "substitute"]);
@@ -66,6 +69,12 @@ function enumValue(value, allowed, name, fallback) {
   const normalized = value ?? fallback;
   if (!allowed.has(normalized)) throw new TypeError(`${name} is invalid`);
   return normalized;
+}
+
+function nullableEnum(value, allowed, name) {
+  if (value === undefined) return undefined;
+  if (value === null || value === "") return null;
+  return enumValue(value, allowed, name);
 }
 
 function cents(value, name, fallback) {
@@ -221,7 +230,7 @@ function normalizePayment(input, index, idFactory) {
   };
 }
 
-function normalizeExpense(input, idFactory) {
+function normalizeExpense(input, idFactory, { current = null, preserveMissing = false } = {}) {
   const { actor, owner } = ownerAndActor(input);
   if (!Array.isArray(input.payments) || input.payments.length < 1 || input.payments.length > 25) {
     throw new TypeError("payments must contain between 1 and 25 items");
@@ -230,16 +239,34 @@ function normalizeExpense(input, idFactory) {
   if (new Set(payments.map((item) => item.id)).size !== payments.length) {
     throw new TypeError("payment ids must be unique");
   }
+  const occurredOn = dateOnly(input.occurredOn, "occurredOn");
+  const category = enumValue(input.category, CATEGORIES, "category");
+  const tripRegion = input.tripRegion === undefined && preserveMissing
+    ? current?.trip_region ?? null
+    : optionalText(input.tripRegion, "tripRegion", 100);
+  const tripRegionSource = input.tripRegionSource === undefined && preserveMissing
+    ? current?.trip_region_source ?? null
+    : nullableEnum(input.tripRegionSource, TRIP_REGION_SOURCES, "tripRegionSource");
+  const notesInput = input.notes === undefined && preserveMissing ? current?.notes ?? null : input.notes;
+  const resolvedNotes = resolveTravelExpenseNote({
+    notes: notesInput,
+    occurredOn,
+    category,
+    tripRegion,
+  });
   return {
     actor,
     owner,
-    occurredOn: dateOnly(input.occurredOn, "occurredOn"),
-    category: enumValue(input.category, CATEGORIES, "category"),
+    occurredOn,
+    category,
     purpose: requiredText(input.purpose, "purpose", 1000),
     merchant: optionalText(input.merchant, "merchant", 500),
     itineraryId: optionalText(input.itineraryId, "itineraryId", 200),
     customerId: optionalText(input.customerId, "customerId", 200),
-    notes: optionalText(input.notes, "notes", 5000),
+    invoiceType: nullableEnum(input.invoiceType, INVOICE_TYPES, "invoiceType"),
+    tripRegion,
+    tripRegionSource,
+    notes: resolvedNotes ? optionalText(resolvedNotes, "notes", 5000) : null,
     payments,
   };
 }
@@ -301,6 +328,7 @@ export function createTravelExpenseRepository(db, {
       itineraryId: row.itinerary_id,
       customerId: row.customer_id,
       invoiceStatus: row.invoice_status,
+      invoiceType: row.invoice_type ?? null,
       notes: row.notes,
       tripRegion: row.trip_region ?? null,
       tripRegionSource: row.trip_region_source ?? null,
@@ -609,10 +637,12 @@ export function createTravelExpenseRepository(db, {
       db.prepare(`
         INSERT INTO travel_expenses (
           id, reference_code, owner, occurred_on, category, purpose, merchant, itinerary_id, customer_id,
-          invoice_status, notes, created_by, updated_by, created_at, updated_at
+          invoice_status, invoice_type, notes, trip_region, trip_region_source,
+          created_by, updated_by, created_at, updated_at
         ) VALUES (
           $id, $referenceCode, $owner, $occurredOn, $category, $purpose, $merchant, $itineraryId, $customerId,
-          'pending', $notes, $actor, $actor, $now, $now
+          'pending', $invoiceType, $notes, $tripRegion, $tripRegionSource,
+          $actor, $actor, $now, $now
         )
       `).run({
         $id: id,
@@ -624,7 +654,10 @@ export function createTravelExpenseRepository(db, {
         $merchant: normalized.merchant,
         $itineraryId: normalized.itineraryId,
         $customerId: normalized.customerId,
+        $invoiceType: normalized.invoiceType ?? null,
         $notes: normalized.notes,
+        $tripRegion: normalized.tripRegion,
+        $tripRegionSource: normalized.tripRegionSource ?? null,
         $actor: normalized.actor,
         $now: now,
       });
@@ -635,21 +668,27 @@ export function createTravelExpenseRepository(db, {
 
   function updateExpense(id, input = {}) {
     const expenseId = requiredText(id, "id", 200);
-    const normalized = normalizeExpense(input, idFactory);
+    const { owner } = ownerAndActor(input);
     const version = positiveVersion(input.expectedVersion);
     const now = nowIso(clock);
     return runTransaction(db, () => {
-      const current = anyExpense.get({ $id: expenseId, $owner: normalized.owner });
+      const current = anyExpense.get({ $id: expenseId, $owner: owner });
       if (!current || current.deleted_at) throw new TravelExpenseNotFoundError();
       if (Number(current.version) !== version) {
         throw new TravelExpenseVersionConflictError(Number(current.version));
       }
+      const normalized = normalizeExpense(input, idFactory, { current, preserveMissing: true });
       const mutation = validatePaymentMutation(expenseId, normalized.payments);
+      const invoiceType = normalized.invoiceType === undefined
+        ? current.invoice_type ?? null
+        : normalized.invoiceType;
       const result = db.prepare(`
         UPDATE travel_expenses
         SET occurred_on = $occurredOn, category = $category, purpose = $purpose,
             merchant = $merchant, itinerary_id = $itineraryId, customer_id = $customerId,
-            invoice_status = $invoiceStatus, notes = $notes, updated_by = $actor,
+            invoice_status = $invoiceStatus, invoice_type = $invoiceType,
+            notes = $notes, trip_region = $tripRegion, trip_region_source = $tripRegionSource,
+            updated_by = $actor,
             updated_at = $now, version = version + 1
         WHERE id = $id AND owner = $owner AND version = $expectedVersion AND deleted_at IS NULL
       `).run({
@@ -663,7 +702,10 @@ export function createTravelExpenseRepository(db, {
         $itineraryId: normalized.itineraryId,
         $customerId: normalized.customerId,
         $invoiceStatus: mutation.invoiceStatus,
+        $invoiceType: invoiceType,
         $notes: normalized.notes,
+        $tripRegion: normalized.tripRegion,
+        $tripRegionSource: normalized.tripRegionSource,
         $actor: normalized.actor,
         $now: now,
       });

@@ -91,6 +91,40 @@ test("enqueue is idempotent, hashes the key, and rejects confirmation secrets", 
   });
 });
 
+test("supports a short intake window without leasing the first batch draft early", () => {
+  withDatabase((db) => {
+    const clock = makeClock();
+    const repository = createWeixinConfirmationOutboxRepository(db, {
+      clock: clock.now,
+      idFactory: () => "outbox-batch-window",
+    });
+    const availableAt = new Date(clock.now().getTime() + 3_000).toISOString();
+    const created = repository.enqueue({
+      owner: "owner-1",
+      conversationId: "conversation-1",
+      idempotencyKey: "batch-window-1",
+      payload: { kind: "confirmation", batchId: "batch-1" },
+      availableAt,
+    });
+    assert.equal(created.availableAt, availableAt);
+    assert.equal(repository.leaseNext({ renderMessage: () => "too early" }), null);
+
+    const extended = new Date(clock.now().getTime() + 5_000).toISOString();
+    const deferred = repository.deferQueued(created.id, extended);
+    assert.equal(deferred.availableAt, extended);
+    clock.advance(4_999);
+    assert.equal(repository.leaseNext({ renderMessage: () => "still too early" }), null);
+    clock.advance(1);
+    const lease = repository.leaseNext({ renderMessage: (item) => item.payload.batchId });
+    assert.equal(lease.message, "batch-1");
+    repository.ackSuccess(lease.item.id, { leaseToken: lease.leaseToken });
+
+    const sent = repository.deferQueued(created.id, new Date(clock.now().getTime() + 10_000).toISOString());
+    assert.equal(sent.status, "sent");
+    assert.equal(sent.availableAt, extended);
+  });
+});
+
 test("lease renders only in memory, fences concurrent workers, and acknowledges success", () => {
   withDatabase((db) => {
     const clock = makeClock();
@@ -157,6 +191,80 @@ test("expired processing lease is recovered without overlap and stale acknowledg
   });
 });
 
+test("context expiry releases a fenced lease without changing attempts", () => {
+  withDatabase((db) => {
+    const clock = makeClock("2026-08-29T02:00:00.000Z");
+    const repository = createWeixinConfirmationOutboxRepository(db, {
+      clock: clock.now,
+      leaseMs: 10_000,
+      idFactory: () => "outbox-context-expired",
+    });
+    const created = repository.enqueue({
+      owner: "owner-1",
+      conversationId: "conversation-1",
+      idempotencyKey: "context-expired-1",
+      payload: { kind: "confirmation", amountCents: 9 },
+    });
+    const first = repository.leaseNext({ workerId: "worker-1", renderMessage: () => "draft-1" });
+    clock.advance(10_001);
+    const current = repository.leaseNext({ workerId: "worker-2", renderMessage: () => "draft-2" });
+    assert.notEqual(current.leaseToken, first.leaseToken);
+
+    assert.throws(
+      () => repository.releaseLeaseWithoutAttempt(created.id, {
+        leaseToken: first.leaseToken,
+      }),
+      (error) => error?.code === "WEIXIN_OUTBOX_LEASE_LOST",
+    );
+    assert.equal(repository.get(created.id).status, "processing");
+    assert.equal(repository.get(created.id).attemptCount, 0);
+
+    const released = repository.releaseLeaseWithoutAttempt(created.id, {
+      leaseToken: current.leaseToken,
+    });
+    assert.equal(released.status, "queued");
+    assert.equal(released.attemptCount, 0);
+    assert.equal(released.availableAt, "2026-08-29T02:00:10.001Z");
+    assert.equal(released.lastErrorCode, "WEIXIN_CONTEXT_EXPIRED");
+    const raw = db.prepare(`
+      SELECT status, attempt_count, lease_proof_hash, lease_until, last_error_code
+      FROM weixin_confirmation_outbox WHERE id = $id
+    `).get({ $id: created.id });
+    assert.deepEqual({ ...raw }, {
+      status: "queued",
+      attempt_count: 0,
+      lease_proof_hash: null,
+      lease_until: null,
+      last_error_code: "WEIXIN_CONTEXT_EXPIRED",
+    });
+  });
+});
+
+test("the legacy failure acknowledgement routes context expiry to no-attempt release", () => {
+  withDatabase((db) => {
+    const clock = makeClock("2026-08-29T03:00:00.000Z");
+    const repository = createWeixinConfirmationOutboxRepository(db, {
+      clock: clock.now,
+      maxAttempts: 1,
+      idFactory: () => "outbox-context-ack-compat",
+    });
+    const created = repository.enqueue({
+      owner: "owner-1",
+      conversationId: "conversation-1",
+      idempotencyKey: "context-expired-ack-compat",
+      payload: { kind: "confirmation" },
+    });
+    const lease = repository.leaseNext({ renderMessage: () => "draft" });
+    const released = repository.ackFailure(created.id, {
+      leaseToken: lease.leaseToken,
+      errorCode: "WEIXIN_CONTEXT_EXPIRED",
+    });
+    assert.equal(released.status, "queued");
+    assert.equal(released.attemptCount, 0);
+    assert.equal(released.lastErrorCode, "WEIXIN_CONTEXT_EXPIRED");
+  });
+});
+
 test("explicit recovery requeues only transient delivery failures without resetting attempts", () => {
   withDatabase((db) => {
     const clock = makeClock();
@@ -185,6 +293,45 @@ test("explicit recovery requeues only transient delivery failures without resett
     assert.equal(requeued.lastErrorCode, "WEIXIN_SEND_FAILED");
     assert.deepEqual(requeued.payload, created.payload);
     assert.ok(repository.leaseNext({ renderMessage: () => "draft replay" }));
+  });
+});
+
+test("explicit recovery refuses stale failures without mutating terminal state", () => {
+  withDatabase((db) => {
+    const repository = createWeixinConfirmationOutboxRepository(db, {
+      idFactory: () => "outbox-stale-requeue",
+    });
+    const created = repository.enqueue({
+      owner: "owner-1",
+      conversationId: "conversation-1",
+      idempotencyKey: "shortcut-stale-requeue",
+      payload: { kind: "ops_alert", summary: "stale" },
+    });
+    const lease = repository.leaseNext({ renderMessage: () => "draft" });
+    repository.discardLeased(created.id, {
+      leaseToken: lease.leaseToken,
+      errorCode: "WEIXIN_OUTBOX_STALE",
+    });
+    const before = db.prepare(`
+      SELECT status, attempt_count, last_error_code
+      FROM weixin_confirmation_outbox WHERE id = $id
+    `).get({ $id: created.id });
+
+    assert.throws(
+      () => repository.requeueFailed(created.id),
+      (error) => error?.code === "WEIXIN_OUTBOX_NOT_RETRYABLE",
+    );
+
+    const after = db.prepare(`
+      SELECT status, attempt_count, last_error_code
+      FROM weixin_confirmation_outbox WHERE id = $id
+    `).get({ $id: created.id });
+    assert.deepEqual({ ...before }, {
+      status: "failed",
+      attempt_count: 0,
+      last_error_code: "WEIXIN_OUTBOX_STALE",
+    });
+    assert.deepEqual({ ...after }, { ...before });
   });
 });
 

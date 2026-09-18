@@ -179,8 +179,8 @@ describe("authenticated invoice API", () => {
       },
       aiAnalysisMode: "model",
       modelApiKey: "test-provider-key",
-      modelName: "deepseek-v4-flash",
-      modelVisionName: "deepseek-v4-flash-vision-exp",
+      modelName: "deepseek-flash",
+      modelVisionName: "deepseek-flash",
       fetchImpl: async (_url, options) => {
         modelRequest = JSON.parse(options.body);
         return {
@@ -202,7 +202,7 @@ describe("authenticated invoice API", () => {
     assert.equal(uploaded.response.status, 201);
     assert.equal(uploaded.body.item.status, "unmatched");
     assert.equal(uploaded.body.item.totalCents, 10000);
-    assert.equal(modelRequest.model, "deepseek-v4-flash-vision-exp");
+    assert.equal(modelRequest.model, "deepseek-flash");
     assert.deepEqual(modelRequest.thinking, { type: "disabled" });
     assert.equal(modelRequest.messages[1].content[1].type, "image_url");
     assert.match(modelRequest.messages[1].content[1].image_url.url, /^data:image\/jpeg;base64,/u);
@@ -457,7 +457,7 @@ describe("authenticated invoice API", () => {
 
   it("confirms no-invoice status and generates suggestions without auto-confirming", async () => {
     await startHarness();
-    const expense = await createExpense();
+    const expense = await createExpense({ invoiceType: "substitute" });
     const otherExpense = await createExpense({
       occurredOn: "2026-08-12",
       purpose: "Another trip expense",
@@ -536,6 +536,7 @@ describe("authenticated invoice API", () => {
     const noInvoiceExpense = await createExpense({
       occurredOn: "2026-08-05",
       purpose: "刷新无票状态",
+      invoiceType: "substitute",
       payments: [{
         ...expenseBody().payments[0],
         paidAt: "2026-08-05T18:00:00+08:00",
@@ -582,8 +583,15 @@ describe("authenticated invoice API", () => {
   });
 
   it("accepts and rejects candidates with versioned idempotent audit records", async () => {
-    await startHarness();
-    const acceptedExpense = await createExpense();
+    await startHarness({
+      invoiceRecognizer: async () => recognized({
+        fields: {
+          ...recognized().fields,
+          issuedOn: "2026-08-05",
+        },
+      }),
+    });
+    const acceptedExpense = await createExpense({ invoiceType: "substitute" });
     await request(`/api/travel-expenses/${encodeURIComponent(acceptedExpense.id)}/no-invoice`, {
       method: "POST",
       headers: { "If-Match": '"1"', "Idempotency-Key": "candidate-accept-no-invoice" },
@@ -628,6 +636,7 @@ describe("authenticated invoice API", () => {
     const rejectedExpense = await createExpense({
       occurredOn: "2026-08-05",
       purpose: "拒绝候选住宿",
+      invoiceType: "substitute",
       payments: [{
         ...expenseBody().payments[0],
         paidAt: "2026-08-05T18:00:00+08:00",

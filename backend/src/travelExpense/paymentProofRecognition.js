@@ -1,4 +1,5 @@
 import { boundModelText } from "./modelTextBound.js";
+import { DEEPSEEK_FLASH_MODEL } from "../../../shared/deepseekContract.mjs";
 
 const MODEL_FIELDS = new Set([
   "amountCents",
@@ -441,7 +442,7 @@ export async function analyzePaymentProofText(value, options = {}) {
   const extractedText = String(value ?? "").trim();
   if (!extractedText) throw new TypeError("extracted payment proof text is required");
   const modelText = boundModelText(extractedText).text;
-  const modelName = String(options.modelName ?? "deepseek-v4-flash").trim() || "deepseek-v4-flash";
+  const modelName = String(options.modelName ?? DEEPSEEK_FLASH_MODEL).trim() || DEEPSEEK_FLASH_MODEL;
   const timeoutMs = Number.isSafeInteger(options.modelTimeoutMs) && options.modelTimeoutMs > 0
     ? options.modelTimeoutMs
     : 30_000;
@@ -471,7 +472,7 @@ export async function recognizePaymentProofDocument(file, options = {}) {
   const typedEvidence = normalizeTypedEvidence(options.typedEvidence);
   const source = {
     provider: String(options.modelProvider ?? "deepseek"),
-    model: String(options.modelName ?? "deepseek-v4-flash"),
+    model: String(options.modelName ?? DEEPSEEK_FLASH_MODEL),
   };
 
   if (typeof options.analyzeDocument === "function") {

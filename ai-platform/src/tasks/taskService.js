@@ -9,6 +9,19 @@ import {
   sha256,
   stableJson,
 } from "../../../shared/aiPlatformContract.mjs";
+import {
+  AI_PROVIDER_CANARY_ACTOR,
+  AI_PROVIDER_CANARY_FEATURE,
+  AI_PROVIDER_CANARY_ISSUER,
+  AI_PROVIDER_CANARY_OWNER,
+  AI_PROVIDER_CANARY_CHANNEL,
+  AI_PROVIDER_CANARY_SUBJECT_TYPE,
+  AI_PROVIDER_CANARY_TASK_TYPE,
+  createProviderCanaryInput,
+  createProviderCanaryTaskRequest,
+  normalizeProviderCanaryCoordinates,
+  providerCanaryIdempotencyKey,
+} from "../../../shared/aiPlatformCanaryContract.mjs";
 import { reserveBudget, releaseBudget, settleBudget, calculateCostMicro, estimateUsage } from "../budgets/ledger.js";
 import { AiPlatformError } from "../errors.js";
 import { readOperationalControl } from "../operations/control.js";
@@ -27,6 +40,7 @@ const RETRYABLE_CODES = new Set([
 ]);
 const TERMINAL_STATUSES = new Set(AI_TASK_TERMINAL_STATUSES);
 const PRIORITY_ORDER = "CASE t.priority WHEN 'interactive' THEN 0 WHEN 'normal' THEN 1 ELSE 2 END";
+const CANARY_ADMISSION_TOKEN = Symbol("provider-canary-admission");
 
 function parseJson(value, fallback) {
   if (value === null || value === undefined || value === "") return fallback;
@@ -87,6 +101,9 @@ function taskErrorMessage(code) {
     rate_limited: "provider rate limited",
     temporary_failure: "provider temporary failure",
     network_error: "provider network error",
+    provider_capability_unsupported: "provider does not support this task capability",
+    provider_not_ready: "provider is not ready",
+    provider_live_not_ready: "provider live readiness is unavailable",
     invalid_result: "provider returned an invalid result",
     lease_expired: "task lease expired before completion",
     configuration_error: "AI execution configuration unavailable",
@@ -108,13 +125,14 @@ function normalizeUsage(usage) {
   return normalized;
 }
 
-function executionLimits(agentVersion, config) {
+function executionLimits(agentVersion, config, providerKind = null) {
   const limits = parseObject(agentVersion.limits_json, {});
+  const externalProvider = providerKind !== null && providerKind !== "mock";
   return {
     maxTokens: safePositiveInteger(limits.maxTokens, 1_000, 100_000),
     maxInputTokens: safePositiveInteger(limits.maxInputTokens, 0, 2_000_000),
     maxSteps: safePositiveInteger(limits.maxSteps, 8, 100),
-    maxAttempts: safePositiveInteger(limits.maxAttempts, 2, 3),
+    maxAttempts: externalProvider ? 1 : safePositiveInteger(limits.maxAttempts, 2, 3),
     timeoutMs: Math.min(
       safePositiveInteger(limits.timeoutMs, config.taskLeaseMs, 10 * 60_000),
       config.taskTimeoutMaxMs ?? 10 * 60_000,
@@ -212,7 +230,182 @@ function activePrice(db, modelId, at) {
   `).get({ $modelId: modelId, $at: at }) ?? null;
 }
 
-function resolveExecutionConfiguration(db, { taskType, at, config }) {
+function isRecord(value) {
+  return value && typeof value === "object" && !Array.isArray(value);
+}
+
+function readProviderReadiness(providerRegistry, provider, context) {
+  const candidates = [];
+  if (typeof providerRegistry?.readiness === "function") {
+    candidates.push(() => providerRegistry.readiness({ providerId: provider.id, ...context }));
+  }
+  if (typeof provider?.readiness === "function") {
+    candidates.push(() => provider.readiness(context));
+  } else if (provider?.readiness !== undefined && provider?.readiness !== null) {
+    candidates.push(() => provider.readiness);
+  }
+  if (typeof provider?.getReadiness === "function") {
+    candidates.push(() => provider.getReadiness(context));
+  }
+  if (provider?.readiness === undefined && typeof provider?.ready === "boolean") {
+    candidates.push(() => ({ ready: provider.ready }));
+  }
+  if (provider?.readiness === undefined && provider?.liveReady !== undefined) {
+    candidates.push(() => ({
+      ready: provider.liveReady === true,
+      liveReady: provider.liveReady === true,
+      ...(typeof provider.configured === "boolean" ? { configured: provider.configured } : {}),
+    }));
+  }
+
+  for (const candidate of candidates) {
+    let snapshot;
+    try {
+      snapshot = candidate();
+    } catch {
+      return { explicit: true, valid: false, snapshot: null };
+    }
+    if (snapshot === undefined || snapshot === null) continue;
+    if (snapshot && typeof snapshot.then === "function") {
+      return { explicit: true, valid: false, snapshot: null };
+    }
+    if (typeof snapshot === "boolean") snapshot = { ready: snapshot };
+    if (!isRecord(snapshot)) return { explicit: true, valid: false, snapshot: null };
+    return { explicit: true, valid: true, snapshot };
+  }
+  return { explicit: false, valid: true, snapshot: null };
+}
+
+function evaluateProviderAdmission(providerRegistry, model, taskType, config) {
+  let provider = null;
+  try {
+    provider = providerRegistry?.get?.(model.provider_id) ?? null;
+  } catch {
+    provider = null;
+  }
+  if (!provider) {
+    return {
+      provider: null,
+      external: model.provider_kind !== "mock",
+      capabilityReady: false,
+      configured: false,
+      credentialReady: false,
+      probeReady: false,
+      liveReady: false,
+      ready: false,
+      liveRequired: model.provider_kind !== "mock"
+        && config.nodeEnv === "production"
+        && config.executionMode === "external-provider",
+      code: "provider_unavailable",
+    };
+  }
+
+  const external = model.provider_kind !== "mock";
+  // Existing mock fixtures sometimes change the persisted provider kind to
+  // exercise external accounting while retaining the mock provider object.
+  const mockCompatible = model.provider_kind === "mock" || provider.id === "provider-mock";
+  const context = {
+    modelId: model.id,
+    modelName: model.name,
+    providerId: model.provider_id,
+    taskType,
+  };
+  const readiness = readProviderReadiness(providerRegistry, provider, context);
+  const snapshot = readiness.snapshot ?? {};
+  let capabilityReady = mockCompatible;
+  if (!mockCompatible && typeof provider.supports === "function") {
+    try {
+      capabilityReady = provider.supports({ modelName: model.name, taskType }) === true;
+    } catch {
+      capabilityReady = false;
+    }
+  } else if (!mockCompatible && readiness.valid && readiness.explicit && Object.hasOwn(snapshot, "capabilityReady")) {
+    capabilityReady = snapshot.capabilityReady === true;
+  }
+
+  const configured = mockCompatible
+    ? true
+    : readiness.explicit
+      ? (Object.hasOwn(snapshot, "configured")
+        ? snapshot.configured === true
+        : snapshot.credentialReady !== false)
+      : capabilityReady;
+  const credentialReady = mockCompatible
+    ? true
+    : readiness.explicit
+      ? (Object.hasOwn(snapshot, "credentialReady")
+        ? snapshot.credentialReady === true
+        : configured)
+      : capabilityReady;
+  const statedReady = !readiness.explicit
+    || !readiness.valid
+    || !Object.hasOwn(snapshot, "ready")
+    || snapshot.ready === true;
+  const probeReady = mockCompatible || (readiness.valid && readiness.explicit && snapshot.probeReady === true);
+  const liveReady = mockCompatible || (readiness.valid && readiness.explicit && snapshot.liveReady === true);
+  const liveRequired = external
+    && config.nodeEnv === "production"
+    && config.executionMode === "external-provider";
+  const baseReady = capabilityReady && configured && credentialReady && readiness.valid && statedReady;
+  const ready = baseReady && (!liveRequired || liveReady);
+  return {
+    provider,
+    external,
+    capabilityReady,
+    configured,
+    credentialReady,
+    probeReady,
+    liveReady,
+    baseReady,
+    ready,
+    liveRequired,
+    code: !capabilityReady
+      ? "provider_capability_unsupported"
+      : (!configured || !credentialReady || !readiness.valid || !statedReady)
+        ? "provider_not_ready"
+        : liveRequired && !liveReady
+          ? "provider_live_not_ready"
+          : null,
+  };
+}
+
+function assertProviderAdmission(providerRegistry, model, taskType, config, { allowProbeOnly = false } = {}) {
+  const admission = evaluateProviderAdmission(providerRegistry, model, taskType, config);
+  if (!admission.provider) {
+    throw new AiPlatformError("AI provider is not registered", { code: "provider_unavailable", status: 503 });
+  }
+  if (!admission.capabilityReady) {
+    throw new AiPlatformError("AI provider does not support this task capability", {
+      code: "provider_capability_unsupported",
+      status: 503,
+    });
+  }
+  if (!admission.baseReady) {
+    throw new AiPlatformError("AI provider is not ready", { code: "provider_not_ready", status: 503 });
+  }
+  if (admission.liveRequired && !allowProbeOnly && !admission.liveReady) {
+    throw new AiPlatformError("AI provider live readiness is unavailable", {
+      code: "provider_live_not_ready",
+      status: 503,
+    });
+  }
+  if (allowProbeOnly && !admission.probeReady) {
+    throw new AiPlatformError("AI provider probe readiness is unavailable", {
+      code: "provider_not_ready",
+      status: 503,
+    });
+  }
+  return admission;
+}
+
+function resolveExecutionConfiguration(db, {
+  taskType,
+  at,
+  config,
+  providerRegistry,
+  enforceProviderAdmission = true,
+  admissionMode = "standard",
+}) {
   const agentVersion = activeAgentForTask(db, taskType);
   const modelPolicy = parseObject(agentVersion.model_policy_json, {});
   const modelId = String(modelPolicy.modelId ?? "").trim();
@@ -245,6 +438,9 @@ function resolveExecutionConfiguration(db, { taskType, at, config }) {
       status: 503,
     });
   }
+  const providerAdmission = enforceProviderAdmission
+    ? assertProviderAdmission(providerRegistry, model, taskType, config, { allowProbeOnly: admissionMode === "provider-canary" })
+    : evaluateProviderAdmission(providerRegistry, model, taskType, config);
   const price = activePrice(db, model.id, at);
   if (!price && model.provider_kind !== "mock") {
     throw new AiPlatformError("AI model price is not configured", { code: "price_not_configured", status: 503 });
@@ -254,9 +450,10 @@ function resolveExecutionConfiguration(db, { taskType, at, config }) {
     agentVersion,
     model,
     price,
+    providerAdmission,
     standardIds,
     standardDigest: standardDigest(db, standardIds),
-    limits: executionLimits(agentVersion, config),
+    limits: executionLimits(agentVersion, config, model.provider_kind),
   };
 }
 
@@ -270,6 +467,7 @@ function taskView(row) {
     channel: row.channel,
     priority: row.priority,
     subject: row.subject_type ? { type: row.subject_type, id: row.subject_id } : null,
+    admissionMode: row.admission_mode ?? "standard",
     input: parseObject(row.input_json, {}),
     evidenceDigest: row.evidence_digest,
   };
@@ -487,14 +685,34 @@ export function createTaskService({
     return iso(clock);
   }
 
-  function createTask({ identity, idempotencyKey, request = {} } = {}) {
+  function createTaskInternal({ identity, idempotencyKey, request = {}, admissionMode = "standard", admissionToken = null } = {}) {
     const auth = normalizedIdentity(identity);
+    if (!["standard", "provider-canary"].includes(admissionMode)
+      || (admissionMode !== "standard" && admissionToken !== CANARY_ADMISSION_TOKEN)) {
+      throw new AiPlatformError("task admission mode is invalid", { code: "invalid_request", status: 422 });
+    }
     const key = normalizeIdempotencyKey(idempotencyKey);
     const normalized = normalizeTaskCreate(request);
+    if (admissionMode === "provider-canary"
+      && (auth.issuer !== AI_PROVIDER_CANARY_ISSUER
+        || auth.owner !== AI_PROVIDER_CANARY_OWNER
+        || auth.actor !== AI_PROVIDER_CANARY_ACTOR
+        || normalized.taskType !== AI_PROVIDER_CANARY_TASK_TYPE
+        || normalized.feature !== AI_PROVIDER_CANARY_FEATURE
+        || normalized.channel !== AI_PROVIDER_CANARY_CHANNEL
+        || normalized.subject?.type !== AI_PROVIDER_CANARY_SUBJECT_TYPE
+        || !normalized.subject?.id)) {
+      throw new AiPlatformError("provider canary identity is invalid", { code: "invalid_request", status: 422 });
+    }
     const mediaRef = normalized.input.mediaRef;
     const hashedInput = { ...normalized.input };
     if (mediaRef !== undefined) delete hashedInput.mediaRef;
-    const requestHash = sha256({ issuer: auth.issuer, owner: auth.owner, task: { ...normalized, input: hashedInput } });
+    const requestHash = sha256({
+      issuer: auth.issuer,
+      owner: auth.owner,
+      admissionMode,
+      task: { ...normalized, input: hashedInput },
+    });
     const requestedAt = now();
     const existing = db.prepare(`
       SELECT * FROM tasks
@@ -525,6 +743,8 @@ export function createTaskService({
       taskType: normalized.taskType,
       at: requestedAt,
       config,
+      providerRegistry,
+      admissionMode,
     });
     if (normalized.input.media && execution.model.provider_kind === "vision" && execution.limits.maxInputTokens < 1) {
       throw new AiPlatformError("vision input budget is not configured", { code: "budget_not_configured", status: 503 });
@@ -583,12 +803,12 @@ export function createTaskService({
           id, request_id, issuer, owner, actor, channel, feature, task_type,
           subject_type, subject_id, priority, input_json, evidence_digest,
           request_hash, idempotency_key, agent_version_id, model_id,
-          standard_digest, status, source, requested_at, updated_at
+          price_version_id, standard_digest, admission_mode, status, source, requested_at, updated_at
         ) VALUES (
           $id, $requestId, $issuer, $owner, $actor, $channel, $feature, $taskType,
           $subjectType, $subjectId, $priority, $inputJson, $evidenceDigest,
           $requestHash, $idempotencyKey, $agentVersionId, $modelId,
-          $standardDigest, 'queued', 'model', $requestedAt, $updatedAt
+          $priceVersionId, $standardDigest, $admissionMode, 'queued', 'model', $requestedAt, $updatedAt
         )
       `).run({
         $id: taskId,
@@ -608,7 +828,9 @@ export function createTaskService({
         $idempotencyKey: key,
         $agentVersionId: execution.agentVersion.id,
         $modelId: execution.model.id,
+        $priceVersionId: execution.price?.id ?? null,
         $standardDigest: execution.standardDigest,
+        $admissionMode: admissionMode,
         $requestedAt: requestedAt,
         $updatedAt: requestedAt,
       });
@@ -630,8 +852,10 @@ export function createTaskService({
         requestId,
         taskType: normalized.taskType,
         feature: normalized.feature,
+        admissionMode,
         agentVersionId: execution.agentVersion.id,
         modelId: execution.model.id,
+        priceVersionId: execution.price?.id ?? null,
         estimatedCostMicro: reservedCostMicro,
         estimatedAttemptCostMicro: estimate.charge.totalMicro,
         maxAttempts: execution.limits.maxAttempts,
@@ -647,6 +871,25 @@ export function createTaskService({
       };
     });
     return result;
+  }
+
+  function createTask(args = {}) {
+    return createTaskInternal({ ...args, admissionMode: "standard", admissionToken: null });
+  }
+
+  function createProviderCanaryTask({ runId, sampleIndex } = {}) {
+    const coordinates = normalizeProviderCanaryCoordinates({ runId, sampleIndex });
+    return createTaskInternal({
+      identity: {
+        issuer: AI_PROVIDER_CANARY_ISSUER,
+        owner: AI_PROVIDER_CANARY_OWNER,
+        actor: AI_PROVIDER_CANARY_ACTOR,
+      },
+      idempotencyKey: providerCanaryIdempotencyKey(coordinates.runId, coordinates.sampleIndex),
+      request: createProviderCanaryTaskRequest(coordinates.runId, coordinates.sampleIndex),
+      admissionMode: "provider-canary",
+      admissionToken: CANARY_ADMISSION_TOKEN,
+    });
   }
 
   function readTask({ identity, taskId } = {}) {
@@ -738,7 +981,7 @@ export function createTaskService({
                m.provider_id, m.name AS model_name, m.capabilities_json,
                p.name AS provider_name,
                p.kind AS provider_kind, p.enabled AS provider_enabled,
-               m.enabled AS model_enabled, pr.id AS price_version_id,
+               m.enabled AS model_enabled, t.price_version_id AS price_version_id,
                pr.version AS price_version, pr.currency,
                pc.policy_json AS pricing_policy_json, pr.input_micro_per_1k, pr.output_micro_per_1k,
                pr.cached_input_micro_per_1k, pr.audio_micro_per_minute,
@@ -750,15 +993,7 @@ export function createTaskService({
           JOIN agents a ON a.id = av.agent_id
           JOIN models m ON m.id = t.model_id
           JOIN providers p ON p.id = m.provider_id
-          LEFT JOIN price_versions pr
-            ON pr.id = (
-              SELECT pv.id FROM price_versions pv
-               WHERE pv.model_id = t.model_id
-                 AND pv.effective_from <= t.requested_at
-                 AND (pv.effective_to IS NULL OR pv.effective_to > t.requested_at)
-               ORDER BY pv.effective_from DESC, pv.created_at DESC, pv.id DESC
-               LIMIT 1
-            )
+          LEFT JOIN price_versions pr ON pr.id = t.price_version_id AND pr.model_id = t.model_id
           LEFT JOIN price_calendars pc ON pc.price_version_id = pr.id
          WHERE ${where}
            AND (SELECT COUNT(*) FROM tasks active WHERE active.status = 'running') < $globalConcurrency
@@ -873,7 +1108,7 @@ export function createTaskService({
           effective_to: selected.price_effective_to,
           ...attemptPrice,
         } : null,
-        limits: executionLimits(selected, config),
+        limits: executionLimits(selected, config, selected.provider_kind),
       };
     });
   }
@@ -925,6 +1160,48 @@ export function createTaskService({
     return Boolean(row?.cancel_requested_at);
   }
 
+  function assertExecutionReadiness(context, provider) {
+    // Fixtures may override the persisted provider kind while retaining the
+    // mock provider object; keep those executions local and free of readiness
+    // gates. Real providers are gated again immediately before any request.
+    if (context.model.providerKind === "mock" || provider?.id === "provider-mock") return;
+    const readiness = readProviderReadiness(providerRegistry, provider, {
+      modelId: context.model.id,
+      modelName: context.model.name,
+      providerId: context.model.providerId,
+      taskType: context.task.task_type,
+    });
+    if (!readiness.valid) {
+      const error = new AiPlatformError("AI provider readiness is unavailable", {
+        code: context.task.admission_mode === "provider-canary" ? "provider_not_ready" : "provider_live_not_ready",
+        status: 503,
+      });
+      error.providerStarted = false;
+      throw error;
+    }
+    // In development/test, probe readiness is the execution contract. A
+    // production ordinary task must have completed live evidence; canaries
+    // intentionally use the cheaper catalogue probe to bootstrap that proof.
+    const productionLiveRequired = config.nodeEnv === "production"
+      && config.executionMode === "external-provider"
+      && context.task.admission_mode !== "provider-canary";
+    const required = context.task.admission_mode === "provider-canary"
+      ? "probeReady"
+      : productionLiveRequired ? "liveReady" : "probeReady";
+    const snapshot = readiness.snapshot ?? {};
+    const ready = Object.hasOwn(snapshot, required)
+      ? snapshot[required] === true
+      : !productionLiveRequired && snapshot.ready === true;
+    if (!ready) {
+      const error = new AiPlatformError(
+        required === "liveReady" ? "AI provider live readiness is unavailable" : "AI provider probe readiness is unavailable",
+        { code: required === "liveReady" ? "provider_live_not_ready" : "provider_not_ready", status: 503 },
+      );
+      error.providerStarted = false;
+      throw error;
+    }
+  }
+
   function finalizeSuccess(context, providerResponse) {
     const completedAt = now();
     const usage = normalizeUsage(providerResponse?.usage);
@@ -932,6 +1209,18 @@ export function createTaskService({
     assertAgentSchema(result, context.agent.outputSchema, "output");
     const charge = chargeForUsage(usage, context.priceVersion);
     if (usage && providerResponse?.usageStatus === "estimated") charge.costStatus = "estimated";
+    // Keep the small, non-sensitive provider identity alongside the encrypted
+    // result so audit tooling can still verify model provenance after a task
+    // payload key rotation or an isolated evidence export.
+    const metadata = result.metadata ?? {};
+    const responseMeta = {
+      source: result.source,
+      ...(typeof metadata.provider === "string" ? { provider: metadata.provider } : {}),
+      ...(typeof metadata.actualModel === "string" ? { actualModel: metadata.actualModel } : {}),
+      ...(typeof metadata.modelIdentitySource === "string" ? { modelIdentitySource: metadata.modelIdentitySource } : {}),
+      ...(typeof metadata.finishReason === "string" ? { finishReason: metadata.finishReason } : {}),
+      ...(typeof metadata.executionMode === "string" ? { executionMode: metadata.executionMode } : {}),
+    };
     return withImmediateTransaction(db, () => {
       const current = rowById(db, context.task.id);
       if (!current || current.status !== "running" || current.lease_token !== context.attempt.leaseToken) {
@@ -1006,7 +1295,7 @@ export function createTaskService({
          WHERE id = $id AND status = 'running'
       `).run({
         $id: context.attempt.id,
-        $responseMeta: stringify({ source: result.source }, "{}"),
+        $responseMeta: stringify(responseMeta, "{}"),
         $inputTokens: usage?.inputTokens ?? 0,
         $outputTokens: usage?.outputTokens ?? 0,
         $cachedInputTokens: usage?.cachedInputTokens ?? 0,
@@ -1171,6 +1460,101 @@ export function createTaskService({
     });
   }
 
+  function readProviderCanarySettlement({ taskId, runId, sampleIndex } = {}) {
+    const coordinates = normalizeProviderCanaryCoordinates({ runId, sampleIndex });
+    const row = rowById(db, String(taskId ?? ""));
+    if (!row || row.status !== "succeeded" || row.admission_mode !== "provider-canary"
+      || row.owner !== AI_PROVIDER_CANARY_OWNER || row.actor !== AI_PROVIDER_CANARY_ACTOR
+      || row.task_type !== AI_PROVIDER_CANARY_TASK_TYPE || row.feature !== AI_PROVIDER_CANARY_FEATURE
+      || row.channel !== AI_PROVIDER_CANARY_CHANNEL || row.subject_type !== AI_PROVIDER_CANARY_SUBJECT_TYPE
+      || row.subject_id !== coordinates.runId) {
+      throw new AiPlatformError("provider canary task is not a settled success", { code: "provider_canary_invalid", status: 409 });
+    }
+    const decoded = payloadCodec.decodeRow(row);
+    const input = parseObject(decoded.input_json, null);
+    if (!input || sha256(input) !== sha256(createProviderCanaryInput(coordinates.runId, coordinates.sampleIndex))) {
+      throw new AiPlatformError("provider canary input does not match the fixed contract", { code: "provider_canary_invalid", status: 422 });
+    }
+    const model = modelAndProvider(db, row.model_id);
+    if (model.provider_kind === "mock" || model.provider_id === "provider-mock") {
+      throw new AiPlatformError("mock provider cannot settle a live canary", { code: "provider_canary_invalid", status: 422 });
+    }
+    const attempts = db.prepare("SELECT * FROM task_attempts WHERE task_id = ? ORDER BY attempt_no ASC").all(row.id);
+    const ledgers = db.prepare("SELECT * FROM usage_ledger WHERE task_id = ? ORDER BY id ASC").all(row.id);
+    const reservations = db.prepare("SELECT * FROM budget_reservations WHERE task_id = ? ORDER BY id ASC").all(row.id);
+    if (attempts.length !== 1 || ledgers.length !== 1 || reservations.length !== 1) {
+      throw new AiPlatformError("provider canary settlement cardinality is invalid", { code: "provider_canary_invalid", status: 422 });
+    }
+    const [attempt] = attempts;
+    const [ledger] = ledgers;
+    const [reservation] = reservations;
+    const usage = normalizeUsage({
+      inputTokens: attempt.input_tokens,
+      outputTokens: attempt.output_tokens,
+      cachedInputTokens: attempt.cached_input_tokens,
+      audioSeconds: attempt.audio_seconds,
+      imagePages: attempt.image_pages,
+    });
+    const providerRequestId = attempt.external_request_id;
+    const totalMicro = Number(attempt.cost_micro ?? 0) + Number(ledger.function_fee_micro ?? 0);
+    const result = parseJson(decoded.output_json, null);
+    const finishReason = result?.metadata?.finishReason;
+    if (attempt.status !== "succeeded" || attempt.provider_id !== model.provider_id || attempt.model_id !== model.id
+      || !providerRequestId || !/^[A-Za-z0-9_.:-]{1,200}$/u.test(providerRequestId)
+      || !attempt.price_version_id || attempt.cost_status !== "calculated"
+      || !usage || !Object.values(usage).some((value) => value > 0)
+      || ledger.provider_id !== model.provider_id || ledger.model_id !== model.id
+      || ledger.price_version_id !== attempt.price_version_id || ledger.cost_status !== "calculated"
+      || ledger.cost_micro !== attempt.cost_micro || reservation.status !== "settled"
+      || Number(reservation.actual_micro) !== totalMicro
+      || !result || result.schemaVersion !== "ai-task-result-v1" || result.status !== "success" || result.source !== "model"
+      || finishReason !== "stop"
+      || row.output_digest !== sha256(result)) {
+      throw new AiPlatformError("provider canary settlement is invalid", { code: "provider_canary_invalid", status: 422 });
+    }
+    const provider = providerRegistry.get(model.provider_id);
+    const readiness = readProviderReadiness(providerRegistry, provider, {
+      modelId: model.id,
+      modelName: model.name,
+      providerId: model.provider_id,
+      taskType: row.task_type,
+    });
+    const binding = provider?.readinessBinding?.();
+    if (!readiness.valid || readiness.snapshot?.probeReady !== true || !binding) {
+      throw new AiPlatformError("provider canary readiness binding is unavailable", { code: "provider_canary_invalid", status: 503 });
+    }
+    const observedAt = row.completed_at ?? now();
+    const expiresAt = new Date(Date.parse(observedAt) + 24 * 60 * 60_000).toISOString();
+    return Object.freeze({
+      providerId: model.provider_id,
+      modelId: model.id,
+      modelName: model.name,
+      taskType: row.task_type,
+      credentialRevision: binding.credentialRevision,
+      credentialDigest: binding.credentialDigest,
+      policyDigest: binding.policyDigest,
+      runId: coordinates.runId,
+      sampleIndex: coordinates.sampleIndex,
+      taskId: row.id,
+      attemptId: attempt.id,
+      platformRequestId: row.request_id,
+      providerRequestId,
+      priceVersionId: attempt.price_version_id,
+      usage,
+      costMicro: Number(attempt.cost_micro),
+      functionFeeMicro: Number(ledger.function_fee_micro ?? 0),
+      totalMicro,
+      currency: ledger.currency,
+      resultSchemaVersion: result.schemaVersion,
+      resultDigest: row.output_digest,
+      finishReason,
+      settledStatus: "settled",
+      observedAt,
+      expiresAt,
+      createdAt: now(),
+    });
+  }
+
   async function executeClaim(context) {
     const controller = new AbortController();
     let timeoutTriggered = false;
@@ -1226,6 +1610,9 @@ export function createTaskService({
         signal: controller.signal,
       };
       const prepared = provider.prepare ? await provider.prepare(providerInput) : undefined;
+      // The provider may have rotated credentials or expired its probe while
+      // the task was queued. Recheck immediately before any paid request.
+      assertExecutionReadiness(context, provider);
       providerStarted = true;
       const response = await provider.execute({ ...providerInput, prepared });
       if (timeoutTriggered) {
@@ -1291,8 +1678,8 @@ export function createTaskService({
           currency: staleTask.currency ?? "USD",
         };
         markAttemptUnknown(db, current, attempt, at);
-        const limits = executionLimits(staleTask, config);
-        const canRetry = staleTask.provider_kind === "mock"
+        const limits = executionLimits(staleTask, config, staleTask.provider_kind);
+        const canRetry = (staleTask.provider_kind === "mock" || staleTask.provider_id === "provider-mock")
           && !current.cancel_requested_at && attempt.attemptNo < limits.maxAttempts;
         if (canRetry) {
           db.prepare(`
@@ -1364,12 +1751,24 @@ export function createTaskService({
   function configurationReadiness() {
     return Object.fromEntries(AI_TASK_TYPES.map((type) => {
       try {
-        const execution = resolveExecutionConfiguration(db, { taskType: type, at: now(), config });
-        const provider = providerRegistry.get(execution.model.provider_id);
-        const registered = Boolean(provider) && (execution.model.provider_kind === "mock"
-          || provider.supports?.({ modelName: execution.model.name, taskType: type }) === true);
-        return [type, { ready: registered, model: execution.model.name, provider: execution.model.provider_id }];
-      } catch {
+        const execution = resolveExecutionConfiguration(db, {
+          taskType: type,
+          at: now(),
+          config,
+          providerRegistry,
+          enforceProviderAdmission: false,
+        });
+        const admission = execution.providerAdmission;
+        return [type, {
+          ready: admission.ready,
+          configured: admission.configured,
+          probeReady: admission.probeReady,
+          liveReady: admission.liveReady,
+          capabilityReady: admission.capabilityReady,
+          model: execution.model.name,
+          provider: execution.model.provider_id,
+        }];
+      } catch (error) {
         return [type, { ready: false }];
       }
     }));
@@ -1459,6 +1858,8 @@ export function createTaskService({
 
   return Object.freeze({
     createTask,
+    createProviderCanaryTask,
+    readProviderCanarySettlement,
     readTask,
     readTaskResult,
     readTaskEvents,

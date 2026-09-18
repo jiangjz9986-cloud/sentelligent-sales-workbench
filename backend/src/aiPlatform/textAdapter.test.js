@@ -89,7 +89,7 @@ describe("AI platform text adapter", () => {
     assert.deepEqual(calls[0].request.response_format, { type: "json_object" });
     assert.equal(calls[0].request.max_tokens, 3200);
     assert.equal(calls[0].request.stream, false);
-    assert.equal(calls[0].request.model, "gpt-5.6-luna");
+    assert.equal(calls[0].request.model, "deepseek-flash");
   });
 
   it("supports a completion client exposing the in-progress runTask name", async () => {
@@ -131,9 +131,9 @@ describe("AI platform text adapter", () => {
           runTask: async (request) => {
             assert.equal(request.taskType, "quick-record.analyze");
             assert.equal(request.input.protocol, "chat.completions.v1");
-            assert.equal(request.input.model, "gpt-5.6-luna");
+            assert.equal(request.input.model, "deepseek-flash");
             assert.equal(request.input.reasoningEffort, "max");
-            assert.equal(request.input.request.model, "gpt-5.6-luna");
+            assert.equal(request.input.request.model, "deepseek-flash");
             assert.equal(request.input.request.reasoningEffort, "max");
             assert.equal(request.request.messages[0].content, "客户需要升级方案");
             return runtimeResult;
@@ -151,7 +151,7 @@ describe("AI platform text adapter", () => {
       ...baseOptions,
       config: {
         aiAnalysisMode: "model",
-        aiPlatformTargetModel: "gpt-5.6-luna",
+        aiPlatformTargetModel: "deepseek-flash",
         aiPlatformRuntime: completionRuntime({
           calls,
           response: jsonResponse(completionBody("fixed-target")),
@@ -164,7 +164,7 @@ describe("AI platform text adapter", () => {
     });
 
     assert.equal(result, "fixed-target");
-    assert.equal(calls[0].request.model, "gpt-5.6-luna");
+    assert.equal(calls[0].request.model, "deepseek-flash");
     assert.equal(calls[0].request.reasoningEffort, undefined);
   });
 
@@ -267,7 +267,7 @@ describe("AI platform text adapter", () => {
       modelApiKeyProvider: () => "test-model-key",
       modelBaseUrl: "https://provider.example.invalid",
       modelName: "legacy-model",
-      aiPlatformTargetModel: "gpt-5.6-luna",
+      aiPlatformTargetModel: "deepseek-flash",
     };
 
     const result = await runAiPlatformTextCompletion({

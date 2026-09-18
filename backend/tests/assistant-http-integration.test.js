@@ -10,7 +10,7 @@ import { createServer } from "../src/server.js";
 import { openDatabase } from "../src/db.js";
 import { createRemoteClawbotAgent } from "../src/weixin/remoteAgent.js";
 import { shortcutBookkeepingConversationId } from "../src/weixin/bookkeepingDeliveryScope.js";
-import { VALID_PNG } from "./helpers/image-fixtures.js";
+import { PDF_XREF_STREAM_PREDICTOR, VALID_PNG } from "./helpers/image-fixtures.js";
 import { seedWeixinBinding } from "./helpers/weixin-binding-fixtures.js";
 
 function seedHarnessBinding(tempDirValue) {
@@ -229,6 +229,39 @@ describe("persistent WeChat assistant events HTTP boundary", () => {
       assert.equal(forbidden.response.status, 422, `${forbiddenField[0]} must remain forbidden`);
       assert.equal(forbidden.body.error.code, "VALIDATION_ERROR");
       assert.equal(JSON.stringify(forbidden.body).includes(String(forbiddenField[1])), false);
+    }
+  });
+
+  it("accepts a predictor-based PDF sent without a command and stores it for invoice review", async () => {
+    const result = await request("/api/integrations/weixin-agent/events", {
+      method: "POST",
+      headers: eventHeaders("weixin:predictor-invoice"),
+      body: JSON.stringify(eventBody({
+        text: "",
+        sourceMessageId: "predictor-invoice",
+        media: {
+          type: "file",
+          fileName: "发票金额 26.50元.pdf",
+          mimeType: "application/pdf",
+          contentBase64: PDF_XREF_STREAM_PREDICTOR.toString("base64"),
+        },
+      })),
+    });
+
+    assert.equal(result.response.status, 200, JSON.stringify(result.body));
+    assert.notEqual(result.body.status, "error");
+    assert.match(result.body.text, /发票/u);
+
+    const verifyDb = openDatabase({ databaseUrl: join(tempDir, "assistant.sqlite") });
+    try {
+      const row = verifyDb.prepare("SELECT file_name, media_type, status FROM invoice_documents LIMIT 1").get();
+      assert.deepEqual({ ...row }, {
+        file_name: "发票金额 26.50元.pdf",
+        media_type: "application/pdf",
+        status: "review_required",
+      });
+    } finally {
+      verifyDb.close();
     }
   });
 

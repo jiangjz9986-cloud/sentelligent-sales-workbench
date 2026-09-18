@@ -23,6 +23,14 @@ export const INVOICE_STATUSES = Object.freeze([
   Object.freeze({ id: "missing", label: "缺少票据" }),
 ]);
 
+export const EXPENSE_INVOICE_TYPES = Object.freeze([
+  Object.freeze({ id: "electronic", label: "电子" }),
+  Object.freeze({ id: "paper", label: "纸质" }),
+  Object.freeze({ id: "substitute", label: "替票" }),
+]);
+
+const EXPENSE_INVOICE_TYPE_IDS = new Set(EXPENSE_INVOICE_TYPES.map((item) => item.id));
+
 export const EXPENSE_INVOICE_STATES = Object.freeze([
   Object.freeze({ id: "electronic_invoice", label: "电子发票" }),
   Object.freeze({ id: "substitute_invoice", label: "替票" }),
@@ -136,6 +144,37 @@ function stateDefinition(id, amountCents) {
   return amountCents === undefined ? definition : { ...definition, amountCents };
 }
 
+export function buildAutomaticExpenseNote({ occurredOn, category, tripRegion = null, lodgingNights = 1 } = {}) {
+  if (typeof occurredOn !== "string" || !/^\d{4}-\d{2}-\d{2}$/u.test(occurredOn)) return "";
+  const parsed = new Date(`${occurredOn}T00:00:00.000Z`);
+  if (Number.isNaN(parsed.getTime()) || parsed.toISOString().slice(0, 10) !== occurredOn) return "";
+  const region = typeof tripRegion === "string" ? tripRegion.trim() : "";
+  if (category === "lodging") {
+    const nights = Number.isSafeInteger(lodgingNights) && lodgingNights > 0 ? lodgingNights : 1;
+    return `${region}出差住宿${nights}晚`;
+  }
+  const meal = { breakfast: "早餐", lunch: "午餐", dinner: "晚餐" }[category];
+  if (!meal) return "";
+  return `${Number(occurredOn.slice(5, 7))}.${Number(occurredOn.slice(8, 10))}${region}出差${meal}`;
+}
+
+export function resolveExpenseInvoiceType(expense, context = {}) {
+  const explicit = String(expense?.invoiceType ?? "").trim();
+  if (EXPENSE_INVOICE_TYPE_IDS.has(explicit)) return explicit;
+  const states = deriveExpenseInvoiceStates(expense, context);
+  if (states.some((state) => state.id === "substitute_invoice")) return "substitute";
+  if (states.some((state) => state.id === "electronic_invoice")) return "electronic";
+  return null;
+}
+
+export function expenseInvoiceTypeLabel(expense, context = {}) {
+  const type = resolveExpenseInvoiceType(expense, context);
+  return EXPENSE_INVOICE_TYPES.find((item) => item.id === type)?.label
+    ?? (type === null && deriveExpenseInvoiceStates(expense, context).some((state) => state.id === "no_invoice")
+      ? "无票确认"
+      : "待补");
+}
+
 export function deriveExpenseInvoiceStates(expense, {
   matches = [],
   noInvoiceConfirmations = [],
@@ -150,10 +189,17 @@ export function deriveExpenseInvoiceStates(expense, {
     confirmation?.expenseId === expense.id && activeNoInvoiceConfirmation(confirmation)
   ));
   const attachments = safeItems(expense.attachments ?? [], "attachments");
-  const hasSubstitute = expenseMatches.some((match) => match.matchMethod === "rule_candidate")
-    || attachments.some((attachment) => attachment.kind === "substitute");
-  const hasElectronic = expenseMatches.some((match) => match.matchMethod !== "rule_candidate")
-    || attachments.some((attachment) => attachment.kind === "invoice");
+  const explicitInvoiceType = String(expense.invoiceType ?? "").trim();
+  // Match provenance is deliberately independent from ticket type. A
+  // rule_candidate is an automatic match source and must not become a
+  // substitute invoice unless the expense was explicitly marked as such.
+  const hasSubstitute = explicitInvoiceType === "substitute";
+  const hasElectronic = explicitInvoiceType === "electronic"
+    || explicitInvoiceType === "paper"
+    || (explicitInvoiceType !== "substitute" && (
+      expenseMatches.length > 0
+      || attachments.some((attachment) => attachment.kind === "invoice")
+    ));
 
   let confirmedCents = 0;
   for (const match of expenseMatches) {
@@ -256,6 +302,7 @@ export function flattenPaymentRows(expenses = []) {
         paymentMethod: payment.paymentMethod ?? "other",
         accountLast4: payment.accountLast4 ?? "",
         invoiceStatus: expense.invoiceStatus ?? "pending",
+        invoiceType: expense.invoiceType ?? null,
         notes: expense.notes ?? "",
         proofAttachments,
         invoiceAttachments,
@@ -305,6 +352,8 @@ export function buildExpenseLedgerRows(expenses = [], context = {}) {
         amountCents,
         paymentProofs,
         invoiceStates,
+        invoiceType: resolveExpenseInvoiceType(expense, context),
+        invoiceLabel: expenseInvoiceTypeLabel(expense, context),
         notes,
       },
       source: expense,

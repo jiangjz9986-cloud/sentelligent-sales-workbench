@@ -204,7 +204,7 @@ export function ExpenseListPrintPreview({
         <aside className="expense-print-settings no-print">
           <section><strong>记录范围</strong><span>{week.start}—{week.end}</span></section>
           <section><strong>固定七列</strong><ul><li><Check size={14} />序号、日期、用途、金额</li><li><Check size={14} />付款记录、发票、备注</li></ul></section>
-          <section><strong>付款记录</strong><ul><li><Check size={14} />单元格直接显示压缩图片</li><li><Check size={14} />360×240、JPEG 0.72</li><li><Check size={14} />重新编码并清除原图元数据</li></ul></section>
+          <section><strong>付款记录</strong><ul><li><Check size={14} />单元格直接显示压缩图片</li><li><Check size={14} />保持原图比例，最长边不超过 360×240</li><li><Check size={14} />重新编码并清除原图元数据</li></ul></section>
           <section><strong>数据汇总</strong><dl><div><dt>费用</dt><dd>{exportModel.rows.length} 条</dd></div><div><dt>付款记录行</dt><dd>{physicalRowCount} 行</dd></div><div><dt>预计页数</dt><dd>{pages.length} 页</dd></div></dl></section>
         </aside>
         <div className="expense-list-print-document">

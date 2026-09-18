@@ -1,6 +1,6 @@
 {
   "name": "sentelligent-sales-workbench",
-  "version": "0.13.0",
+  "version": "0.13.4",
   "private": true,
   "type": "module",
   "scripts": {
@@ -26,12 +26,16 @@
     "release:package": "node scripts/release-package.mjs",
     "service-plan:production": "node scripts/production-service-plan.mjs",
     "preflight:production": "node scripts/production-preflight.mjs",
+    "acceptance:ai-platform:p2": "node scripts/ai-platform/p2-acceptance.mjs",
+    "acceptance:v0120:business": "node scripts/ai-platform/v0120-business-acceptance.mjs",
+    "acceptance:v0120:production": "node scripts/ai-platform/v0120-production-acceptance.mjs",
     "asr:cleanup": "node scripts/asr-runtime-cleanup.mjs",
     "smoke:production:asr": "node scripts/asr-production-smoke.mjs",
     "smoke:production:https": "node scripts/production-https-smoke.mjs",
     "test:ai-platform": "npm --prefix ai-platform test && node --test backend/src/aiPlatform/*.test.js && node --test scripts/ai-platform/*.test.mjs",
     "test:release": "node --test scripts/release-package.test.mjs scripts/production-preflight.test.mjs",
     "test:deploy": "npm run scan:secrets && node --test scripts/*.test.mjs",
+    "qa:desktop": "npm run test:deploy && npm run test:ai-platform && npm run acceptance:v0120:business && npm --prefix backend test && npm --prefix outputs/product-design-prototype run qa:local && npm --prefix outputs/product-design-prototype run qa:integration",
     "qa:full": "npm run test:deploy && npm run test:ai-platform && npm --prefix backend test && npm --prefix outputs/product-design-prototype run qa:local && npm --prefix outputs/product-design-prototype run qa:integration && npm --prefix outputs/product-design-prototype run qa:webkit"
   },
   "description": "Sentelligent AI sales workbench for customer, opportunity, action, risk, voice and weekly workflows.",

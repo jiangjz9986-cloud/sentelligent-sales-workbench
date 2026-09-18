@@ -68,3 +68,25 @@ test("accepts only canonical UTC expiry timestamps and retains the last report w
     reportedAt: "2026-08-21T00:00:00.000Z",
   });
 });
+
+test("fails closed when a ready report reaches its context expiry", () => {
+  let current = Date.parse("2026-08-21T22:59:59.000Z");
+  const readiness = createWeixinDeliveryReadiness({
+    clock: () => current,
+    staleMs: 5_000,
+  });
+
+  readiness.report({
+    status: "ready",
+    expiresAt: "2026-08-21T23:00:00.000Z",
+  });
+  assert.equal(readiness.snapshot().status, "ready");
+
+  current = Date.parse("2026-08-21T23:00:00.000Z");
+  assert.deepEqual(readiness.snapshot(), {
+    status: "not_ready",
+    reason: "context_token_expired",
+    expiresAt: "2026-08-21T23:00:00.000Z",
+    reportedAt: "2026-08-21T22:59:59.000Z",
+  });
+});

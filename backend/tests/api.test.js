@@ -505,7 +505,7 @@ describe("sales workbench backend API", () => {
       modelProvider: "deepseek",
       modelApiKey: "test-provider-key",
       modelBaseUrl: "https://api.deepseek.com",
-      modelName: "deepseek-v4-flash",
+      modelName: "deepseek-flash",
       authRequired: false,
       authAccount: "",
       authPassword: "",
@@ -547,7 +547,7 @@ describe("sales workbench backend API", () => {
     assert.equal(health.response.status, 200);
     assert.equal(health.body.aiAnalysisMode, "model");
     assert.equal(health.body.modelProvider, "deepseek");
-    assert.equal(health.body.modelName, "deepseek-v4-flash");
+    assert.equal(health.body.modelName, "deepseek-flash");
     assert.equal(health.body.modelReady, true);
     assert.doesNotMatch(JSON.stringify(health.body), /test-provider-key/);
 
@@ -1128,7 +1128,7 @@ describe("sales workbench backend API", () => {
       modelProvider: "deepseek",
       modelApiKey: "test-provider-key",
       modelBaseUrl: "https://api.deepseek.com",
-      modelName: "deepseek-v4-flash",
+      modelName: "deepseek-flash",
       authRequired: false,
       authAccount: "",
       authPassword: "",
@@ -1156,7 +1156,7 @@ describe("sales workbench backend API", () => {
     assert.equal(providerCalls.length, 1);
     assert.equal(providerCalls[0].url, "https://api.deepseek.com/chat/completions");
     assert.equal(providerCalls[0].options.headers.Authorization, "Bearer test-provider-key");
-    assert.equal(JSON.parse(providerCalls[0].options.body).model, "deepseek-v4-flash");
+    assert.equal(JSON.parse(providerCalls[0].options.body).model, "deepseek-flash");
     assert.match(report.body.item.content, /DeepSeek weekly draft/);
     assert.equal(report.body.item.source, "deepseek");
     assert.equal(report.body.item.fallbackReason, null);
@@ -1342,7 +1342,7 @@ describe("sales workbench backend API", () => {
       modelProvider: "deepseek",
       modelApiKey: "test-provider-key",
       modelBaseUrl: "https://api.deepseek.com/",
-      modelName: "deepseek-v4-flash",
+      modelName: "deepseek-flash",
       solutionWritesEnabled: true,
       authRequired: false,
       authAccount: "",
@@ -1408,7 +1408,7 @@ describe("sales workbench backend API", () => {
       modelProvider: "deepseek",
       modelApiKey: "test-provider-key",
       modelBaseUrl: "https://api.deepseek.com/",
-      modelName: "deepseek-v4-flash",
+      modelName: "deepseek-flash",
       authRequired: false,
       authAccount: "",
       authPassword: "",
@@ -1439,7 +1439,7 @@ describe("sales workbench backend API", () => {
     assert.equal(providerCalls.length, 1);
     assert.equal(providerCalls[0].url, "https://api.deepseek.com/chat/completions");
     assert.equal(providerCalls[0].options.headers.Authorization, "Bearer test-provider-key");
-    assert.equal(JSON.parse(providerCalls[0].options.body).model, "deepseek-v4-flash");
+    assert.equal(JSON.parse(providerCalls[0].options.body).model, "deepseek-flash");
     assert.match(suggestion.body.item.content, /DeepSeek 建议/);
     assert.equal(suggestion.body.item.source, "deepseek");
     assert.equal(suggestion.body.item.fallbackReason, null);
@@ -1728,7 +1728,7 @@ describe("sales workbench backend API", () => {
       modelProvider: "deepseek",
       modelApiKey: "test-provider-key",
       modelBaseUrl: "https://api.deepseek.com",
-      modelName: "deepseek-v4-flash",
+      modelName: "deepseek-flash",
       authRequired: false,
       authAccount: "",
       authPassword: "",

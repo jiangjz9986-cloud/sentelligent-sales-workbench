@@ -102,7 +102,7 @@ describe("ExpenseListPrintPreview physical-row rendering", () => {
     assert.equal(occurrences(html, /rowSpan="2"/g), 6);
     assert.equal(occurrences(html, /<img /g), 2);
     assert.equal(occurrences(html, /打印分页测试/g), 1);
-    assert.match(html, /<h2>8\.24-8\.24济宁、东营出差费用清单<\/h2>/);
+    assert.match(html, /<h2>8\.24-8\.30济宁、东营出差费用清单<\/h2>/);
     assert.match(html, /第 1\/1 页/);
   });
 

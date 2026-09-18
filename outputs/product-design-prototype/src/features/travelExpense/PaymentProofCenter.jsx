@@ -81,6 +81,10 @@ function initialInboxSelection(item, expenses) {
 export function PaymentProofCenter({
   expenses,
   inboxItems = [],
+  compact = false,
+  expenseIds = null,
+  showInbox = true,
+  showProofs = true,
   getAttachmentUrl,
   getAttachmentContentResponse,
   getInboxContentUrl,
@@ -98,15 +102,20 @@ export function PaymentProofCenter({
   const [selectionErrors, setSelectionErrors] = useState({});
   const [inboxSelections, setInboxSelections] = useState({});
   const [inboxErrors, setInboxErrors] = useState({});
+  const visibleExpenses = useMemo(() => {
+    if (!Array.isArray(expenseIds)) return expenses;
+    const allowedIds = new Set(expenseIds);
+    return expenses.filter((expense) => allowedIds.has(expense.id));
+  }, [expenseIds, expenses]);
 
-  const proofCount = useMemo(() => expenses.reduce((total, expense) => (
+  const proofCount = useMemo(() => visibleExpenses.reduce((total, expense) => (
     total + expense.attachments.filter((attachment) => attachment.kind === "payment_proof").length
-  ), 0), [expenses]);
+  ), 0), [visibleExpenses]);
 
   useEffect(() => {
     if (!focusExpenseId) return undefined;
     const frame = window.requestAnimationFrame(() => {
-      const expense = expenses.find((item) => item.id === focusExpenseId);
+      const expense = visibleExpenses.find((item) => item.id === focusExpenseId);
       const target = [...document.querySelectorAll("[data-proof-expense-id]")]
         .find((element) => element.dataset.proofExpenseId === focusExpenseId);
       if (!target) {
@@ -120,7 +129,7 @@ export function PaymentProofCenter({
       onFocusExpenseHandled?.({ expenseId: focusExpenseId, referenceCode: expense?.referenceCode, found: true });
     });
     return () => window.cancelAnimationFrame(frame);
-  }, [expenses, focusExpenseId, onFocusExpenseHandled]);
+  }, [focusExpenseId, onFocusExpenseHandled, visibleExpenses]);
 
   function selectedFor(expense) {
     return selections[expense.id] ?? createPaymentProofSelection(expense);
@@ -210,13 +219,13 @@ export function PaymentProofCenter({
   }
 
   return (
-    <section className="expense-proof-center">
-      <header className="expense-proof-center-note">
+    <section className={`expense-proof-center${compact ? " is-compact" : ""}`}>
+      {!compact && showProofs ? <header className="expense-proof-center-note">
         <p>上传前先勾选凭证对应的付款记录；支持一张凭证关联一笔或多笔付款。</p>
         <span>{proofCount} 份凭证</span>
-      </header>
+      </header> : null}
 
-      <section className="expense-inbox-review" aria-labelledby="expense-inbox-review-title">
+      {showInbox ? <section className="expense-inbox-review" aria-labelledby="expense-inbox-review-title">
         <header>
           <div><Inbox size={18} aria-hidden="true" /><span><strong id="expense-inbox-review-title">微信待处理</strong><small>核对机器人识别结果，再关联到具体付款</small></span></div>
           <b>{inboxItems.length}</b>
@@ -270,10 +279,10 @@ export function PaymentProofCenter({
           })}
           {inboxItems.length === 0 ? <div className="expense-inbox-empty" role="status"><Check size={18} /><span><strong>没有待处理凭证</strong><small>微信机器人收到的新凭证会显示在这里。</small></span></div> : null}
         </div>
-      </section>
+      </section> : null}
 
-      <div className="expense-proof-list">
-        {expenses.map((expense) => {
+      {showProofs ? <div className={`expense-proof-list${compact ? " is-compact" : ""}`}>
+        {visibleExpenses.map((expense) => {
           const selectedPaymentIds = selectedFor(expense);
           const proofs = expense.attachments.filter((attachment) => attachment.kind === "payment_proof");
           const pending = pendingAttachmentId === expense.id;
@@ -336,7 +345,7 @@ export function PaymentProofCenter({
                     <article className="expense-proof-file" key={attachment.id}>
                       <div className="expense-proof-file-preview" aria-label={`${attachment.fileName}预览`}>
                         {isImage ? (
-                          <AuthenticatedImageFrame resourceKey={attachment.id} loadImage={({ signal }) => getAttachmentContentResponse(attachment.id, { signal })} title={attachment.fileName} maxDimension={360} />
+                          <AuthenticatedImageFrame resourceKey={attachment.id} loadImage={({ signal }) => getAttachmentContentResponse(attachment.id, { signal })} title={attachment.fileName} maxDimension={720} />
                         ) : (
                           <span><FileText size={24} /><strong>{isPdf ? "PDF" : "文件"}</strong></span>
                         )}
@@ -359,7 +368,7 @@ export function PaymentProofCenter({
           );
         })}
         {expenses.length === 0 ? <div className="expense-proof-empty"><Paperclip size={20} /><strong>本周暂无费用</strong><span>先记一笔费用，再为对应付款补充凭证。</span></div> : null}
-      </div>
+      </div> : null}
     </section>
   );
 }

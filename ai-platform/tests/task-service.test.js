@@ -284,6 +284,42 @@ describe("AI platform task service", () => {
     assert.equal(receivedModel.providerKind, "mock");
   });
 
+  it("persists non-sensitive provider identity beside the encrypted result", async () => {
+    const provider = {
+      ...mockProvider,
+      async execute() {
+        const response = successfulResponse("response-metadata");
+        response.result.source = "model";
+        response.result.metadata = {
+          provider: "provider-deepseek",
+          actualModel: "deepseek-flash",
+          modelIdentitySource: "response",
+          finishReason: "stop",
+          executionMode: "external-provider",
+          completion: "must-not-be-copied",
+        };
+        return response;
+      },
+    };
+    createService(provider, {
+      taskEncryptionKey: Buffer.alloc(32, 81).toString("base64url"),
+    });
+    const owner = identity("alice");
+    const task = service.createTask({ identity: owner, idempotencyKey: "response-metadata", request: validRequest() });
+
+    await service.runPending();
+
+    const row = db.prepare("SELECT response_meta_json FROM task_attempts WHERE task_id = ?").get(task.taskId);
+    assert.deepEqual(JSON.parse(row.response_meta_json), {
+      source: "model",
+      provider: "provider-deepseek",
+      actualModel: "deepseek-flash",
+      modelIdentitySource: "response",
+      finishReason: "stop",
+      executionMode: "external-provider",
+    });
+  });
+
   it("creates, executes, persists, and replays a task idempotently", async () => {
     createService();
     const owner = identity("alice");

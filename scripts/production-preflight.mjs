@@ -20,6 +20,7 @@ import { fileURLToPath } from "node:url";
 
 import { REQUIRED_ENV_NAMES } from "./release-package.mjs";
 import { MODEL_TIMEOUT_MS_MAX } from "../backend/src/config.js";
+import { DEEPSEEK_FLASH_MODEL } from "../shared/deepseekContract.mjs";
 
 // A pre-cutover report may inspect the already-running release whose manifest
 // predates the WeChat-bookkeeping confirmation names. This relaxed set
@@ -160,8 +161,8 @@ const BACKEND_ENVIRONMENT_SERVICES = Object.freeze([
   "sentelligent-weixin-agent.service",
 ]);
 const APPROVED_MODEL_PROVIDER = "deepseek";
-const APPROVED_MODEL_NAME = "deepseek-v4-flash";
-const APPROVED_VISION_MODEL_NAME = "deepseek-v4-flash-vision-exp";
+const APPROVED_MODEL_NAME = DEEPSEEK_FLASH_MODEL;
+const APPROVED_VISION_MODEL_NAME = DEEPSEEK_FLASH_MODEL;
 const APPROVED_MODEL_BASE_URL = "https://api.deepseek.com";
 const IMMUTABLE_RELEASE_SERVICE_ENTRIES = Object.freeze({
   "sentelligent-backend.service": {

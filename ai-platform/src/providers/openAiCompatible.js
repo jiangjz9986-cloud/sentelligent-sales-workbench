@@ -1,4 +1,4 @@
-import { AI_TASK_TYPES } from "../../../shared/aiPlatformContract.mjs";
+import { AI_TASK_TYPES, sha256 } from "../../../shared/aiPlatformContract.mjs";
 import { AiPlatformError } from "../errors.js";
 import { prepareMediaRequest } from "./mediaRequest.js";
 import { agentPolicyText } from "./agentPolicyText.js";
@@ -7,6 +7,8 @@ const TEXT_TASKS = new Set(AI_TASK_TYPES.filter((type) => !["invoice.recognize",
 const MODEL_NAME = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}$/u;
 const ALLOWED_FIELDS = new Set(["id", "kind", "baseUrl", "credentialEnv", "models"]);
 const MODEL_FIELDS = new Set(["name", "taskTypes", "reasoning", "reasoningEffort", "maxOutputTokens"]);
+const PROBE_MAX_BYTES = 128 * 1024;
+const PROBE_TIMEOUT_MS = 10_000;
 
 function invalid(message = "invalid provider policy") {
   return new AiPlatformError(message, { code: "provider_configuration_invalid", status: 503 });
@@ -91,7 +93,47 @@ async function boundedResponse(response, maxBytes) {
   }
 }
 
-export function createOpenAiCompatibleProvider(policy, { env = process.env, fetchImpl = fetch, pdfOptions = {}, credentialResolver = null } = {}) {
+export function createOpenAiCompatibleProvider(policy, {
+  env = process.env,
+  fetchImpl = fetch,
+  pdfOptions = {},
+  credentialResolver = null,
+  credentialMetadata = null,
+  db = null,
+  clock = () => new Date(),
+  readinessTtlMs = 5 * 60_000,
+  policyDigest = null,
+} = {}) {
+  const normalizedReadinessTtlMs = Number.isSafeInteger(readinessTtlMs) && readinessTtlMs >= 1_000
+    ? readinessTtlMs
+    : 5 * 60_000;
+  const boundPolicyDigest = typeof policyDigest === "string" && /^[0-9a-f]{64}$/u.test(policyDigest)
+    ? policyDigest
+    : sha256(policy);
+  let refreshPromise = null;
+  let readinessState = Object.freeze({
+    configured: false,
+    credentialReady: false,
+    probeReady: false,
+    liveReady: false,
+    ready: false,
+    code: "not_configured",
+    checkedAt: null,
+    expiresAt: null,
+    credentialRevision: 0,
+    credentialDigest: null,
+    policyDigest: boundPolicyDigest,
+    models: Object.freeze([]),
+    liveEvidence: null,
+  });
+
+  function nowMs() {
+    const value = clock();
+    const milliseconds = value instanceof Date ? value.getTime() : Number(value);
+    if (!Number.isFinite(milliseconds)) throw new TypeError("clock must return a valid date");
+    return milliseconds;
+  }
+  function nowIso() { return new Date(nowMs()).toISOString(); }
   function credential() {
     const value = String(credentialResolver ? credentialResolver(policy.credentialEnv) : env[policy.credentialEnv] ?? "");
     if (!value || value.length > 4096 || /[\s\u0000-\u001f\u007f]/u.test(value)) {
@@ -100,6 +142,290 @@ export function createOpenAiCompatibleProvider(policy, { env = process.env, fetc
       throw error;
     }
     return value;
+  }
+  function credentialBinding() {
+    const key = credential();
+    let metadata = null;
+    if (typeof credentialMetadata === "function") {
+      try { metadata = credentialMetadata(policy.credentialEnv); } catch { metadata = null; }
+    }
+    const revision = Number.isSafeInteger(metadata?.revision) && metadata.revision >= 0 ? metadata.revision : 0;
+    return { revision, digest: sha256(key) };
+  }
+  function configuredModelNames() {
+    return policy.models.map((model) => model.name);
+  }
+  function bindingMatches(state, binding) {
+    return Boolean(binding)
+      && state.credentialRevision === binding.revision
+      && state.credentialDigest === binding.digest
+      && state.policyDigest === boundPolicyDigest;
+  }
+  function sameCredentialBinding(left, right) {
+    return Boolean(left && right) && left.revision === right.revision && left.digest === right.digest;
+  }
+  function evidenceIsFresh(evidence, binding, atMs = nowMs()) {
+    return Boolean(evidence)
+      && evidence.providerId === policy.id
+      && bindingMatches(evidence, binding)
+      && evidence.settledStatus === "settled"
+      && Number.isFinite(Date.parse(evidence.expiresAt))
+      && Date.parse(evidence.expiresAt) > atMs;
+  }
+  function readiness(context = {}) {
+    let binding = null;
+    try { binding = credentialBinding(); } catch {}
+    const credentialReady = Boolean(binding);
+    const modelName = typeof context.modelName === "string" ? context.modelName : null;
+    const taskType = typeof context.taskType === "string" ? context.taskType : null;
+    const capabilityReady = modelName && taskType
+      ? policy.models.some((model) => model.name === modelName && model.taskTypes.includes(taskType))
+      : true;
+    const stateBindingReady = bindingMatches(readinessState, binding);
+    const fresh = stateBindingReady
+      && Number.isFinite(Date.parse(readinessState.expiresAt ?? ""))
+      && Date.parse(readinessState.expiresAt) > nowMs();
+    const evidence = evidenceIsFresh(readinessState.liveEvidence, binding);
+    const modelReady = modelName ? readinessState.models.includes(modelName) : readinessState.probeReady;
+    const probeReady = credentialReady && fresh && readinessState.probeReady && modelReady;
+    const liveReady = credentialReady && fresh && evidence && readinessState.liveReady && modelReady;
+    // A catalogue probe is enough for the isolated canary admission class;
+    // ordinary production tasks still require liveReady in taskService.
+    const ready = credentialReady && capabilityReady && probeReady;
+    const code = !credentialReady
+      ? "not_configured"
+      : !capabilityReady
+        ? "capability_unsupported"
+        : !stateBindingReady
+          ? "credential_or_policy_changed"
+          : !fresh && readinessState.expiresAt
+            ? "readiness_expired"
+            : liveReady
+              ? "live_ready"
+              : readinessState.code;
+    return Object.freeze({
+      configured: credentialReady,
+      credentialReady,
+      capabilityReady,
+      probeReady,
+      liveReady,
+      ready,
+      code,
+      checkedAt: readinessState.checkedAt,
+      expiresAt: readinessState.expiresAt,
+      credentialRevision: credentialReady ? binding.revision : 0,
+      policyDigest: boundPolicyDigest,
+      liveEvidenceId: liveReady ? readinessState.liveEvidence.id : null,
+      models: readinessState.models,
+    });
+  }
+  function stateForBinding(binding, patch = {}) {
+    return Object.freeze({
+      configured: Boolean(binding),
+      credentialReady: Boolean(binding),
+      probeReady: false,
+      liveReady: false,
+      ready: false,
+      code: binding ? "not_ready" : "not_configured",
+      checkedAt: nowIso(),
+      expiresAt: null,
+      credentialRevision: binding?.revision ?? 0,
+      credentialDigest: binding?.digest ?? null,
+      policyDigest: boundPolicyDigest,
+      models: Object.freeze([]),
+      liveEvidence: null,
+      ...patch,
+    });
+  }
+  function readPersistedEvidence() {
+    if (!db) return null;
+    let binding;
+    try { binding = credentialBinding(); } catch { return null; }
+    const row = db.prepare(`
+      SELECT id, provider_id, model_id, model_name, task_type, credential_revision,
+             credential_digest, provider_policy_digest, run_id, sample_index, task_id,
+             attempt_id, platform_request_id, provider_request_id, price_version_id,
+             usage_json, cost_micro, function_fee_micro, total_micro, currency,
+             result_schema_version, result_digest, settled_status, observed_at,
+             expires_at, created_at
+        FROM provider_readiness_evidence
+       WHERE provider_id = ? AND settled_status = 'settled' AND expires_at > ?
+       ORDER BY expires_at DESC, created_at DESC
+       LIMIT 1
+    `).get(policy.id, nowIso());
+    if (!row || row.credential_revision !== binding.revision || row.credential_digest !== binding.digest
+      || row.provider_policy_digest !== boundPolicyDigest) return null;
+    let usage;
+    try { usage = JSON.parse(row.usage_json); } catch { return null; }
+    if (!plain(usage)) return null;
+    return {
+      id: row.id,
+      providerId: row.provider_id,
+      modelId: row.model_id,
+      modelName: row.model_name,
+      taskType: row.task_type,
+      credentialRevision: row.credential_revision,
+      credentialDigest: row.credential_digest,
+      policyDigest: row.provider_policy_digest,
+      runId: row.run_id,
+      sampleIndex: row.sample_index,
+      taskId: row.task_id,
+      attemptId: row.attempt_id,
+      platformRequestId: row.platform_request_id,
+      providerRequestId: row.provider_request_id,
+      priceVersionId: row.price_version_id,
+      usage,
+      costMicro: row.cost_micro,
+      functionFeeMicro: row.function_fee_micro,
+      totalMicro: row.total_micro,
+      currency: row.currency,
+      resultSchemaVersion: row.result_schema_version,
+      resultDigest: row.result_digest,
+      settledStatus: row.settled_status,
+      observedAt: row.observed_at,
+      expiresAt: row.expires_at,
+      createdAt: row.created_at,
+    };
+  }
+  function hydrateLiveEvidence() {
+    const evidence = readPersistedEvidence();
+    if (!evidence) return;
+    let binding;
+    try { binding = credentialBinding(); } catch { return; }
+    readinessState = stateForBinding(binding, {
+      probeReady: true,
+      liveReady: true,
+      ready: true,
+      code: "live_ready",
+      checkedAt: evidence.observedAt,
+      expiresAt: evidence.expiresAt,
+      models: Object.freeze([evidence.modelName]),
+      liveEvidence: evidence,
+    });
+  }
+  async function refreshReadiness({ modelName = null, taskType = null, signal } = {}) {
+    if (refreshPromise) return refreshPromise.then(() => readiness({ modelName, taskType }));
+    refreshPromise = (async () => {
+      let key;
+      let startedBinding;
+      try {
+        key = credential();
+        startedBinding = credentialBinding();
+      } catch {
+        readinessState = stateForBinding(null);
+        return;
+      }
+      const timeout = AbortSignal.timeout(PROBE_TIMEOUT_MS);
+      const requestSignal = signal
+        ? (AbortSignal.any ? AbortSignal.any([signal, timeout]) : signal)
+        : timeout;
+      try {
+        const response = await fetchImpl(policy.baseUrl + "/models", {
+          method: "GET",
+          redirect: "error",
+          signal: requestSignal,
+          headers: { Authorization: `Bearer ${key}` },
+        });
+        if (!response.ok) {
+          await response.body?.cancel?.();
+          readinessState = stateForBinding(startedBinding, {
+            code: response.status === 429 ? "rate_limited" : "probe_failed",
+          });
+          return;
+        }
+        const parsed = await boundedResponse(response, PROBE_MAX_BYTES);
+        const available = Array.isArray(parsed?.data)
+          ? parsed.data.map((item) => item?.id)
+          : Array.isArray(parsed?.models)
+            ? parsed.models.map((item) => typeof item === "string" ? item : item?.id ?? item?.name)
+            : [];
+        const availableModels = [...new Set(available.filter((item) => typeof item === "string" && MODEL_NAME.test(item)))];
+        const missing = configuredModelNames().filter((name) => !availableModels.includes(name));
+        let currentBinding = null;
+        try { currentBinding = credentialBinding(); } catch {}
+        // A response from a probe started under an old credential/policy must
+        // never restore readiness for the new binding.
+        if (!sameCredentialBinding(startedBinding, currentBinding)) {
+          readinessState = stateForBinding(currentBinding, { code: "credential_or_policy_changed" });
+          return;
+        }
+        const existingEvidence = evidenceIsFresh(readinessState.liveEvidence, currentBinding)
+          ? readinessState.liveEvidence
+          : null;
+        const expiresAt = new Date(nowMs() + normalizedReadinessTtlMs).toISOString();
+        readinessState = stateForBinding(currentBinding, {
+          probeReady: missing.length === 0,
+          liveReady: Boolean(existingEvidence),
+          ready: missing.length === 0,
+          code: existingEvidence ? "live_ready" : missing.length === 0 ? "probe_ready" : "model_unavailable",
+          checkedAt: nowIso(),
+          expiresAt,
+          models: Object.freeze(availableModels),
+          liveEvidence: existingEvidence,
+        });
+      } catch (error) {
+        let currentBinding = null;
+        try { currentBinding = credentialBinding(); } catch {}
+        if (!sameCredentialBinding(startedBinding, currentBinding)) {
+          readinessState = stateForBinding(currentBinding, { code: "credential_or_policy_changed" });
+          return;
+        }
+        readinessState = stateForBinding(startedBinding, {
+          code: requestSignal.aborted
+            ? "probe_timeout"
+            : error?.code === "provider_response_too_large" ? error.code : "probe_failed",
+        });
+      }
+    })().finally(() => { refreshPromise = null; });
+    return refreshPromise.then(() => readiness({ modelName, taskType }));
+  }
+  function validateLiveEvidence(evidence) {
+    if (!plain(evidence) || evidence.providerId !== policy.id || evidence.policyDigest !== boundPolicyDigest
+      || !MODEL_NAME.test(String(evidence.modelName ?? "")) || !Number.isSafeInteger(evidence.credentialRevision)
+      || evidence.credentialRevision < 0 || !/^[0-9a-f]{64}$/u.test(evidence.credentialDigest ?? "")
+      || evidence.settledStatus !== "settled" || !Number.isFinite(Date.parse(evidence.expiresAt ?? ""))
+      || Date.parse(evidence.expiresAt) <= nowMs()) {
+      throw new AiPlatformError("provider readiness evidence is invalid", { code: "provider_evidence_invalid", status: 503 });
+    }
+    const binding = credentialBinding();
+    if (binding.revision !== evidence.credentialRevision || binding.digest !== evidence.credentialDigest) {
+      throw new AiPlatformError("provider readiness evidence is stale", { code: "provider_evidence_stale", status: 409 });
+    }
+    return Object.freeze({ ...evidence });
+  }
+  function recordLiveEvidence(evidence) {
+    const validated = validateLiveEvidence(evidence);
+    const models = new Set(readinessState.models);
+    models.add(validated.modelName);
+    readinessState = Object.freeze({
+      ...readinessState,
+      configured: true,
+      credentialReady: true,
+      probeReady: true,
+      liveReady: true,
+      ready: true,
+      code: "live_ready",
+      checkedAt: validated.observedAt,
+      expiresAt: validated.expiresAt,
+      credentialRevision: validated.credentialRevision,
+      credentialDigest: validated.credentialDigest,
+      policyDigest: boundPolicyDigest,
+      models: Object.freeze([...models]),
+      liveEvidence: validated,
+    });
+    return readiness({ modelName: validated.modelName, taskType: validated.taskType });
+  }
+  function persistedLiveEvidence() {
+    const evidence = readPersistedEvidence();
+    return evidence ? Object.freeze({ ...evidence }) : null;
+  }
+  function readinessBinding() {
+    try {
+      const binding = credentialBinding();
+      return Object.freeze({ credentialRevision: binding.revision, credentialDigest: binding.digest, policyDigest: boundPolicyDigest });
+    } catch {
+      return null;
+    }
   }
   async function prepare({ task, model, agent, limits, mediaStore, signal }) {
     credential();
@@ -138,9 +464,16 @@ export function createOpenAiCompatibleProvider(policy, { env = process.env, fetc
     if (Buffer.byteLength(encoded) > 512 * 1024) throw invalid("completion request exceeded limit");
     return { body: encoded, selected };
   }
+  hydrateLiveEvidence();
   return Object.freeze({
     id: policy.id,
     kind: policy.kind,
+    readiness,
+    refreshReadiness,
+    validateLiveEvidence,
+    recordLiveEvidence,
+    persistedLiveEvidence,
+    readinessBinding,
     supports({ modelName, taskType }) {
       try { credential(); } catch { return false; }
       return policy.models.some((model) => model.name === modelName && model.taskTypes.includes(taskType));
@@ -169,6 +502,7 @@ export function createOpenAiCompatibleProvider(policy, { env = process.env, fetc
         ? { inputTokens: 0, outputTokens: 0, cachedInputTokens: 0, audioSeconds: duration ?? input.audioSeconds, imagePages: 0 }
         : usageFromResponse(parsed.usage);
       const content = parsed.choices?.[0]?.message?.content;
+      const finishReason = input.kind === "asr" ? null : parsed.choices?.[0]?.finish_reason;
       const externalRequestId = safeRequestId(response, parsed);
       const reject = (code) => {
         const error = new AiPlatformError("invalid provider completion", { code, status: 502 });
@@ -203,6 +537,7 @@ export function createOpenAiCompatibleProvider(policy, { env = process.env, fetc
           writebackPreview: { requiresHumanConfirmation: true, actions: [] },
           metadata: {
             ...(payload ? { payload, ...(input.kind === "asr" ? { transcript: payload.text } : {}) } : { completion: content }),
+            ...(finishReason ? { finishReason } : {}),
             provider: policy.id, actualModel: parsed.model ?? model.name, modelIdentitySource: parsed.model ? "response" : "registered-policy",
             executionMode: "external-provider", agentVersion: agent.versionId,
           },

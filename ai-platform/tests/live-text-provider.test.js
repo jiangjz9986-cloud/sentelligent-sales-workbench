@@ -6,7 +6,7 @@ import { createOpenAiCompatibleProvider, normalizeProviderPolicies } from "../sr
 
 const POLICY = {
   id: "provider-text-test", baseUrl: "https://api.deepseek.com", credentialEnv: "AI_PROVIDER_TEST_KEY",
-  models: [{ name: "deepseek-v4-flash", taskTypes: ["quick-record.analyze", "weekly.generate"], reasoning: "deepseek-thinking", maxOutputTokens: 4000 }],
+  models: [{ name: "deepseek-flash", taskTypes: ["quick-record.analyze", "weekly.generate"], reasoning: "deepseek-thinking", maxOutputTokens: 4000 }],
 };
 const ENV = { AI_PROVIDER_TEST_KEY: ["synthetic", "provider", "credential"].join("-") };
 const requestInput = {
@@ -23,7 +23,7 @@ function providerInput(taskType = "quick-record.analyze") {
 }
 function completion(extra = {}) {
   return {
-    id: "request-vendor-1", model: "deepseek-v4-flash",
+    id: "request-vendor-1", model: "deepseek-flash",
     choices: [{ message: { content: '{"value":1}' }, finish_reason: "stop" }],
     usage: { prompt_tokens: 100, prompt_cache_hit_tokens: 40, completion_tokens: 20 }, ...extra,
   };
@@ -43,13 +43,14 @@ test("registered model and token limits control the request, cached input is cou
   const sent = JSON.parse(calls[0].body);
   assert.equal(calls[0].url, "https://api.deepseek.com/chat/completions");
   assert.equal(calls[0].redirect, "error");
-  assert.equal(sent.model, "deepseek-v4-flash");
+  assert.equal(sent.model, "deepseek-flash");
   assert.equal(sent.max_tokens, 3200);
   assert.deepEqual(sent.thinking, { type: "disabled" });
   assert.equal(Object.hasOwn(sent, "apiKey"), false);
   assert.equal(sent.messages[0].content, "Return JSON.");
   assert.deepEqual(result.usage, { inputTokens: 60, outputTokens: 20, cachedInputTokens: 40, audioSeconds: 0, imagePages: 0 });
-  assert.equal(result.result.metadata.actualModel, "deepseek-v4-flash");
+  assert.equal(result.result.metadata.actualModel, "deepseek-flash");
+  assert.equal(result.result.metadata.finishReason, "stop");
   assert.equal(result.externalRequestId, "request-vendor-1");
   await provider.execute(providerInput("weekly.generate"));
   assert.equal(Object.hasOwn(JSON.parse(calls[1].body), "thinking"), false);
@@ -70,6 +71,56 @@ test("invalid completion and model mismatch retain usage and vendor request iden
   }
   const unknown = await configured(async () => Response.json(completion({ usage: {} }))).execute(providerInput());
   assert.equal(unknown.usage, null);
+});
+
+test("supplier and transport failures map to bounded errors without leaking bodies or retrying", async () => {
+  for (const status of [429, 500, 503]) {
+    await assert.rejects(
+      configured(async () => new Response(JSON.stringify({ secret: ENV.AI_PROVIDER_TEST_KEY }), { status })).execute(providerInput()),
+      (error) => {
+        assert.equal(error.code, status === 429 ? "rate_limited" : "provider_error");
+        assert.equal(error.externalRequestId ?? null, null);
+        assert.equal(error.usage, undefined);
+        assert.doesNotMatch(error.message, /synthetic|credential|secret/i);
+        return true;
+      },
+    );
+  }
+
+  for (const body of ["", "{not-json"]) {
+    await assert.rejects(
+      configured(async () => new Response(body)).execute(providerInput()),
+      (error) => {
+        assert.equal(error.code, "invalid_result");
+        assert.equal(error.externalRequestId ?? null, null);
+        assert.equal(error.usage ?? null, null);
+        return true;
+      },
+    );
+  }
+
+  await assert.rejects(
+    configured(async () => { throw new Error("socket disconnected with private details"); }).execute(providerInput()),
+    (error) => {
+      assert.equal(error.code, "network_error");
+      assert.doesNotMatch(error.message, /socket|private|details/i);
+      return true;
+    },
+  );
+
+  const controller = new AbortController();
+  controller.abort();
+  await assert.rejects(
+    configured(async (_url, options) => {
+      assert.equal(options.signal, controller.signal);
+      throw new Error("request cancelled");
+    }).execute({ ...providerInput(), signal: controller.signal }),
+    (error) => {
+      assert.equal(error.code, "cancelled");
+      assert.doesNotMatch(error.message, /cancelled/i);
+      return true;
+    },
+  );
 });
 
 test("released standard contents and instruction versions reach the actual provider prompt", async () => {
@@ -104,15 +155,91 @@ test("provider policy rejects unapproved origins, raw credentials, unsupported c
   await assert.rejects(provider.execute(providerInput()), (error) => error.code === "provider_response_too_large");
 });
 
+test("an authenticated model catalogue establishes probe readiness without claiming live completion evidence", async () => {
+  const calls = [];
+  const provider = configured(async (url, options) => {
+    calls.push({ url, options });
+    return Response.json({ data: [{ id: "deepseek-flash" }] });
+  });
+  assert.equal(provider.readiness({ modelName: "deepseek-flash", taskType: "quick-record.analyze" }).ready, false);
+  const ready = await provider.refreshReadiness({ modelName: "deepseek-flash", taskType: "quick-record.analyze" });
+  assert.equal(ready.ready, true);
+  assert.equal(ready.probeReady, true);
+  assert.equal(ready.liveReady, false);
+  assert.equal(ready.code, "probe_ready");
+  assert.equal(calls[0].url, "https://api.deepseek.com/models");
+  assert.equal(calls[0].options.method, "GET");
+  assert.equal(calls[0].options.headers.Authorization, `Bearer ${ENV.AI_PROVIDER_TEST_KEY}`);
+
+  const missing = configured(async () => Response.json({ data: [{ id: "other-model" }] }));
+  const blocked = await missing.refreshReadiness({ modelName: "deepseek-flash", taskType: "quick-record.analyze" });
+  assert.equal(blocked.ready, false);
+  assert.equal(blocked.code, "model_unavailable");
+});
+
+test("the production runtime rejects a catalogue-only provider before creating a task or reserving budget", async () => {
+  const requests = [];
+  const runtime = createAiPlatformRuntime({
+    config: {
+      nodeEnv: "production", databasePath: ":memory:", executionMode: "external-provider",
+      externalProvidersEnabled: true, taskAdmissionEnabled: true,
+      authSecret: Buffer.alloc(32, 91).toString("base64url"),
+      taskEncryptionKey: Buffer.alloc(32, 92).toString("base64url"),
+      providerAllowedOrigins: ["https://api.deepseek.com"], providerPolicies: [POLICY],
+    },
+    env: ENV, autoStart: false,
+    providerFetchImpl: async (url, options) => {
+      requests.push({ url, method: options.method });
+      return Response.json({ data: [{ id: "deepseek-flash" }] });
+    },
+  });
+  try {
+    const db = runtime.db;
+    db.prepare("INSERT INTO providers VALUES (?, ?, 'openai_compatible', 1, '{}', ?, ?)").run(POLICY.id, "Fixture", "2026-01-01", "2026-01-01");
+    db.prepare("INSERT INTO models VALUES ('model-text-test', ?, 'deepseek-flash', '{\"text\":true}', 1, ?, ?)").run(POLICY.id, "2026-01-01", "2026-01-01");
+    db.prepare("UPDATE agent_versions SET model_policy_json = ? WHERE agent_id = 'agent-quick-record'")
+      .run(JSON.stringify({ providerId: POLICY.id, modelId: "model-text-test", externalAllowed: true }));
+    db.prepare("INSERT INTO price_versions SELECT 'price-text-test', 'model-text-test', 'test-v1', 'USD', 1000, 1000, 100, 0, 0, 0, effective_from, effective_to, created_at FROM price_versions WHERE id = 'price-mock-zero-v1'").run();
+    await runtime.providerRegistry.refreshReadiness({ providerId: POLICY.id });
+    const status = runtime.taskService.configurationReadiness()["quick-record.analyze"];
+    assert.equal(status.probeReady, true);
+    assert.equal(status.liveReady, false);
+    assert.equal(status.ready, false);
+    assert.throws(() => runtime.taskService.createTask({
+      identity: { issuer: "backend", owner: "alice", actor: "alice" },
+      idempotencyKey: "catalogue-only",
+      request: { taskType: "quick-record.analyze", feature: "quick-record", channel: "web", input: requestInput },
+    }), (error) => error.code === "provider_live_not_ready");
+    assert.equal(db.prepare("SELECT COUNT(*) n FROM tasks").get().n, 0);
+    assert.equal(db.prepare("SELECT COUNT(*) n FROM budget_reservations").get().n, 0);
+    assert.deepEqual(requests, [{ url: "https://api.deepseek.com/models", method: "GET" }]);
+  } finally {
+    await runtime.close();
+  }
+});
+
+test("provider readiness never exposes the credential when the probe fails", async () => {
+  const provider = configured(async () => { throw new Error("network failure"); });
+  const result = await provider.refreshReadiness({ modelName: "deepseek-flash", taskType: "quick-record.analyze" });
+  assert.equal(result.ready, false);
+  assert.equal(result.code, "probe_failed");
+  assert.equal(JSON.stringify(result).includes(ENV.AI_PROVIDER_TEST_KEY), false);
+});
+
 test("default runtime registers configured text providers and persists real HTTP attempts and usage", async () => {
   let calls = 0;
   const supplier = createHttpServer(async (req, res) => {
+    if (req.url === "/models") {
+      res.setHeader("Content-Type", "application/json");
+      res.end(JSON.stringify({ data: [{ id: "deepseek-flash" }] }));
+      return;
+    }
     const chunks = [];
     for await (const chunk of req) chunks.push(chunk);
     const payload = JSON.parse(Buffer.concat(chunks).toString());
     calls++;
     assert.equal(req.url, "/chat/completions");
-    assert.equal(payload.model, "deepseek-v4-flash");
+    assert.equal(payload.model, "deepseek-flash");
     res.setHeader("Content-Type", "application/json");
     res.end(JSON.stringify(completion()));
   });
@@ -128,11 +255,12 @@ test("default runtime registers configured text providers and persists real HTTP
   try {
     const db = runtime.db;
     db.prepare("INSERT INTO providers VALUES (?, ?, 'openai_compatible', 1, '{}', ?, ?)").run(POLICY.id, "HTTP fixture", "2026-01-01", "2026-01-01");
-    db.prepare("INSERT INTO models VALUES ('model-text-test', ?, 'deepseek-v4-flash', '{\"text\":true}', 1, ?, ?)").run(POLICY.id, "2026-01-01", "2026-01-01");
+    db.prepare("INSERT INTO models VALUES ('model-text-test', ?, 'deepseek-flash', '{\"text\":true}', 1, ?, ?)").run(POLICY.id, "2026-01-01", "2026-01-01");
     db.prepare("UPDATE agent_versions SET model_policy_json = ? WHERE id = (SELECT agent_version_id FROM agent_releases WHERE agent_id = (SELECT id FROM agents WHERE slug = 'quick-record'))")
       .run(JSON.stringify({ providerId: POLICY.id, modelId: "model-text-test", externalAllowed: true }));
     db.prepare("INSERT INTO price_versions SELECT 'price-text-test', 'model-text-test', 'test-v1', 'USD', 1000, 1000, 100, 0, 0, 0, effective_from, effective_to, created_at FROM price_versions WHERE id = 'price-mock-zero-v1'").run();
     const identity = { issuer: "backend", owner: "alice", actor: "alice" };
+    await runtime.providerRegistry.refreshReadiness({ providerId: POLICY.id });
     const task = runtime.taskService.createTask({ identity, idempotencyKey: "live-http", request: { taskType: "quick-record.analyze", feature: "quick-record", channel: "web", input: requestInput } });
     await runtime.taskService.runPending();
     assert.equal(runtime.taskService.readTask({ identity, taskId: task.taskId }).status, "succeeded");

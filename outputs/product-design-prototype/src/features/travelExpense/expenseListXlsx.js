@@ -12,6 +12,11 @@ const EXPENSE_LIST_COLUMNS = Object.freeze([
 
 const NON_PAYMENT_COLUMNS = EXPENSE_LIST_COLUMNS.filter(({ id }) => id !== "paymentRecord");
 const JPEG_DATA_URL = /^data:image\/(?:jpeg|jpg);base64,([a-z0-9+/=\s]+)$/i;
+const PAYMENT_PROOF_DRAWING_WIDTH = 1_850_000;
+const PAYMENT_PROOF_DRAWING_MAX_HEIGHT = 1_150_000;
+const PAYMENT_PROOF_DRAWING_HORIZONTAL_PADDING = 75_000;
+const PAYMENT_PROOF_DRAWING_MIN_ROW_HEIGHT = 36;
+const PAYMENT_PROOF_DRAWING_MAX_ROW_HEIGHT = 96;
 const JPEG_SOF_MARKERS = new Set([
   0xc0, 0xc1, 0xc2, 0xc3, 0xc5, 0xc6, 0xc7,
   0xc9, 0xca, 0xcb, 0xcd, 0xce, 0xcf,
@@ -286,14 +291,12 @@ function buildStylesXml() {
 
 function buildDrawingXml(placements) {
   const anchors = placements.map((placement, index) => {
-    const dimensions = readJpegDimensions(placement.bytes);
-    const containerWidth = 1_850_000;
-    const containerHeight = 1_150_000;
-    const scale = Math.min(containerWidth / dimensions.width, containerHeight / dimensions.height);
-    const width = Math.max(1, Math.round(dimensions.width * scale));
-    const height = Math.max(1, Math.round(dimensions.height * scale));
-    const columnOffset = 75_000 + Math.round((containerWidth - width) / 2);
-    const rowOffset = 25_000 + Math.round((containerHeight - height) / 2);
+    const {
+      width,
+      height,
+      columnOffset,
+      rowOffset,
+    } = placement.layout;
     return `<xdr:oneCellAnchor>
       <xdr:from><xdr:col>4</xdr:col><xdr:colOff>${columnOffset}</xdr:colOff><xdr:row>${placement.sheetRow - 1}</xdr:row><xdr:rowOff>${rowOffset}</xdr:rowOff></xdr:from>
       <xdr:ext cx="${width}" cy="${height}"/>
@@ -309,6 +312,34 @@ function buildDrawingXml(placements) {
 <xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
 ${anchors}
 </xdr:wsDr>`;
+}
+
+function calculatePaymentProofLayout(bytes) {
+  const dimensions = readJpegDimensions(bytes);
+  const contentWidth = PAYMENT_PROOF_DRAWING_WIDTH - (PAYMENT_PROOF_DRAWING_HORIZONTAL_PADDING * 2);
+  const scale = Math.min(
+    contentWidth / dimensions.width,
+    PAYMENT_PROOF_DRAWING_MAX_HEIGHT / dimensions.height,
+  );
+  const width = Math.max(1, Math.round(dimensions.width * scale));
+  const height = Math.max(1, Math.round(dimensions.height * scale));
+  const rowHeight = Math.max(
+    PAYMENT_PROOF_DRAWING_MIN_ROW_HEIGHT,
+    Math.min(
+      PAYMENT_PROOF_DRAWING_MAX_ROW_HEIGHT,
+      Math.ceil((height / PAYMENT_PROOF_DRAWING_MAX_HEIGHT) * PAYMENT_PROOF_DRAWING_MAX_ROW_HEIGHT) + 4,
+    ),
+  );
+  const rowContainerHeight = Math.round(
+    PAYMENT_PROOF_DRAWING_MAX_HEIGHT * (rowHeight / PAYMENT_PROOF_DRAWING_MAX_ROW_HEIGHT),
+  );
+  return {
+    width,
+    height,
+    rowHeight,
+    columnOffset: PAYMENT_PROOF_DRAWING_HORIZONTAL_PADDING + Math.round((contentWidth - width) / 2),
+    rowOffset: Math.max(0, Math.round((rowContainerHeight - height) / 2)),
+  };
 }
 
 function buildDrawingRelationships(media) {
@@ -371,14 +402,8 @@ function buildWorksheet({ expenseList, thumbnailImages }) {
     }
     for (let line = 0; line < physicalRowCount; line += 1) {
       const currentRow = sheetRow + line;
-      const cells = EXPENSE_LIST_COLUMNS.map((column) => bodyCell(
-        column.id,
-        `${column.letter}${currentRow}`,
-        logicalRow.cells[column.id],
-        line === 0,
-      )).join("");
       const hasThumbnailSlot = Boolean(thumbnails[line]);
-      sheetRows.push(`<row r="${currentRow}" ht="${hasThumbnailSlot ? 96 : 36}" customHeight="1">${cells}</row>`);
+      let placement = null;
       if (hasThumbnailSlot) {
         const descriptor = thumbnails[line];
         const attachmentId = String(descriptor?.attachmentId ?? "").trim();
@@ -396,12 +421,21 @@ function buildWorksheet({ expenseList, thumbnailImages }) {
           };
           mediaByAttachmentId.set(attachmentId, media);
         }
-        placements.push({
+        placement = {
           ...media,
           sheetRow: currentRow,
           altText: String(descriptor.altText ?? `付款凭证 ${line + 1}/${thumbnails.length}`).trim() || "付款凭证",
-        });
+          layout: calculatePaymentProofLayout(media.bytes),
+        };
+        placements.push(placement);
       }
+      const cells = EXPENSE_LIST_COLUMNS.map((column) => bodyCell(
+        column.id,
+        `${column.letter}${currentRow}`,
+        logicalRow.cells[column.id],
+        line === 0,
+      )).join("");
+      sheetRows.push(`<row r="${currentRow}" ht="${placement?.layout.rowHeight ?? 36}" customHeight="1">${cells}</row>`);
     }
     sheetRow = endRow + 1;
   }

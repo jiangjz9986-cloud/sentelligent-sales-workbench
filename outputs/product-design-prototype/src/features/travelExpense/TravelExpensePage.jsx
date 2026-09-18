@@ -9,6 +9,7 @@ import {
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { AdvanceSettlement } from "./AdvanceSettlement.jsx";
+import { ExpenseDetailCard } from "./ExpenseDetailCard.jsx";
 import { ExpenseEditorDrawer } from "./ExpenseEditorDrawer.jsx";
 import { ExpenseLedgerWorkbench } from "./ExpenseLedgerWorkbench.jsx";
 import { ExpenseListPrintPreview } from "./ExpenseListPrintPreview.jsx";
@@ -18,9 +19,13 @@ import { PaymentProofCenter } from "./PaymentProofCenter.jsx";
 import { downloadExpenseListXlsx } from "./ReimbursementOrganizer.jsx";
 import { TripRegionSettingsCard } from "./TripRegionSettingsCard.jsx";
 import { IsoWeekFallback } from "./IsoWeekFallback.jsx";
+import "./travelExpense.css";
 import { supportsInputType } from "../../app/inputCapabilities.js";
 import { prepareTravelExpenseDocument } from "./travelExpenseDocument.js";
-import { canSaveRegionProfileForWeek } from "./travelExpensePageState.js";
+import {
+  canSaveRegionProfileForWeek,
+  defaultExpenseOccurredOn,
+} from "./travelExpensePageState.js";
 import { hasResponsibleCity } from "./responsibleRegionModel.js";
 import {
   naturalWeekFor,
@@ -100,6 +105,7 @@ export function TravelExpensePage({
   const [reloadToken, setReloadToken] = useState(0);
   const [editorOpen, setEditorOpen] = useState(false);
   const [editingExpense, setEditingExpense] = useState(null);
+  const [detailExpenseId, setDetailExpenseId] = useState(null);
   const [draftPrefill, setDraftPrefill] = useState(null);
   const [saving, setSaving] = useState(false);
   const [pendingAttachmentId, setPendingAttachmentId] = useState(null);
@@ -114,7 +120,6 @@ export function TravelExpensePage({
   const [highlightExpenseId, setHighlightExpenseId] = useState(null);
   const [locationAnnouncement, setLocationAnnouncement] = useState("");
   const [locationFailure, setLocationFailure] = useState(null);
-  const [proofFocusExpenseId, setProofFocusExpenseId] = useState(null);
   const tabsRef = useRef(null);
   const loadedWeekStartRef = useRef(null);
   const pendingLedgerLocationRef = useRef(null);
@@ -346,7 +351,7 @@ export function TravelExpensePage({
   function selectWeek(value) {
     setSelectedLedgerDate(null);
     setHighlightExpenseId(null);
-    setProofFocusExpenseId(null);
+    setDetailExpenseId(null);
     setLocationAnnouncement("");
     setLocationFailure(null);
     pendingLedgerLocationRef.current = null;
@@ -384,6 +389,7 @@ export function TravelExpensePage({
         // Editing the occurrence date can move a persisted expense to another
         // natural week. Never merge that row into the currently loaded week:
         // navigate to its canonical week and reload the complete projection.
+        setDetailExpenseId(null);
         setWeek(savedWeek);
       }
       setEditorOpen(false);
@@ -405,6 +411,7 @@ export function TravelExpensePage({
     try {
       await apiClient.deleteTravelExpense(expense.id, expense.version);
       setExpenses((current) => current.filter((item) => item.id !== expense.id));
+      setDetailExpenseId((current) => current === expense.id ? null : current);
     } catch (deleteError) {
       setError(expenseErrorMessage(deleteError, "费用删除失败，请稍后重试。"));
     }
@@ -615,14 +622,11 @@ export function TravelExpensePage({
     setReloadToken((value) => value + 1);
   }
 
-  const handleProofFocusHandled = useCallback(({ expenseId, referenceCode, found }) => {
-    setProofFocusExpenseId(null);
-    setLocationAnnouncement(found
-      ? `已定位到账目 ${referenceCode ?? expenseId} 的付款凭证。`
-      : "未找到对应付款凭证区域，请重新加载。");
-  }, []);
-
   const getAttachmentUrl = (attachmentId) => apiClient.getTravelExpenseAttachmentContentUrl(attachmentId);
+  const detailExpense = useMemo(
+    () => expenses.find((expense) => expense.id === detailExpenseId) ?? null,
+    [detailExpenseId, expenses],
+  );
   const printPreview = expenseListPrintOpen
     ? <ExpenseListPrintPreview expenses={expenses} week={week} owner={owner} matches={invoiceMatches} noInvoiceConfirmations={noInvoiceConfirmations} regionProfile={regionProfile} getAttachmentUrl={getAttachmentUrl} getAttachmentContentResponse={apiClient.getTravelExpenseAttachmentContentResponse} onClose={closeExpenseListPrint} />
     : invoicePrintItems
@@ -650,7 +654,17 @@ export function TravelExpensePage({
         <nav ref={tabsRef} className="expense-tabs" aria-label="差旅报销功能" role="tablist">
           {TABS.map((tab, index) => <button key={tab.id} id={`expense-tab-${tab.id}`} className={activeTab === tab.id ? "active" : ""} data-testid={`expense-tab-${tab.id}`} data-trip-region-focus-fallback={tab.id === "ledger" || undefined} type="button" role="tab" aria-selected={activeTab === tab.id} aria-controls={`expense-panel-${tab.id}`} tabIndex={activeTab === tab.id ? 0 : -1} onClick={() => navigate(tab.id)} onKeyDown={(event) => handleTabKeyDown(event, index)}>{tab.label}</button>)}
         </nav>
-        <button className="primary-button" type="button" onClick={() => { setEditingExpense(null); setDraftPrefill(null); setEditorOpen(true); }}><Plus size={16} />手工记一笔</button>
+        <button className="primary-button" type="button" onClick={() => {
+          setEditingExpense(null);
+          setDraftPrefill({
+            occurredOn: defaultExpenseOccurredOn({
+              weekStart: week.start,
+              weekEnd: week.end,
+              selectedDate: selectedLedgerDate,
+            }),
+          });
+          setEditorOpen(true);
+        }}><Plus size={16} />手工记一笔</button>
       </header>
 
       <section className="expense-week-strip">
@@ -693,18 +707,15 @@ export function TravelExpensePage({
               onSelectDate={setSelectedLedgerDate}
               onOpenItem={(item, projection) => {
                 if (projection.kind === "expense") {
-                  setEditingExpense(item);
-                  setEditorOpen(true);
+                  setDetailExpenseId(item.id);
                   return;
                 }
                 document.getElementById("expense-ledger-advances")?.scrollIntoView({ behavior: "smooth", block: "start" });
               }}
               onDeleteItem={deleteExpense}
               onOpenProof={(expense, projection) => {
-                const details = document.getElementById("expense-ledger-proofs");
-                if (details) details.open = true;
                 const expenseId = projection?.sourceId ?? expense?.id;
-                setProofFocusExpenseId(expenseId ?? null);
+                if (expenseId) setDetailExpenseId(expenseId);
               }}
               onOpenRegionSettings={() => setRegionSettingsOpen(true)}
               getAttachmentContentResponse={apiClient.getTravelExpenseAttachmentContentResponse}
@@ -714,10 +725,10 @@ export function TravelExpensePage({
               exporting={expenseListExporting}
             />
             <div className="expense-ledger-child-functions">
-              <details id="expense-ledger-proofs" className="expense-ledger-child-card">
-                <summary><span><strong>付款凭证</strong><small>导入、人工关联和查看已附付款原件</small></span><b>{documentInbox.length} 待处理</b></summary>
-                <PaymentProofCenter expenses={expenses} inboxItems={documentInbox} getAttachmentUrl={getAttachmentUrl} getAttachmentContentResponse={apiClient.getTravelExpenseAttachmentContentResponse} getInboxContentUrl={apiClient.getTravelExpenseDocumentInboxContentUrl} getInboxContentResponse={apiClient.getTravelExpenseDocumentInboxContentResponse} onConfirmInbox={confirmInboxItem} onRejectInbox={rejectInboxItem} pendingInboxId={pendingInboxId} onUpload={uploadAttachment} onDelete={deleteAttachment} pendingAttachmentId={pendingAttachmentId} focusExpenseId={proofFocusExpenseId} onFocusExpenseHandled={handleProofFocusHandled} />
-              </details>
+              {documentInbox.length > 0 ? <details id="expense-ledger-proof-inbox" className="expense-ledger-child-card">
+                <summary><span><strong>微信待处理凭证</strong><small>核对识别结果后关联到对应付款</small></span><b>{documentInbox.length} 待处理</b></summary>
+                <PaymentProofCenter showProofs={false} expenses={expenses} inboxItems={documentInbox} getAttachmentUrl={getAttachmentUrl} getAttachmentContentResponse={apiClient.getTravelExpenseAttachmentContentResponse} getInboxContentUrl={apiClient.getTravelExpenseDocumentInboxContentUrl} getInboxContentResponse={apiClient.getTravelExpenseDocumentInboxContentResponse} onConfirmInbox={confirmInboxItem} onRejectInbox={rejectInboxItem} pendingInboxId={pendingInboxId} />
+              </details> : null}
               <details id="expense-ledger-advances" className="expense-ledger-child-card">
                 <summary><span><strong>借款到账</strong><small>只记录实际到账的“收入 / 出差借款”</small></span><b>{receivedAdvances.length} 笔</b></summary>
                 <AdvanceSettlement week={week} summary={summary} advances={receivedAdvances} onSave={saveAdvance} onDelete={deleteAdvance} pending={advancePending} />
@@ -728,7 +739,23 @@ export function TravelExpensePage({
         </div>
       ) : null}
 
-      <ExpenseEditorDrawer open={editorOpen} expense={editingExpense} week={week} itineraries={itineraries} customers={customers} prefill={draftPrefill} pending={saving} onClose={() => { setEditorOpen(false); setEditingExpense(null); setDraftPrefill(null); }} onSave={saveExpense} />
+      <ExpenseDetailCard
+        open={Boolean(detailExpense) && !editorOpen}
+        expense={detailExpense}
+        itineraries={itineraries}
+        customers={customers}
+        getAttachmentUrl={getAttachmentUrl}
+        getAttachmentContentResponse={apiClient.getTravelExpenseAttachmentContentResponse}
+        onUpload={uploadAttachment}
+        onDelete={deleteAttachment}
+        pendingAttachmentId={pendingAttachmentId}
+        onEdit={(expense) => {
+          setEditingExpense(expense);
+          setEditorOpen(true);
+        }}
+        onClose={() => setDetailExpenseId(null)}
+      />
+      <ExpenseEditorDrawer open={editorOpen} expense={editingExpense} week={week} itineraries={itineraries} customers={customers} regionProfile={regionProfile} prefill={draftPrefill} pending={saving} onClose={() => { setEditorOpen(false); setEditingExpense(null); setDraftPrefill(null); }} onSave={saveExpense} />
       <TripRegionSettingsCard open={selectedWeekLoaded && regionSettingsOpen} profile={regionProfile} pending={regionSaving} onClose={() => setRegionSettingsOpen(false)} onSave={saveRegionProfile} />
       </section>
     </>

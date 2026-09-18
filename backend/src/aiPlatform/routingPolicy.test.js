@@ -36,7 +36,7 @@ test("selected traffic has one platform path and excluded traffic has one explic
   };
   const config = {
     aiAnalysisMode: "model", aiPlatformMode: "required", aiPlatformRoutingPolicy: policy,
-    aiPlatformRuntime: runtime, modelName: "deepseek-v4-flash",
+    aiPlatformRuntime: runtime, modelName: "deepseek-flash",
   };
   Object.defineProperty(config, "modelApiKey", { value: "synthetic-legacy-credential" });
   const options = { fetchImpl: async () => {

@@ -8,7 +8,8 @@
 
 | 项目 | 状态 |
 | --- | --- |
-| 当前版本 | 当前工作树版本字段为 `0.13.0`（AI 统一调度平台融合升级候选）；截至 `2026-09-10` 的服务器证据，生产 `current` 仍为 `v0.12.3` / `3209a073486e22370307a6f46021ac9cf2ec71d1`，尚未切换 |
+| 当前版本 | 当前工作树版本字段为 `0.13.4`；生产 `current` 已绑定 immutable release `sentelligent-sales-workbench-44e6d36c5aa9`，源码提交为 `44e6d36c5aa9b30285ee63ce9b3a48a3e197edf9`，AI 平台按 P1 `disabled/local-simulated` 边界运行 |
+| 模型边界 | 本次开发、测试和 Mac Chrome 验收使用 Codex `gpt-5.6-luna / max`；业务系统 AI 助手使用 DeepSeek provider `deepseek`、model `deepseek-flash`，两者不混用 |
 | 生产身份 | 以服务器 `releases/` 当前 `current` 指向目录的 manifest（完整 commit）为准；`docs/releases/vX.Y.Z.md` 逐版保存部署证据表 |
 | 发布方式 | 常规发布必须来自已合并的 `origin/main`、唯一正式 tag 和 GitHub Release 生成的 Linux/x64 不可变制品；历史本地 exact-commit 授权例外只适用于 `v0.6.15` 至 `v0.6.24` |
 | 制品与备份 | v0.8.0 起服务器每日 02:30 自动备份数据库与微信会话（14 天保留），发布 bundle+evidence 自动归档到 `backups/releases/<version>/`（root:root 0700） |
@@ -33,7 +34,7 @@
 | 知识库 | 搜索、条目维护；快速记录与销售决策自动引用并标注出处 | 引用为确定性匹配，模型不得虚构知识 id |
 | 系统配置 | 加密保存 DeepSeek API Key、微信 Clawbot 状态、通知设置、招标调度、记账日志 | 主加密密钥只进后端受保护环境，页面不回显明文；微信是唯一外部通知通道 |
 | 微信机器人 | 绑定、worker 自启动、持久化会话、图片/PDF 接入、durable outbox 投递 | 微信 Clawbot 是唯一外部通知通道；上下文过期时消息留在 outbox，恢复后限速释放 |
-| AI 统一调度平台 | 独立 SQLite、任务/租约/重试/预算/用量、Agent 与规范版本、主动调度基础、管理 API/静态管理台、业务侧受限客户端 | 当前只完成 `local-simulated` 独立底座；业务 AI 入口、共享登录代理、真实供应商和生产服务均未切换 |
+| AI 统一调度平台 | 独立 SQLite、任务/租约/重试/预算/用量、Agent 与规范版本、主动调度基础、管理 API/静态管理台、业务侧受限客户端 | 已随 P1 release 接入生产服务；当前保持 `disabled/local-simulated`、admission closed 和 mock-only，Backend 仍是主动调度唯一所有者，真实供应商路由需另行启用 |
 | 方案辅助 | 只读兼容入口 | 按产品决策暂停写入与 AI 调用 |
 
 ## 技术结构
@@ -56,9 +57,9 @@ DeepSeek / AMap / WeChat Agent / browser voice
 | --- | --- |
 | `outputs/product-design-prototype/` | 正式 React 前端；`src/features/` 按域组织（salesWorkbench 页面已拆分至 `pages/` 子目录，`pages.jsx` 为桶文件） |
 | `backend/` | API、认证、迁移、AI、地图、微信、招标、差旅、待办、晨报等子域与服务脚本 |
-| `ai-platform/` | 独立 AI 任务、预算、调度、管理 API 与自有 SQLite 迁移；当前未接管业务调用 |
+| `ai-platform/` | 独立 AI 任务、预算、调度、管理 API 与自有 SQLite 迁移；生产服务已部署，但 P1 legacy 路由下业务 AI 仍由 Backend 的 DeepSeek 适配器执行 |
 | `shared/` | 前后端共享业务契约 |
-| `outputs/ai-platform-admin/` | AI 平台独立静态管理台；当前不挂入正式业务登录与导航 |
+| `outputs/ai-platform-admin/` | AI 平台独立静态管理台；正式生产入口为登录保护的 `/api/ai-platform/console/`，裸 `/ai-platform-admin/` 不作为业务管理台入口 |
 | `scripts/` | 本地编排、密钥扫描、发布打包、生产预检/切换/冒烟与发布测试 |
 | `docs/` | 需求、架构、开发、验收、部署与版本记录；`docs/superpowers/` 存放蓝图/研究/报告 |
 

@@ -9,6 +9,8 @@ import { createWeixinOutboxHttpClient, runWeixinOutboxPump } from "./outboxWorke
 
 // v0.9.3 多绑定就绪哨兵：目标可达性判定移到逐条投递期，不再有全局唯一 scope。
 const WEIXIN_MULTI_DELIVERY_SCOPE = "weixin:multi:v1";
+const WEIXIN_CONTEXT_EXPIRED = "WEIXIN_CONTEXT_EXPIRED";
+const WEIXIN_CONTEXT_NOT_READY = "WEIXIN_CONTEXT_NOT_READY";
 
 function backendUrlFromConfig(config) {
   return config.weixinAgentBackendUrl || `http://${config.host}:${config.port}`;
@@ -77,6 +79,26 @@ export function authorizeWeixinBoundDelivery(item) {
   }
 }
 
+function deliveryContextError(code, message) {
+  const error = new Error(message);
+  error.code = code;
+  return error;
+}
+
+function canonicalDeliveryExpiry(value) {
+  if (typeof value !== "string" || !value.trim()) return null;
+  const normalized = value.trim();
+  const parsed = Date.parse(normalized);
+  if (!Number.isFinite(parsed) || new Date(parsed).toISOString() !== normalized) return null;
+  return normalized;
+}
+
+function deliveryContextExpired(state) {
+  if (state?.reason === "context_token_expired") return true;
+  const expiresAt = canonicalDeliveryExpiry(state?.expiresAt);
+  return Boolean(expiresAt && Date.parse(expiresAt) <= Date.now());
+}
+
 async function loadSdk() {
   return import("weixin-agent-sdk");
 }
@@ -131,9 +153,7 @@ export async function runWeixinWorker(argv = process.argv.slice(2), options = {}
     async sendMessage(message, outboxId, { targetSenderId } = {}) {
       const target = typeof targetSenderId === "string" ? targetSenderId.trim() : "";
       if (!sdkSupportsBoundDelivery || !target) {
-        const error = new Error("WeChat proactive delivery target is not bound");
-        error.code = "WEIXIN_DELIVERY_SCOPE_MISMATCH";
-        throw error;
+        throw deliveryContextError("WEIXIN_DELIVERY_SCOPE_MISMATCH", "WeChat proactive delivery target is not bound");
       }
       let reachable = false;
       try {
@@ -143,13 +163,36 @@ export async function runWeixinWorker(argv = process.argv.slice(2), options = {}
       }
       if (!reachable) {
         // 联系人同步中/对方暂不可达不应终态：可重试，8 次耗尽自然 failed。
-        const error = new Error("WeChat delivery target is not reachable yet");
-        error.code = "WEIXIN_CONTEXT_NOT_READY";
+        throw deliveryContextError(WEIXIN_CONTEXT_NOT_READY, "WeChat delivery target is not reachable yet");
+      }
+      let deliveryState = null;
+      try {
+        deliveryState = bot.getDeliveryStatus();
+      } catch {
+        deliveryState = null;
+      }
+      if (deliveryContextExpired(deliveryState)) {
+        throw deliveryContextError(WEIXIN_CONTEXT_EXPIRED, "WeChat proactive delivery context has expired");
+      }
+      if (deliveryState && (deliveryState.ready !== true || deliveryState.status !== "ready")) {
+        throw deliveryContextError(WEIXIN_CONTEXT_NOT_READY, "WeChat proactive delivery context is not ready");
+      }
+      try {
+        return await bot.sendMessageTo(target, message, {
+          clientId: deriveWeixinProviderClientId(deliveryKey, outboxId),
+        });
+      } catch (error) {
+        let latestDeliveryState = null;
+        try {
+          latestDeliveryState = bot.getDeliveryStatus();
+        } catch {
+          latestDeliveryState = null;
+        }
+        if (error?.code === WEIXIN_CONTEXT_EXPIRED || deliveryContextExpired(latestDeliveryState)) {
+          throw deliveryContextError(WEIXIN_CONTEXT_EXPIRED, "WeChat proactive delivery context has expired");
+        }
         throw error;
       }
-      return bot.sendMessageTo(target, message, {
-        clientId: deriveWeixinProviderClientId(deliveryKey, outboxId),
-      });
     },
     getDeliveryStatus() {
       if (!config.weixinBookkeepingConfirmationEnabled) {
@@ -158,7 +201,18 @@ export async function runWeixinWorker(argv = process.argv.slice(2), options = {}
       if (!sdkSupportsBoundDelivery) {
         return { ready: false, status: "not_ready", reason: "sdk_status_unavailable" };
       }
-      return { ...bot.getDeliveryStatus(), deliveryScope: WEIXIN_MULTI_DELIVERY_SCOPE };
+      const state = bot.getDeliveryStatus();
+      const reason = typeof state?.reason === "string" && /^[a-z0-9_]{1,64}$/u.test(state.reason.trim().toLowerCase())
+        ? state.reason.trim().toLowerCase()
+        : null;
+      const expiresAt = canonicalDeliveryExpiry(state?.expiresAt);
+      return {
+        ready: state?.ready === true,
+        status: state?.status === "ready" ? "ready" : "not_ready",
+        ...(reason && state?.status !== "ready" ? { reason } : {}),
+        ...(expiresAt ? { expiresAt } : {}),
+        deliveryScope: WEIXIN_MULTI_DELIVERY_SCOPE,
+      };
     },
   };
   process.stdout.write(`WeChat worker started. Backend: ${backendUrlFromConfig(config)}\n`);

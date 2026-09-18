@@ -262,41 +262,21 @@ export function InvoiceManager({
     && resource.noInvoice.status === "ready"
     && resource.candidates.status === "ready";
   const confirmedCentsByExpense = new Map();
-  const confirmedCentsByPayment = new Map();
   for (const match of matches) {
     if (match.state !== "confirmed" || !Number.isSafeInteger(match.allocatedCents) || match.allocatedCents < 0) continue;
     const expenseTotal = (confirmedCentsByExpense.get(match.expenseId) ?? 0) + match.allocatedCents;
     confirmedCentsByExpense.set(match.expenseId, Number.isSafeInteger(expenseTotal) ? expenseTotal : Number.POSITIVE_INFINITY);
-    if (match.paymentId) {
-      const paymentTotal = (confirmedCentsByPayment.get(match.paymentId) ?? 0) + match.allocatedCents;
-      confirmedCentsByPayment.set(match.paymentId, Number.isSafeInteger(paymentTotal) ? paymentTotal : Number.POSITIVE_INFINITY);
-    }
   }
-  const hasActiveCandidateConfirmation = confirmations.some((confirmation) => (
-    !confirmation.revokedAt
-      && Number.isSafeInteger(confirmation.amountSnapshotCents)
-      && confirmation.amountSnapshotCents > 0
-  ));
-  const hasCandidateTarget = confirmations.some((confirmation) => (
-    !confirmation.revokedAt
-      && Number.isSafeInteger(confirmation.amountSnapshotCents)
-      && confirmation.amountSnapshotCents > 0
-      && expenses.some((expense) => {
-        if (expense.id !== confirmation.expenseId || !Array.isArray(expense.payments)) return false;
-        const reimbursementCents = expense.payments.reduce((total, payment) => {
-          if (!Number.isSafeInteger(payment?.reimbursementCents) || payment.reimbursementCents < 0) return Number.POSITIVE_INFINITY;
-          const next = total + payment.reimbursementCents;
-          return Number.isSafeInteger(next) ? next : Number.POSITIVE_INFINITY;
-        }, 0);
-        if (!Number.isFinite(reimbursementCents)
-          || reimbursementCents <= (confirmedCentsByExpense.get(expense.id) ?? 0)) return false;
-        if (!confirmation.paymentId) return true;
-        const payment = expense.payments.find((item) => item.id === confirmation.paymentId);
-        return Boolean(payment
-          && Number.isSafeInteger(payment.reimbursementCents)
-          && payment.reimbursementCents > (confirmedCentsByPayment.get(payment.id) ?? 0));
-      })
-  ));
+  const hasCandidateTarget = expenses.some((expense) => {
+    if (expense.invoiceType !== "substitute" || !Array.isArray(expense.payments)) return false;
+    const reimbursementCents = expense.payments.reduce((total, payment) => {
+      if (!Number.isSafeInteger(payment?.reimbursementCents) || payment.reimbursementCents < 0) return Number.POSITIVE_INFINITY;
+      const next = total + payment.reimbursementCents;
+      return Number.isSafeInteger(next) ? next : Number.POSITIVE_INFINITY;
+    }, 0);
+    return Number.isFinite(reimbursementCents)
+      && reimbursementCents > (confirmedCentsByExpense.get(expense.id) ?? 0);
+  });
   const confirmedCentsByInvoice = matches.reduce((totals, match) => {
     if (match.state !== "confirmed" || !Number.isSafeInteger(match.allocatedCents)) return totals;
     totals.set(match.invoiceId, (totals.get(match.invoiceId) ?? 0) + match.allocatedCents);
@@ -321,9 +301,7 @@ export function InvoiceManager({
       : expenses.length === 0
         ? "当前自然周暂无费用，无法生成候选发票"
         : !hasCandidateTarget
-          ? hasActiveCandidateConfirmation
-            ? "本周无票记录对应的付款已变更或已被发票覆盖，请刷新后重新确认"
-            : "请先为本周付款确认无票"
+          ? "请先在费用编辑中手动选择票据状态为替票，并确保仍有未覆盖金额"
           : hasSuggestedCandidate
             ? "本周已有待处理候选，请先确认或拒绝"
         : !hasAvailableInvoice
@@ -632,7 +610,7 @@ export function InvoiceManager({
           {resource.noInvoice.status === "ready" ? <>
             <div className="invoice-coverage-strip">
               <span><small>本周应报销</small><strong>{formatCny(coverage?.reimbursementCents ?? 0)}</strong></span>
-              <span><small>电子发票</small><strong>{formatCny(coverage?.electronicInvoiceCoverageCents ?? coverage?.confirmedCoverageCents ?? 0)}</strong></span>
+              <span><small>普通发票</small><strong>{formatCny(coverage?.electronicInvoiceCoverageCents ?? coverage?.confirmedCoverageCents ?? 0)}</strong></span>
               <span><small>替票覆盖</small><strong>{formatCny(coverage?.substituteInvoiceCoverageCents ?? 0)}</strong></span>
               <span><small>确认无票</small><strong>{formatCny(coverage?.noInvoiceConfirmedCents ?? 0)}</strong></span>
               <span className="warning"><small>仍缺发票</small><strong>{formatCny(coverage?.missingInvoiceCents ?? 0)}</strong></span>

@@ -127,6 +127,8 @@ describe("ops alerts machine endpoint", () => {
       alertBody({ summary: "x".repeat(301) }),
       alertBody({ detail: "x".repeat(2001) }),
       alertBody({ occurredAt: "not-a-date" }),
+      alertBody({ eventId: "event id with spaces" }),
+      alertBody({ eventId: "x".repeat(201) }),
       alertBody({ unexpected: "field" }),
       { severity: "critical", summary: "缺 source" },
     ];
@@ -216,6 +218,33 @@ describe("ops alerts machine endpoint", () => {
     assert.notEqual(nextHour.body.item.id, first.body.item.id);
     const db = createConnection({ databaseUrl: join(tempDir, "ops-alerts.sqlite") });
     assert.equal(db.prepare("SELECT COUNT(*) AS count FROM weixin_confirmation_outbox").get().count, 2);
+    db.close();
+  });
+
+  it("uses a stable event id to make a deferred retry idempotent across an hour roll", async () => {
+    await startServer();
+    const eventId = "systemd:sentelligent-backend.service:fixture-event";
+    const occurredAt = "2026-08-29T01:20:00.000Z";
+    const first = await request("/api/integrations/ops-alerts", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${opsToken}` },
+      body: JSON.stringify(alertBody({ eventId, occurredAt })),
+    });
+    assert.equal(first.response.status, 200);
+    assert.equal(first.body.item.replayed, false);
+
+    clockNow = "2026-08-29T03:01:00.000Z";
+    const replay = await request("/api/integrations/ops-alerts", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${opsToken}` },
+      body: JSON.stringify(alertBody({ eventId, occurredAt })),
+    });
+    assert.equal(replay.response.status, 200);
+    assert.equal(replay.body.item.replayed, true);
+    assert.equal(replay.body.item.id, first.body.item.id);
+
+    const db = createConnection({ databaseUrl: join(tempDir, "ops-alerts.sqlite") });
+    assert.equal(db.prepare("SELECT COUNT(*) AS count FROM weixin_confirmation_outbox").get().count, 1);
     db.close();
   });
 

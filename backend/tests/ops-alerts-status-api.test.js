@@ -42,6 +42,7 @@ beforeEach(async () => {
     weixinBookkeepingSenderId: sender,
     weixinAllowedSenderIds: sender,
     assistantConfirmationSecret: Buffer.alloc(32, 0x34),
+    weixinDeliveryReadinessClock: () => Date.parse("2026-08-28T16:00:00.000Z"),
   });
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
   baseUrl = `http://127.0.0.1:${server.address().port}`;

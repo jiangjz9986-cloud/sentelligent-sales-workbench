@@ -471,6 +471,7 @@ function sampleTravelExpense(overrides = {}) {
     itineraryId: "itinerary-1",
     customerId: "customer-1",
     invoiceStatus: "covered",
+    invoiceType: null,
     notes: null,
     tripRegion: null,
     tripRegionSource: null,

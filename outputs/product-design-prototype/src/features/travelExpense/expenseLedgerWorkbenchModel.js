@@ -298,8 +298,8 @@ function expenseItem(expense, ledgerRow, fallbackRegion) {
     paymentProofs: ledgerRow.visible.paymentProofs,
     paymentProofCount: ledgerRow.visible.paymentProofs.length,
     invoiceState: invoicePending ? "pending" : "ready",
-    invoiceLabel: ledgerRow.visible.invoiceStates.map((state) => state.label).join("、"),
-    action: invoicePending ? "补票" : "查看",
+    invoiceLabel: ledgerRow.visible.invoiceLabel ?? "待补",
+    action: "查看",
     needsReview: ledgerRow.needsReview,
     original: expense,
   };

@@ -1,3 +1,5 @@
+import { deflateSync } from "node:zlib";
+
 export const VALID_PNG = Buffer.from(
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAACXBIWXMAAAPoAAAD6AG1e1JrAAAADUlEQVR4nGPgUbL4DwACCgFmeGgpMwAAAABJRU5ErkJggg==",
   "base64",
@@ -44,6 +46,46 @@ export function minimalPdf(label = "") {
   return Buffer.concat(chunks);
 }
 
+function pdfXrefEntry(type, offset, generation) {
+  const entry = Buffer.alloc(7);
+  entry[0] = type;
+  entry.writeUInt32BE(offset, 1);
+  entry.writeUInt16BE(generation, 5);
+  return entry;
+}
+
+export function predictorPdf(label = "") {
+  const labelHex = Buffer.from(String(label), "utf8").toString("hex");
+  const header = Buffer.from(`%PDF-1.5\n% predictor-${labelHex}\n`, "ascii");
+  const catalog = Buffer.from("1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n", "ascii");
+  const pages = Buffer.from("2 0 obj\n<< /Type /Pages /Kids [] /Count 0 >>\nendobj\n", "ascii");
+  const xrefOffset = header.length + catalog.length + pages.length;
+  const rows = Buffer.concat([
+    pdfXrefEntry(0, 0, 65535),
+    pdfXrefEntry(1, header.length, 0),
+    pdfXrefEntry(1, header.length + catalog.length, 0),
+    pdfXrefEntry(1, xrefOffset, 0),
+  ]);
+  const predicted = Buffer.alloc(rows.length + (rows.length / 7));
+  let previous = Buffer.alloc(7);
+  for (let row = 0; row < rows.length / 7; row += 1) {
+    const sourceOffset = row * 7;
+    const targetOffset = row * 8;
+    predicted[targetOffset] = 2;
+    for (let column = 0; column < 7; column += 1) {
+      predicted[targetOffset + 1 + column] = (rows[sourceOffset + column] - previous[column] + 256) & 0xff;
+    }
+    previous = rows.subarray(sourceOffset, sourceOffset + 7);
+  }
+  const compressed = deflateSync(predicted);
+  const xref = Buffer.concat([
+    Buffer.from(`3 0 obj\n<< /Type /XRef /W [1 4 2] /Index [0 4] /Size 4 /Filter /FlateDecode /DecodeParms << /Columns 7 /Predictor 12 >> /Length ${compressed.length} /Root 1 0 R >>\nstream\n`, "ascii"),
+    compressed,
+    Buffer.from(`\nendstream\nendobj\nstartxref\n${xrefOffset}\n%%EOF\n`, "ascii"),
+  ]);
+  return Buffer.concat([header, catalog, pages, xref]);
+}
+
 export function multiPagePdf(pageCount, label = "") {
   if (!Number.isSafeInteger(pageCount) || pageCount < 1) {
     throw new TypeError("pageCount must be a positive integer");
@@ -86,6 +128,7 @@ export function multiPagePdf(pageCount, label = "") {
 }
 
 export const VALID_PDF = minimalPdf();
+export const PDF_XREF_STREAM_PREDICTOR = predictorPdf();
 export const PDF_PREFIX_SHELL = Buffer.from("%PDF-1.7\nnot a PDF document", "ascii");
 export const TRUNCATED_PDF = VALID_PDF.subarray(0, VALID_PDF.length - 6);
 

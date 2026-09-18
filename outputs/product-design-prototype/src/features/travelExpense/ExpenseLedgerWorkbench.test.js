@@ -103,20 +103,37 @@ describe("expense ledger workbench shell", () => {
   it("renders authenticated first-proof previews in desktop rows and mobile cards", async () => {
     const component = await source("ExpenseLedgerWorkbench.jsx");
     const css = await source("expenseLedgerWorkbench.css");
+    const proofCenterCss = await source("travelExpense.css");
 
     assert.match(component, /AuthenticatedImageFrame/);
     assert.match(component, /paymentProofs\?\.\[0\]/);
-    assert.match(component, /共 \{item\.paymentProofCount\} 份/);
+    assert.doesNotMatch(component, /共 \{item\.paymentProofCount\} 份/);
     assert.match(component, /ledger-proof-pdf-mark/);
     assert.match(component, /未上传/);
-    assert.match(css, /\.ledger-proof-preview-image > img\s*\{[^}]*object-fit: contain/s);
-    // v0.8.2: at least double the former 48×54 thumbnail so receipt content is
-    // readable directly in the row, and the proof column is one of the widest.
-    assert.match(css, /\.ledger-proof-preview-image\.authenticated-image-frame\s*\{[^}]*width: 104px[^}]*height: 117px[^}]*flex: 0 0 104px/s);
-    assert.match(css, /\.ledger-workbench-desktop-table th:nth-child\(5\)\s*\{\s*width:\s*26%;\s*\}/);
+    assert.match(component, /role: "button"/);
+    assert.match(component, /event\.key !== "Enter" && event\.key !== " "/);
+    assert.match(css, /\.ledger-proof-preview-image > img\s*\{[^}]*object-fit: fill/s);
+    assert.match(css, /\.ledger-proof-preview\s*\{[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\)/s);
+    assert.match(css, /\.ledger-proof-preview-image\.authenticated-image-frame\s*\{[^}]*width:\s*min\(100%,\s*360px\)[^}]*height:\s*64px[^}]*aspect-ratio:\s*45\s*\/\s*8/s);
+    assert.match(css, /\.ledger-proof-preview-image > img\s*\{[^}]*width:\s*100%[^}]*height:\s*100%[^}]*object-fit:\s*fill/s);
+    assert.match(css, /\.ledger-proof-preview:focus-visible\s*\{[^}]*outline:/s);
+    assert.doesNotMatch(css, /\.ledger-proof-preview-meta/);
+    assert.match(proofCenterCss, /\.expense-proof-file\s*\{[^}]*grid-template-columns:\s*minmax\(0,\s*360px\)\s+minmax\(0,\s*1fr\)/s);
+    assert.match(proofCenterCss, /\.expense-proof-file-preview\s*\{[^}]*width:\s*100%[^}]*height:\s*64px[^}]*aspect-ratio:\s*45\s*\/\s*8/s);
+    assert.match(proofCenterCss, /@media \(max-width: 430px\)[\s\S]*?\.expense-proof-file\s*\{\s*grid-template-columns:\s*minmax\(0,\s*1fr\);/s);
+    assert.match(css, /\.ledger-workbench-desktop-table th:nth-child\(5\)\s*\{\s*width:\s*35%;\s*\}/);
     assert.doesNotMatch(css, /\.ledger-workbench-desktop-table th:nth-child\(8\)/);
-    assert.match(component, /共 \{item\.paymentProofCount\} 份/);
-    assert.match(component, /aria-label=\{`查看\$\{item\.paymentProofCount\}份付款凭证`\}/);
+    assert.match(component, /"aria-label": proofLabel/);
+  });
+
+  it("keeps the complete row readable when proof and actions share a desktop row", async () => {
+    const css = await source("expenseLedgerWorkbench.css");
+
+    assert.match(css, /\.ledger-workbench-desktop-table\s*\{[\s\S]*?overflow-x:\s*auto;/s);
+    assert.match(css, /\.ledger-workbench-category\s+strong\s*\{[\s\S]*?white-space:\s*normal;/s);
+    assert.match(css, /\.ledger-workbench-desktop-table th:nth-child\(7\)\s*\{\s*width:\s*12%;\s*\}/);
+    assert.match(css, /\.ledger-workbench-row-actions\s*\{[\s\S]*?grid-template-columns:\s*repeat\(2,\s*minmax\(0,\s*1fr\)\);/s);
+    assert.match(css, /@media \(max-width: 1180px\)[\s\S]*?\.ledger-workbench-row-actions\s*\{[\s\S]*?grid-template-columns:\s*minmax\(0,\s*1fr\);/s);
   });
 
   it("loads only its isolated stylesheet and leaves the existing page stylesheet untouched", async () => {

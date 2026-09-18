@@ -9,16 +9,23 @@ import { loadConfig } from "../../backend/src/config.js";
 import { createProviderCredentials } from "../../ai-platform/src/providers/credentials.js";
 import { normalizeDeploymentPolicy, registeredProviderPolicy } from "../../ai-platform/src/operations/deploymentPolicy.js";
 import { sha256 } from "../../shared/aiPlatformContract.mjs";
-import { socketFetch, PRODUCTION_AI_SOCKET } from "../../shared/aiPlatformSocketTransport.mjs";
 import {
-  PRODUCTION_ROOT, PROJECT_NODE, PLATFORM_SERVICE, PLATFORM_DATABASE, PLATFORM_USER,
+  socketFetch,
+  PRODUCTION_AI_SOCKET,
+  assertAiPlatformSocket,
+} from "../../shared/aiPlatformSocketTransport.mjs";
+import {
+  PRODUCTION_ROOT, PROJECT_NODE, PLATFORM_SERVICE, PLATFORM_DATABASE, PLATFORM_USER, PLATFORM_SOCKET_GROUP,
   PLATFORM_ENV, BUSINESS_ENV, BUSINESS_DATABASE, PROTECTED_UNITS, WEIXIN_SESSION,
-  hashBytes, renderPlatformUnit, normalizeRolloutPhase, rolloutPhaseForManifest, transitionIdentityDigest,
-  routingPhaseForRollout, compareRolloutPhase,
+  hashBytes, renderPlatformUnit, releasePath, normalizeRolloutPhase, rolloutPhaseForManifest, transitionIdentityDigest,
+  routingPhaseForRollout, compareRolloutPhase, p2AcceptanceRequiredForRollout, platformStaticDirectoryForRelease,
+  rolloutControlsForPhase,
+  providerPolicyDigest, validateP2AcceptanceReport,
   AI_PREFLIGHT_CHECKS,
 } from "./production-contract.mjs";
 import { assertHost, privateFile, privateDirectory, writeExclusive, writeOnceOrVerify, replacePrivateJson, atomicReplace, inspectUnit, parseEnvironment, platformRequest, backupSqlite, runCommand } from "./production-io.mjs";
 import { validateAiComponentManifest } from "./component-manifest.mjs";
+import { validateReleaseArchiveBinding } from "../release-package.mjs";
 
 function check(condition, code) {
   if (!condition) throw Object.assign(new Error(code), { code });
@@ -27,6 +34,70 @@ function jsonFile(path, digest) { return JSON.parse(privateFile(path, digest).co
 function optionalJsonFile(path) {
   if (!existsSync(path)) return null;
   return JSON.parse(privateFile(path).content.toString("utf8"));
+}
+function unitEnabled(unit) {
+  try { return runCommand("/bin/systemctl", ["is-enabled", unit]).trim() === "enabled"; }
+  catch { return false; }
+}
+function passwdRecord(user) {
+  let line = "";
+  try { line = runCommand("/usr/bin/getent", ["passwd", user]).trim(); } catch {}
+  if (!line) return null;
+  const fields = line.split(":");
+  const uid = Number(fields[2]);
+  const gid = Number(fields[3]);
+  return fields[0] === user && Number.isSafeInteger(uid) && uid > 0
+    && Number.isSafeInteger(gid) && gid > 0 ? { name: user, uid, gid } : null;
+}
+function groupRecord(group) {
+  let line = "";
+  try { line = runCommand("/usr/bin/getent", ["group", group]).trim(); } catch {}
+  if (!line) return null;
+  const fields = line.split(":");
+  const gid = Number(fields[2]);
+  const members = new Set((fields[3] ?? "").split(",").map((value) => value.trim()).filter(Boolean));
+  return fields[0] === group && Number.isSafeInteger(gid) && gid > 0
+    ? { name: group, gid, members } : null;
+}
+function userHasGroup(user, group) {
+  try {
+    return runCommand("/usr/bin/id", ["-nG", user]).trim().split(/\s+/u).includes(group);
+  } catch {
+    return false;
+  }
+}
+export function platformUnitMatchesRelease(content, release) {
+  try {
+    const template = readFileSync(join(release, "scripts/ai-platform/systemd/sentelligent-ai-platform.service.template"), "utf8");
+    if (content === renderPlatformUnit(template, release)) return true;
+    // Existing v0.12.x installs used the platform UID's private primary
+    // group.  Accept that exact legacy rendering only while adopting the old
+    // unit; all new units are rendered with PLATFORM_SOCKET_GROUP.
+    return content === renderPlatformUnit(template, release, { serviceGroup: PLATFORM_USER });
+  } catch {
+    return false;
+  }
+}
+export function platformUnitReleasePath(content) {
+  const line = String(content).split(/\r?\n/u).find((value) => value.startsWith("WorkingDirectory="));
+  const release = line?.slice("WorkingDirectory=".length) ?? "";
+  try {
+    releasePath(release);
+    return release;
+  } catch {
+    return null;
+  }
+}
+export function platformUnitIsAdoptable(content) {
+  const release = platformUnitReleasePath(content);
+  if (!release) return null;
+  try {
+    const metadata = lstatSync(release);
+    if (!metadata.isDirectory() || metadata.isSymbolicLink() || realpathSync(release) !== release) return null;
+    return platformUnitMatchesRelease(content, release) ? release : null;
+  } catch {
+    return null;
+  }
 }
 function fileDigest(path, options = {}) {
   return existsSync(path) ? privateFile(path, null, options).sha256 : null;
@@ -67,6 +138,210 @@ function assertCoreProof(proof, manifest, release, commit) {
     && Date.now() - Date.parse(proof.generatedAt) < 15 * 60_000, "CORE_PREFLIGHT_INVALID");
 }
 
+export function postflightHealthMatchesRollout(health, rolloutPhase) {
+  const platform = health?.aiPlatform;
+  if (rolloutPhase === "P1") {
+    return platform?.mode === "disabled"
+      && platform.ready === true
+      && platform.executionMode === "local-simulated";
+  }
+  return platform?.ready === true;
+}
+
+export function postflightHealthResponseMatchesRollout(status, health, rolloutPhase) {
+  return status === 200
+    && health?.database === "ready"
+    && postflightHealthMatchesRollout(health, rolloutPhase);
+}
+
+function isRecord(value) {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+export function observationReportIdentity(manifest, currentRelease = manifest?.newRelease) {
+  const rolloutPhase = rolloutPhaseForManifest(manifest);
+  const controls = rolloutControlsForPhase(rolloutPhase);
+  return {
+    transitionId: manifest.id,
+    manifestDigest: hashBytes(JSON.stringify(manifest)),
+    transitionIdentityDigest: transitionIdentityDigest(manifest),
+    newRelease: manifest.newRelease,
+    newCommit: manifest.newCommit,
+    phase: manifest.phase,
+    rolloutPhase,
+    currentRelease,
+    expectedPaused: controls.queuePaused,
+    expectedAdmissionOpen: controls.taskAdmissionEnabled,
+    expectedExecutionMode: controls.executionMode,
+    expectedExternalProvidersEnabled: controls.externalProvidersEnabled,
+  };
+}
+
+export function validateObservationBinding(manifest, state, currentRelease) {
+  const identity = observationReportIdentity(manifest, currentRelease);
+  check(isRecord(state), "OBSERVE_STATE_REQUIRED");
+  check(state.transitionId === identity.transitionId
+    && state.manifestDigest === identity.manifestDigest
+    && state.transitionIdentityDigest === identity.transitionIdentityDigest,
+  "OBSERVE_STATE_MISMATCH");
+  check(state.rolloutPhase === identity.rolloutPhase, "OBSERVE_STATE_ROLLOUT_MISMATCH");
+  check(state.newRelease === identity.newRelease && state.newCommit === identity.newCommit,
+    "OBSERVE_STATE_RELEASE_MISMATCH");
+  check(state.currentRelease === identity.newRelease, "OBSERVE_STATE_CURRENT_RELEASE_MISMATCH");
+  check(currentRelease === identity.newRelease, "OBSERVE_CURRENT_RELEASE_MISMATCH");
+  return identity;
+}
+
+export function validateObservationRuntime(identity, { operations, aiHealth, backend, currentRelease } = {}) {
+  check(currentRelease === identity.newRelease, "CURRENT_RELEASE_CHANGED");
+  check(isRecord(operations) && isRecord(operations.executor) && isRecord(operations.queue)
+    && Number.isSafeInteger(operations.queue.running) && operations.queue.running >= 0
+    && Number.isSafeInteger(operations.queue.queued) && operations.queue.queued >= 0,
+  "OBSERVE_OPERATIONS_INVALID");
+  check(operations.paused === identity.expectedPaused
+    && operations.executor.admissionOpen === identity.expectedAdmissionOpen,
+  identity.expectedPaused ? "P1_ADMISSION_MUST_BE_CLOSED" : "LIVE_ADMISSION_MUST_BE_OPEN");
+  const platform = aiHealth?.body;
+  check(aiHealth?.status === 200 && isRecord(platform) && platform.database === "ready",
+    "OBSERVE_PLATFORM_UNHEALTHY");
+  check(platform.executionMode === identity.expectedExecutionMode
+    && platform.externalProvidersEnabled === identity.expectedExternalProvidersEnabled,
+  "OBSERVE_EXECUTION_MODE_MISMATCH");
+  check(platform.executor?.admissionOpen === identity.expectedAdmissionOpen,
+    "OBSERVE_HEALTH_ADMISSION_MISMATCH");
+  check(backend?.status === 200 && backend.body?.database === "ready"
+    && backend.body?.aiPlatform?.routing?.phase === routingPhaseForRollout(identity.rolloutPhase),
+  "OBSERVE_BACKEND_ROLLOUT_MISMATCH");
+  return true;
+}
+
+export function phaseRecoveryPlan({ policyApplied = false, backendRestored = false, beforeOperations } = {}) {
+  const beforeOpen = isRecord(beforeOperations)
+    && beforeOperations.paused === false
+    && beforeOperations.executor?.admissionOpen === true;
+  if (policyApplied || !backendRestored || !isRecord(beforeOperations)) {
+    return {
+      mode: "fail-closed", policy: policyApplied ? "unrestored" : "unchanged",
+      paused: true, admissionOpen: false,
+    };
+  }
+  return {
+    mode: "restore", policy: "unchanged", paused: !beforeOpen, admissionOpen: beforeOpen,
+  };
+}
+
+export function releaseIdentityValidationOptions(identity, currentReleasePath) {
+  return identity === "old"
+    ? { allowLegacyCurrent: true, currentReleasePath }
+    : {};
+}
+
+export function migrationInventoryDigest(releaseManifest) {
+  const files = releaseManifest?.migrationChecksums?.files;
+  if (!files || typeof files !== "object" || Array.isArray(files)) return null;
+  const entries = Object.entries(files).sort(([left], [right]) =>
+    Buffer.compare(Buffer.from(left), Buffer.from(right)),
+  );
+  return hashBytes(JSON.stringify(entries));
+}
+
+function migrationVersion(path) {
+  const match = String(path).match(/(?:^|\/)(\d+)(?:[_\-.]|$)/u);
+  return match ? Number(match[1]) : null;
+}
+
+export function migrationInventoriesMatch(oldReleaseManifest, newReleaseManifest) {
+  const oldFiles = oldReleaseManifest?.migrationChecksums?.files;
+  const newFiles = newReleaseManifest?.migrationChecksums?.files;
+  if (!oldFiles || typeof oldFiles !== "object" || Array.isArray(oldFiles)
+    || !newFiles || typeof newFiles !== "object" || Array.isArray(newFiles)) return false;
+
+  // Rollback keeps the schema forward-only: every migration already known to
+  // the old release must retain its exact checksum, while new migrations may
+  // only be appended with a strictly higher numeric version.
+  for (const [path, checksum] of Object.entries(oldFiles)) {
+    if (newFiles[path] !== checksum) return false;
+  }
+  const oldVersions = Object.keys(oldFiles)
+    .map(migrationVersion)
+    .filter((value) => Number.isSafeInteger(value));
+  if (!oldVersions.length) return false;
+  const highestOldVersion = Math.max(...oldVersions);
+  return Object.keys(newFiles)
+    .filter((path) => !Object.hasOwn(oldFiles, path))
+    .every((path) => {
+      const version = migrationVersion(path);
+      return Number.isSafeInteger(version) && version > highestOldVersion;
+    });
+}
+
+export async function pollPostflightHealth(
+  rolloutPhase,
+  { fetcher = fetch, attempts = 12, retryMs = 250, sleepFn = sleep } = {},
+) {
+  let last = { status: 0, health: null };
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    try {
+      const response = await fetcher("http://127.0.0.1:8897/api/health", {
+        signal: AbortSignal.timeout(10_000),
+      });
+      const health = await response.json().catch(() => null);
+      last = { status: response.status, health };
+      if (postflightHealthResponseMatchesRollout(response.status, health, rolloutPhase)) return last;
+    } catch {
+      last = { status: 0, health: null };
+    }
+    if (attempt + 1 < attempts) await sleepFn(retryMs);
+  }
+  return last;
+}
+
+function verifyNewReleaseArchive(manifest) {
+  const archive = privateFile(manifest.newArchive, manifest.newArchiveSha256);
+  const releaseManifest = JSON.parse(
+    readFileSync(join(manifest.newRelease, "release-manifest.json"), "utf8"),
+  );
+  const binding = validateReleaseArchiveBinding({
+    archiveContent: archive.content,
+    releaseDirectoryPath: manifest.newRelease,
+    manifest: releaseManifest,
+    enforcePosix: true,
+  });
+  check(binding.valid, "RELEASE_ARCHIVE_BINDING_INVALID");
+  check(releaseManifest.source?.commit === manifest.newCommit, "RELEASE_ARCHIVE_COMMIT_INVALID");
+  return binding;
+}
+
+function assertRollbackMigrationCompatibility(manifest) {
+  const oldReleaseManifest = JSON.parse(
+    readFileSync(join(manifest.oldRelease, "release-manifest.json"), "utf8"),
+  );
+  const newReleaseManifest = JSON.parse(
+    readFileSync(join(manifest.newRelease, "release-manifest.json"), "utf8"),
+  );
+  check(
+    migrationInventoriesMatch(oldReleaseManifest, newReleaseManifest),
+    "ROLLBACK_MIGRATION_COMPATIBILITY_UNPROVEN",
+  );
+}
+
+function validateP2AcceptanceBinding(manifest, { platform, policy }) {
+  const rolloutPhase = rolloutPhaseForManifest(manifest);
+  const hasReport = manifest.p2AcceptanceReport !== undefined || manifest.p2AcceptanceReportSha256 !== undefined;
+  if (!hasReport) {
+    check(!p2AcceptanceRequiredForRollout(rolloutPhase), "P2_ACCEPTANCE_BINDING_REQUIRED");
+    return null;
+  }
+  check(manifest.p2AcceptanceReport && manifest.p2AcceptanceReportSha256, "P2_ACCEPTANCE_BINDING_INCOMPLETE");
+  const report = jsonFile(manifest.p2AcceptanceReport, manifest.p2AcceptanceReportSha256);
+  return validateP2AcceptanceReport(report, {
+    sourceCommit: manifest.newCommit,
+    policyDigest: sha256(policy),
+    expectedProviderPolicyDigest: providerPolicyDigest(platform.providerPolicies),
+    currency: policy.currency,
+  });
+}
+
 export function validateCandidateConfiguration(manifest) {
   const platformRaw = privateFile(manifest.platformEnvCandidate, manifest.platformEnvSha256, { maxBytes: 128 * 1024 }).content.toString("utf8");
   const backendRaw = privateFile(manifest.backendEnvCandidate, manifest.backendEnvSha256, { maxBytes: 128 * 1024 }).content.toString("utf8");
@@ -76,7 +351,8 @@ export function validateCandidateConfiguration(manifest) {
   const backend = loadConfig({ ...backendEnv, envFile: manifest.backendEnvCandidate });
   check(platform.nodeEnv === "production" && backend.nodeEnv === "production", "PRODUCTION_MODE_REQUIRED");
   check(platform.host === "127.0.0.1" && platform.port === 18997 && platform.databasePath === PLATFORM_DATABASE
-    && platform.mediaDirectory === "/var/lib/sentelligent-ai-platform/media", "PLATFORM_STATE_BINDING_INVALID");
+    && platform.mediaDirectory === "/var/lib/sentelligent-ai-platform/media"
+    && platform.staticDirectory === platformStaticDirectoryForRelease(manifest.newRelease), "PLATFORM_STATE_BINDING_INVALID");
   check(platform.authSecret === backend.aiPlatformAuthSecret && platform.authSecret.length >= 32
     && backend.aiPlatformBaseUrl === "http://127.0.0.1:18997"
     && backend.aiPlatformSocketPath === PRODUCTION_AI_SOCKET && platform.socketPath === PRODUCTION_AI_SOCKET, "PLATFORM_AUTH_BINDING_INVALID");
@@ -87,19 +363,22 @@ export function validateCandidateConfiguration(manifest) {
   check(new Set([platform.authSecret, platform.mediaEncryptionKey, platform.credentialEncryptionKey, platform.taskEncryptionKey, backend.authSessionSecret, backend.settingsEncryptionKey, backend.weixinAgentApiToken]).size === 7, "PLATFORM_KEY_ISOLATION_INVALID");
   check(backend.aiPlatformRoutingPolicy?.phase === manifest.phase, "ROUTING_PHASE_MISMATCH");
   const rolloutPhase = rolloutPhaseForManifest(manifest);
+  const rolloutControls = rolloutControlsForPhase(rolloutPhase);
   check(routingPhaseForRollout(rolloutPhase) === manifest.phase, "ROLLOUT_PHASE_MISMATCH");
-  if (rolloutPhase === "P1" || rolloutPhase === "P2") {
+  if (rolloutPhase === "P1") {
     check(platform.executionMode === "local-simulated" && platform.externalProvidersEnabled === false, "INITIAL_PLATFORM_MUST_BE_SIMULATED");
   } else {
     check(platform.executionMode === "external-provider" && platform.externalProvidersEnabled === true, "EXTERNAL_PLATFORM_REQUIRED");
   }
   check(backend.aiPlatformProactiveScheduleOwner === "backend" && platform.proactiveScheduleOwner === "backend", "PROACTIVE_OWNER_INVALID");
+  check(platform.taskAdmissionEnabled === rolloutControls.taskAdmissionEnabled, "ROLLOUT_TASK_ADMISSION_INVALID");
   check(backend.databaseUrl === BUSINESS_DATABASE && backend.weixinAgentSessionHome === WEIXIN_SESSION, "BUSINESS_STATE_BINDING_INVALID");
   check(platform.taskConcurrency === 1 && platform.taskOwnerConcurrency === 1, "INITIAL_CONCURRENCY_INVALID");
   if (manifest.phase !== "platform") check(!backend.proactiveAssistantAutoRun && !backend.proactiveNotificationAutoRun, "BACKGROUND_CANARY_MUST_BE_PAUSED");
   const policy = normalizeDeploymentPolicy(jsonFile(manifest.policyFile, manifest.policySha256), platform);
   check(policy.sourceCommit === manifest.newCommit, "POLICY_SOURCE_MISMATCH");
-  return { platformRaw, backendRaw, platformEnv, backendEnv, platform, backend, policy };
+  const p2Acceptance = validateP2AcceptanceBinding(manifest, { platform, policy });
+  return { platformRaw, backendRaw, platformEnv, backendEnv, platform, backend, policy, p2Acceptance };
 }
 
 export function createProductionHostAdapter(manifest, { proofPath, proofSha256 } = {}) {
@@ -116,7 +395,9 @@ export function createProductionHostAdapter(manifest, { proofPath, proofSha256 }
     if (!state) {
       state = jsonFile(statePath);
       stateSha256 = privateFile(statePath).sha256;
-      check(state.transitionIdentityDigest === transitionKey && state.transitionId === manifest.id, "TRANSITION_STATE_MISMATCH");
+      check(state.manifestDigest === manifestDigest
+        && state.transitionIdentityDigest === transitionKey
+        && state.transitionId === manifest.id, "TRANSITION_STATE_MISMATCH");
     }
     return state;
   }
@@ -165,6 +446,61 @@ export function createProductionHostAdapter(manifest, { proofPath, proofSha256 }
       join(manifest.newRelease, "scripts/ai-platform/reconcile-business-state.mjs"), command,
     ], { uid: Number(account[2]), gid: Number(account[3]), input: JSON.stringify(input), timeout: 30_000 }));
   }
+  function operationSummary(value) {
+    return {
+      paused: value?.paused,
+      admissionOpen: value?.executor?.admissionOpen,
+      generation: value?.generation,
+      running: value?.queue?.running,
+      queued: value?.queue?.queued,
+    };
+  }
+  async function forcePlatformClosed() {
+    const current = await platformRequest("/operations");
+    if (current.paused === true && current.executor?.admissionOpen === false
+      && current.queue?.running === 0 && current.queue?.queued === 0) return current;
+    const result = await platformRequest("/operations/drain", {
+      method: "POST", body: { expectedGeneration: current.generation },
+    });
+    check(result.paused === true && result.executor?.admissionOpen === false
+      && result.queue?.running === 0 && result.queue?.queued === 0,
+    "PHASE_FAIL_CLOSED_UNCONFIRMED");
+    return result;
+  }
+  async function restorePhaseAdmission(plan) {
+    if (plan.mode === "fail-closed" || !plan.admissionOpen) return forcePlatformClosed();
+    const current = await platformRequest("/operations");
+    const result = current.paused
+      ? await platformRequest("/operations/resume", {
+        method: "POST", body: { expectedGeneration: current.generation },
+      })
+      : current;
+    check(result.paused === false && result.executor?.admissionOpen === true,
+      "PHASE_ADMISSION_RESTORE_FAILED");
+    return result;
+  }
+  async function recoverPhaseFailure(beforeOperations, { policyApplied, backendRestored }) {
+    const plan = phaseRecoveryPlan({ policyApplied, backendRestored, beforeOperations });
+    try {
+      const result = await restorePhaseAdmission(plan);
+      return { ...plan, status: "passed", observed: operationSummary(result) };
+    } catch (recoveryError) {
+      // A failed resume can leave the real state unknown.  Try one final
+      // drain so a failed phase never reopens execution with mismatched code.
+      try {
+        const closed = await forcePlatformClosed();
+        return {
+          ...plan, mode: "fail-closed", status: "passed", policy: policyApplied ? "unrestored" : plan.policy,
+          observed: operationSummary(closed), fallbackErrorCode: recoveryError?.code ?? "PHASE_RECOVERY_FAILED",
+        };
+      } catch (closedError) {
+        return {
+          ...plan, mode: "fail-closed", status: "failed", policy: policyApplied ? "unrestored" : plan.policy,
+          errorCode: closedError?.code ?? recoveryError?.code ?? "PHASE_RECOVERY_FAILED",
+        };
+      }
+    }
+  }
   return {
     acquireLock() {
       privateDirectory(manifest.evidenceDir);
@@ -191,6 +527,7 @@ export function createProductionHostAdapter(manifest, { proofPath, proofSha256 }
       const result = validateReleaseIdentity({
         manifest: releaseManifest, manifestPath: join(release, "release-manifest.json"),
         releaseDirectoryPath: release, expectedCommit: commit, servicePlan,
+        ...releaseIdentityValidationOptions(identity, realpathSync(PRODUCTION_ROOT + "/current")),
       });
       check(result.valid, "RELEASE_IDENTITY_INVALID");
       assertProtected();
@@ -198,7 +535,8 @@ export function createProductionHostAdapter(manifest, { proofPath, proofSha256 }
     },
     verifyPreflight() {
       validateCandidateConfiguration(manifest);
-      privateFile(manifest.newArchive, manifest.newArchiveSha256);
+      assertRollbackMigrationCompatibility(manifest);
+      verifyNewReleaseArchive(manifest);
       const core = jsonFile(manifest.corePreflight, manifest.corePreflightSha256);
       assertCoreProof(core, manifest, manifest.oldRelease, manifest.oldCommit);
       check(Boolean(proofPath && proofSha256), "AI_PREFLIGHT_REQUIRED");
@@ -219,6 +557,26 @@ export function createProductionHostAdapter(manifest, { proofPath, proofSha256 }
         assertProtected();
         return state;
       }
+      const platformPreparationPath = join(manifest.evidenceDir, "platform-preparation-state.json");
+      const platformPreparation = jsonFile(platformPreparationPath);
+      check(platformPreparation.status === "prepared", "PLATFORM_NOT_PREPARED");
+      const platformState = {
+        adoptedExisting: Boolean(platformPreparation.adoptedExisting),
+        previousPlatformActive: Boolean(platformPreparation.previousPlatformActive),
+        previousPlatformEnabled: Boolean(platformPreparation.previousPlatformEnabled),
+        socketGroupCreated: Boolean(platformPreparation.socketGroupCreated),
+        businessSocketGroupAdded: Boolean(platformPreparation.businessSocketGroupAdded),
+      };
+      if (platformState.adoptedExisting) {
+        privateFile(platformPreparation.platformUnitBackup, platformPreparation.platformUnitBackupSha256, { requirePrivate: false });
+        privateFile(platformPreparation.platformEnvironmentBackup, platformPreparation.platformEnvironmentBackupSha256);
+        Object.assign(platformState, {
+          platformUnitBackup: platformPreparation.platformUnitBackup,
+          platformUnitBackupSha256: platformPreparation.platformUnitBackupSha256,
+          platformEnvironmentBackup: platformPreparation.platformEnvironmentBackup,
+          platformEnvironmentBackupSha256: platformPreparation.platformEnvironmentBackupSha256,
+        });
+      }
       const env = privateFile(BUSINESS_ENV);
       const unit = privateFile(backendUnit, null, { requirePrivate: false });
       const envBackup = join(manifest.backupDir, "backend-before.env");
@@ -226,9 +584,12 @@ export function createProductionHostAdapter(manifest, { proofPath, proofSha256 }
       writeOnceOrVerify(envBackup, env.content, { expectedSha: env.sha256 });
       writeOnceOrVerify(unitBackup, unit.content, { expectedSha: unit.sha256, requirePrivate: false });
       state = {
-        schemaVersion: 1, transitionId: manifest.id, manifestDigest, transitionIdentityDigest: transitionKey, rolloutPhase: manifest.rolloutPhase,
+        schemaVersion: 1, transitionId: manifest.id, manifestDigest, transitionIdentityDigest: transitionKey,
+        newRelease: manifest.newRelease, newCommit: manifest.newCommit, phase: manifest.phase,
+        rolloutPhase: manifest.rolloutPhase,
         status: "captured", protected: protectedSnapshot(), backendEnvBackup: envBackup,
         backendEnvSha256: env.sha256, backendUnitBackup: unitBackup, backendUnitSha256: unit.sha256,
+        platformPreparation: platformState,
         phaseHistory: [],
       };
       writeState();
@@ -268,7 +629,7 @@ export function createProductionHostAdapter(manifest, { proofPath, proofSha256 }
     },
     async resumePlatform() {
       const rolloutPhase = rolloutPhaseForManifest(manifest);
-      if (["P1", "P2"].includes(rolloutPhase)) {
+      if (rolloutPhase === "P1") {
         const current = await platformRequest("/operations");
         check(current.paused && current.executor.admissionOpen === false, "PLATFORM_MUST_REMAIN_PAUSED");
         return current;
@@ -295,13 +656,12 @@ export function createProductionHostAdapter(manifest, { proofPath, proofSha256 }
       markState({ proactiveReconciled: true });
     },
     async verifyPostflight() {
+      const rolloutPhase = rolloutPhaseForManifest(manifest);
       await corePreflight(manifest.newRelease, manifest.newCommit, "postflight");
       const unit = inspectUnit(PLATFORM_SERVICE);
       check(unit.ActiveState === "active" && unit.User === PLATFORM_USER && unit.WorkingDirectory === manifest.newRelease, "PLATFORM_UNIT_IDENTITY_INVALID");
-      const response = await fetch("http://127.0.0.1:8897/api/health", { signal: AbortSignal.timeout(10000) });
-      const health = await response.json();
-      check(response.status === 200 && health.database === "ready"
-        && (manifest.phase === "legacy" || health.aiPlatform?.ready === true), "BUSINESS_POSTFLIGHT_FAILED");
+      const postflight = await pollPostflightHealth(rolloutPhase);
+      check(postflightHealthResponseMatchesRollout(postflight.status, postflight.health, rolloutPhase), "BUSINESS_POSTFLIGHT_FAILED");
       assertProtected();
       markState({ status: "cutover-passed", currentRelease: manifest.newRelease });
     },
@@ -348,9 +708,36 @@ export function createProductionHostAdapter(manifest, { proofPath, proofSha256 }
       markState({ currentRelease: manifest.oldRelease, status: "core-rolled-back" });
     },
     rollbackPlatform() {
-      if (existsSync("/etc/systemd/system/" + PLATFORM_SERVICE)) {
+      loadState();
+      const unitPath = "/etc/systemd/system/" + PLATFORM_SERVICE;
+      const platformState = state.platformPreparation;
+      if (platformState?.adoptedExisting) {
+        runCommand("/bin/systemctl", ["stop", PLATFORM_SERVICE], { timeout: 240_000 });
+        const currentEnvironment = privateFile(PLATFORM_ENV);
+        if (currentEnvironment.sha256 !== platformState.platformEnvironmentBackupSha256) {
+          const backup = privateFile(platformState.platformEnvironmentBackup, platformState.platformEnvironmentBackupSha256);
+          atomicReplace(PLATFORM_ENV, backup.content, currentEnvironment.sha256);
+        }
+        const currentUnit = privateFile(unitPath, null, { requirePrivate: false });
+        if (currentUnit.sha256 !== platformState.platformUnitBackupSha256) {
+          const backup = privateFile(platformState.platformUnitBackup, platformState.platformUnitBackupSha256, { requirePrivate: false });
+          atomicReplace(unitPath, backup.content, currentUnit.sha256, { requirePrivate: false });
+        }
+        runCommand("/bin/systemctl", ["daemon-reload"]);
+        if (platformState.previousPlatformEnabled) runCommand("/bin/systemctl", ["enable", PLATFORM_SERVICE]);
+        else runCommand("/bin/systemctl", ["disable", PLATFORM_SERVICE]);
+        if (platformState.previousPlatformActive) runCommand("/bin/systemctl", ["start", PLATFORM_SERVICE], { timeout: 90_000 });
+      } else if (existsSync(unitPath)) {
         runCommand("/bin/systemctl", ["stop", PLATFORM_SERVICE], { timeout: 240_000 });
         runCommand("/bin/systemctl", ["disable", PLATFORM_SERVICE]);
+      }
+      // Remove only the transition-created shared boundary after the old
+      // platform unit and the restarted Backend no longer depend on it.
+      if (platformState?.businessSocketGroupAdded) {
+        runCommand("/usr/sbin/gpasswd", ["-d", "sentzx", PLATFORM_SOCKET_GROUP]);
+      }
+      if (platformState?.socketGroupCreated && groupRecord(PLATFORM_SOCKET_GROUP)) {
+        runCommand("/usr/sbin/groupdel", [PLATFORM_SOCKET_GROUP]);
       }
       markState({ status: "platform-rolled-back", platformAdmission: "closed" });
     },
@@ -364,13 +751,23 @@ export function createProductionHostAdapter(manifest, { proofPath, proofSha256 }
       return state;
     },
     async verifyRollback() {
+      loadState();
       check(realpathSync(PRODUCTION_ROOT + "/current") === manifest.oldRelease, "ROLLBACK_RELEASE_INVALID");
       const unit = inspectUnit("sentelligent-backend.service");
       check(unit.ActiveState === "active" && unit.ExecStart.includes(manifest.oldRelease), "ROLLBACK_BACKEND_INVALID");
-      if (existsSync("/etc/systemd/system/" + PLATFORM_SERVICE)) {
+      const platformState = state.platformPreparation;
+      if (platformState?.adoptedExisting) {
+        const platform = inspectUnit(PLATFORM_SERVICE);
+        if (platformState.previousPlatformActive) check(platform.ActiveState === "active", "ROLLBACK_PLATFORM_NOT_ACTIVE");
+        else check(platform.ActiveState !== "active", "ROLLBACK_PLATFORM_STILL_ACTIVE");
+        check(platformUnitMatchesRelease(privateFile("/etc/systemd/system/" + PLATFORM_SERVICE, null, { requirePrivate: false }).content.toString(), manifest.oldRelease), "ROLLBACK_PLATFORM_UNIT_INVALID");
+        check(privateFile(PLATFORM_ENV).sha256 === platformState.platformEnvironmentBackupSha256, "ROLLBACK_PLATFORM_ENV_INVALID");
+      } else if (existsSync("/etc/systemd/system/" + PLATFORM_SERVICE)) {
         const platform = inspectUnit(PLATFORM_SERVICE);
         check(platform.ActiveState !== "active", "ROLLBACK_PLATFORM_STILL_ACTIVE");
       }
+      if (platformState?.socketGroupCreated) check(!groupRecord(PLATFORM_SOCKET_GROUP), "ROLLBACK_SOCKET_GROUP_REMAINS");
+      if (platformState?.businessSocketGroupAdded) check(!userHasGroup("sentzx", PLATFORM_SOCKET_GROUP), "ROLLBACK_BUSINESS_SOCKET_GROUP_REMAINS");
       assertProtected();
       return { status: "passed", release: manifest.oldRelease };
     },
@@ -383,14 +780,18 @@ export function createProductionHostAdapter(manifest, { proofPath, proofSha256 }
       check(compareRolloutPhase(target, state.rolloutPhase) >= 0, "PHASE_REGRESSION_REQUIRES_ROLLBACK");
       check(realpathSync(PRODUCTION_ROOT + "/current") === manifest.newRelease, "CURRENT_RELEASE_CHANGED");
       const candidate = validateCandidateConfiguration(manifest);
-      const operations = await platformRequest("/operations");
-      if (!operations.paused || operations.queue.running !== 0 || operations.queue.queued !== 0) await this.drainPlatform(manifest);
+      const operationsBefore = await platformRequest("/operations");
       const before = privateFile(BUSINESS_ENV);
       const backupPath = join(manifest.backupDir, `backend-before-${target}.env`);
       writeOnceOrVerify(backupPath, before.content, { expectedSha: before.sha256 });
       let policyApplied = false;
+      let backendChanged = false;
       try {
+        if (!operationsBefore.paused || operationsBefore.queue.running !== 0 || operationsBefore.queue.queued !== 0) {
+          await this.drainPlatform(manifest);
+        }
         atomicReplace(BUSINESS_ENV, candidate.backendRaw, before.sha256);
+        backendChanged = true;
         runCommand("/bin/systemctl", ["daemon-reload"]);
         runCommand("/bin/systemctl", ["restart", "sentelligent-backend.service"], { timeout: 240_000 });
         const backend = await readHealth("http://127.0.0.1:8897/api/health");
@@ -411,18 +812,42 @@ export function createProductionHostAdapter(manifest, { proofPath, proofSha256 }
         markState({ rolloutPhase: target, status: "phase-set", phaseHistory: history, platformAdmission: resumed.paused ? "closed" : "open" });
         return { status: "passed", phase: target, routingPhase: manifest.phase, policy: applied, backendEnvSha256: hashBytes(candidate.backendRaw), policyApplied };
       } catch (error) {
-        const current = privateFile(BUSINESS_ENV);
-        if (current.sha256 !== before.sha256) {
-          atomicReplace(BUSINESS_ENV, before.content, current.sha256);
-          runCommand("/bin/systemctl", ["daemon-reload"]);
-          runCommand("/bin/systemctl", ["restart", "sentelligent-backend.service"], { timeout: 240_000 });
+        let backendRestored = !backendChanged;
+        try {
+          const current = privateFile(BUSINESS_ENV);
+          if (current.sha256 !== before.sha256) {
+            atomicReplace(BUSINESS_ENV, before.content, current.sha256);
+            runCommand("/bin/systemctl", ["daemon-reload"]);
+            runCommand("/bin/systemctl", ["restart", "sentelligent-backend.service"], { timeout: 240_000 });
+          }
+          backendRestored = true;
+        } catch (restoreError) {
+          error.backendRestoreErrorCode = restoreError?.code ?? "BACKEND_RESTORE_FAILED";
         }
-        if (policyApplied) error.code = error.code ?? "PHASE_POLICY_APPLIED_RECOVERY_REQUIRED";
+        const recovery = await recoverPhaseFailure(operationsBefore, { policyApplied, backendRestored });
+        error.phaseRecovery = recovery;
+        try {
+          markState({
+            status: recovery.status === "passed" && recovery.mode === "fail-closed"
+              ? "phase-recovery-failed-closed" : "phase-recovery-complete",
+            phaseRecovery: recovery,
+            platformAdmission: recovery.observed?.admissionOpen === true ? "open" : "closed",
+          });
+        } catch (stateError) {
+          error.phaseRecoveryStateErrorCode = stateError?.code ?? "PHASE_RECOVERY_STATE_WRITE_FAILED";
+        }
+        if (recovery.status !== "passed") error.code = error.code ?? "PHASE_RECOVERY_FAILED";
+        else if (policyApplied) error.code = error.code ?? "PHASE_POLICY_APPLIED_FAIL_CLOSED";
         throw error;
       }
     },
     async observe(_input, { durationSeconds, sampleIntervalSeconds = 30 } = {}) {
-      if (!state && existsSync(statePath)) loadState();
+      check(existsSync(statePath), "OBSERVE_STATE_REQUIRED");
+      loadState();
+      let initialCurrentRelease;
+      try { initialCurrentRelease = realpathSync(PRODUCTION_ROOT + "/current"); }
+      catch { throw Object.assign(new Error("OBSERVE_CURRENT_RELEASE_MISMATCH"), { code: "OBSERVE_CURRENT_RELEASE_MISMATCH" }); }
+      const identity = validateObservationBinding(manifest, state, initialCurrentRelease);
       const startedAt = new Date().toISOString();
       const deadline = Date.now() + durationSeconds * 1000;
       const samples = [];
@@ -434,6 +859,8 @@ export function createProductionHostAdapter(manifest, { proofPath, proofSha256 }
         const at = new Date().toISOString();
         let operations;
         let aiHealth;
+        let currentRelease = null;
+        try { currentRelease = realpathSync(PRODUCTION_ROOT + "/current"); } catch {}
         let protectedState;
         try { operations = await platformRequest("/operations"); } catch (error) { operations = { errorCode: error?.code ?? "OPERATIONS_UNAVAILABLE" }; }
         try {
@@ -444,10 +871,16 @@ export function createProductionHostAdapter(manifest, { proofPath, proofSha256 }
         try { protectedState = protectedSnapshot(); } catch (error) { protectedState = { errorCode: error?.code ?? "PROTECTED_STATE_UNAVAILABLE" }; }
         let memory;
         try { memory = memorySnapshot(); } catch (error) { memory = { errorCode: error?.code ?? "MEMORY_UNAVAILABLE" }; }
-        const sample = { at, operations, aiHealth, backend, protected: protectedState, memory };
+        const sample = { at, currentRelease, operations, aiHealth, backend, protected: protectedState, memory };
         samples.push(sample);
-        const healthy = aiHealth.status === 200 && backend.status === 200 && backend.body?.database === "ready"
-          && operations?.errorCode === undefined && protectedState?.errorCode === undefined;
+        let runtimeFailure = null;
+        try {
+          validateObservationRuntime(identity, { operations, aiHealth, backend, currentRelease });
+        } catch (error) {
+          runtimeFailure = error;
+          failures.push({ at, code: error?.code ?? "OBSERVE_RUNTIME_INVALID" });
+        }
+        const healthy = runtimeFailure === null && protectedState?.errorCode === undefined;
         consecutiveHealthFailures = healthy ? 0 : consecutiveHealthFailures + 1;
         if (!healthy) failures.push({ at, code: "HEALTH_THRESHOLD_SAMPLE_FAILED" });
         const depth = Number(operations?.queue?.depth);
@@ -456,13 +889,13 @@ export function createProductionHostAdapter(manifest, { proofPath, proofSha256 }
         if (Number.isSafeInteger(depth)) lastQueueDepth = depth;
         if (JSON.stringify(protectedState) !== JSON.stringify(state?.protected ?? protectedState)) failures.push({ at, code: "PROTECTED_STATE_CHANGED" });
         if (Number.isFinite(memory.availableMiB) && memory.availableMiB < 1024) failures.push({ at, code: "AVAILABLE_MEMORY_LOW" });
-        if (consecutiveHealthFailures >= 3 || queueGrowthSamples >= 10 || failures.some((item) => ["PROTECTED_STATE_CHANGED", "AVAILABLE_MEMORY_LOW"].includes(item.code))) break;
+        if (consecutiveHealthFailures >= 3 || queueGrowthSamples >= 10 || failures.some((item) => ["CURRENT_RELEASE_CHANGED", "PROTECTED_STATE_CHANGED", "AVAILABLE_MEMORY_LOW"].includes(item.code))) break;
         if (Date.now() >= deadline) break;
         await sleep(Math.min(sampleIntervalSeconds * 1000, Math.max(50, deadline - Date.now())));
       }
       const thresholdFailures = failures.filter((item, index, list) => index === list.findIndex((other) => other.code === item.code));
       return {
-        schemaVersion: 1, status: thresholdFailures.length ? "failed" : "passed", startedAt,
+        schemaVersion: 1, ...identity, status: thresholdFailures.length ? "failed" : "passed", startedAt,
         finishedAt: new Date().toISOString(), durationSeconds, sampleCount: samples.length,
         thresholdFailures, samples,
       };
@@ -470,11 +903,11 @@ export function createProductionHostAdapter(manifest, { proofPath, proofSha256 }
   };
 }
 
-function platformDatabaseIsEmpty(path) {
+export function platformDatabaseIsEmpty(path) {
   if (!existsSync(path)) return true;
   const db = new DatabaseSync(path, { readOnly: true });
   try {
-    for (const table of ["tasks", "attempts", "usage_records", "budget_reservations", "deliveries"]) {
+    for (const table of ["tasks", "task_attempts", "usage_ledger", "budget_reservations", "result_deliveries"]) {
       if (db.prepare(`SELECT count(*) n FROM ${table}`).get().n !== 0) return false;
     }
     return db.prepare("PRAGMA quick_check").get().quick_check === "ok"
@@ -493,7 +926,7 @@ export async function preparePlatformService(manifest) {
   assertHost(manifest);
   const candidate = validateCandidateConfiguration(manifest);
   privateDirectory(manifest.evidenceDir); privateDirectory(manifest.backupDir);
-  privateFile(manifest.newArchive, manifest.newArchiveSha256);
+  verifyNewReleaseArchive(manifest);
   runCommand("/bin/bash", [
     "-c", 'source "$1"; NEW_RELEASE="$2"; EXPECTED_COMMIT="$3"; NODE_BIN="$4"; assert_candidate_release_frozen; verify_release_manifest',
     "verify-release", join(manifest.newRelease, "scripts/production-cutover.sh"), manifest.newRelease, manifest.newCommit, PROJECT_NODE,
@@ -507,29 +940,75 @@ export async function preparePlatformService(manifest) {
   const template = readFileSync(join(manifest.newRelease, "scripts/ai-platform/systemd/sentelligent-ai-platform.service.template"), "utf8");
   const unit = renderPlatformUnit(template, manifest.newRelease);
   const unitDigest = hashBytes(unit);
-  let accountLine;
-  try { accountLine = runCommand("/usr/bin/getent", ["passwd", PLATFORM_USER]).trim(); } catch { accountLine = ""; }
-  let account = null;
-  if (accountLine) {
-    const fields = accountLine.split(":");
-    account = { uid: Number(fields[2]), gid: Number(fields[3]) };
+  let account = passwdRecord(PLATFORM_USER);
+  const businessAccount = passwdRecord("sentzx");
+  check(businessAccount, "BUSINESS_SERVICE_ACCOUNT_INVALID");
+  const socketGroupInitiallyPresent = Boolean(groupRecord(PLATFORM_SOCKET_GROUP));
+  const businessSocketGroupInitiallyPresent = userHasGroup("sentzx", PLATFORM_SOCKET_GROUP);
+  const platformUnitBackup = join(manifest.evidenceDir, "platform-before.service");
+  const platformEnvironmentBackup = join(manifest.evidenceDir, "platform-before.env");
+  const existingPlatformPaths = [unitPath, PLATFORM_ENV, PLATFORM_DATABASE, dataDirectory].filter((path) => existsSync(path));
+  const hasExistingPlatformState = existingPlatformPaths.length > 0 || Boolean(account);
+  let existingPlatformUnit = null;
+  let existingPlatformUnitRelease = null;
+  let existingPlatformEnvironment = null;
+  let previousPlatformActive = false;
+  let previousPlatformEnabled = false;
+  if (hasExistingPlatformState) {
+    check(account && existingPlatformPaths.length === 4, "PLATFORM_PARTIAL_STATE_UNOWNED");
+    check(platformDataDirectoryIsSafe(dataDirectory, account), "PLATFORM_DATA_PERMISSIONS_INVALID");
+    const database = lstatSync(PLATFORM_DATABASE);
+    check(database.isFile() && !database.isSymbolicLink() && database.nlink === 1
+      && database.uid === account.uid && database.gid === account.gid && (database.mode & 0o077) === 0,
+    "PLATFORM_DATABASE_PERMISSIONS_INVALID");
+    existingPlatformUnit = privateFile(unitPath, null, { requirePrivate: false });
+    existingPlatformEnvironment = privateFile(PLATFORM_ENV);
+    existingPlatformUnitRelease = platformUnitIsAdoptable(existingPlatformUnit.content.toString());
+    check(existingPlatformUnitRelease, "PLATFORM_UNIT_NOT_ADOPTABLE");
+    const currentUnit = inspectUnit(PLATFORM_SERVICE);
+    previousPlatformActive = currentUnit.ActiveState === "active";
+    previousPlatformEnabled = unitEnabled(PLATFORM_SERVICE);
+    if (previousPlatformActive) {
+      const existingPlatformOperations = await platformRequest("/operations");
+      check(existingPlatformOperations.paused && existingPlatformOperations.queue.running === 0
+        && existingPlatformOperations.queue.queued === 0, "PLATFORM_MUST_BE_PAUSED_FOR_UPGRADE");
+    }
   }
   let preparation = optionalJsonFile(preparationStatePath);
   let preparationSha = preparation ? privateFile(preparationStatePath).sha256 : null;
   if (preparation) {
     check(preparation.manifestDigest === manifestDigest && preparation.transitionId === manifest.id, "PLATFORM_PREPARATION_STATE_MISMATCH");
     if (preparation.status === "cleanup-complete") {
-      preparation = { ...preparation, status: "preparing", createdUser: false, createdDataDirectory: false, createdEnvironment: false, createdUnit: false };
+      preparation = {
+        ...preparation, status: "preparing", createdUser: false, createdDataDirectory: false,
+        createdEnvironment: false, createdUnit: false, platformServiceStopped: false,
+        platformEnvironmentChanged: false, platformUnitChanged: false,
+        socketGroupCreated: false, businessSocketGroupAdded: false,
+      };
       preparationSha = replacePrivateJson(preparationStatePath, preparation, preparationSha);
     }
   } else {
-    const partial = [unitPath, PLATFORM_ENV, PLATFORM_DATABASE, dataDirectory].some((path) => existsSync(path)) || Boolean(account);
-    check(!partial, "PLATFORM_PARTIAL_STATE_UNOWNED");
     preparation = {
       schemaVersion: 1, transitionId: manifest.id, manifestDigest, status: "preparing",
       createdUser: false, createdDataDirectory: false, createdEnvironment: false, createdUnit: false,
+      socketGroupCreated: false, businessSocketGroupAdded: false,
+      socketGroupInitiallyPresent, businessSocketGroupInitiallyPresent,
       unitSha256: unitDigest, environmentSha256: hashBytes(candidate.platformRaw), startedAt: new Date().toISOString(),
+      adoptedExisting: hasExistingPlatformState,
+      ...(hasExistingPlatformState ? {
+        platformUnitBackup,
+        platformUnitBackupSha256: existingPlatformUnit.sha256,
+        platformUnitRelease: existingPlatformUnitRelease,
+        platformEnvironmentBackup,
+        platformEnvironmentBackupSha256: existingPlatformEnvironment.sha256,
+        previousPlatformActive,
+        previousPlatformEnabled,
+      } : {}),
     };
+    if (hasExistingPlatformState) {
+      writeOnceOrVerify(platformUnitBackup, existingPlatformUnit.content, { expectedSha: existingPlatformUnit.sha256, requirePrivate: false });
+      writeOnceOrVerify(platformEnvironmentBackup, existingPlatformEnvironment.content, { expectedSha: existingPlatformEnvironment.sha256 });
+    }
     preparationSha = writeExclusive(preparationStatePath, JSON.stringify(preparation, null, 2) + "\n");
   }
   const persist = (patch) => {
@@ -540,6 +1019,29 @@ export async function preparePlatformService(manifest) {
   const cleanUp = () => {
     let incomplete = false;
     try {
+      if (preparation.adoptedExisting && (preparation.platformServiceStopped
+        || preparation.platformEnvironmentChanged || preparation.platformUnitChanged)) {
+        try { runCommand("/bin/systemctl", ["stop", PLATFORM_SERVICE], { timeout: 30_000 }); } catch {}
+        if (preparation.platformEnvironmentBackup && existsSync(preparation.platformEnvironmentBackup)) {
+          const current = privateFile(PLATFORM_ENV);
+          if (current.sha256 !== preparation.platformEnvironmentBackupSha256) {
+            const backup = privateFile(preparation.platformEnvironmentBackup, preparation.platformEnvironmentBackupSha256);
+            atomicReplace(PLATFORM_ENV, backup.content, current.sha256);
+          }
+        }
+        if (preparation.platformUnitBackup && existsSync(preparation.platformUnitBackup)) {
+          const current = privateFile(unitPath, null, { requirePrivate: false });
+          if (current.sha256 !== preparation.platformUnitBackupSha256) {
+            const backup = privateFile(preparation.platformUnitBackup, preparation.platformUnitBackupSha256, { requirePrivate: false });
+            atomicReplace(unitPath, backup.content, current.sha256, { requirePrivate: false });
+          }
+        }
+        runCommand("/bin/systemctl", ["daemon-reload"]);
+        if (preparation.previousPlatformEnabled) runCommand("/bin/systemctl", ["enable", PLATFORM_SERVICE]);
+        else try { runCommand("/bin/systemctl", ["disable", PLATFORM_SERVICE]); } catch {}
+        if (preparation.previousPlatformActive) runCommand("/bin/systemctl", ["start", PLATFORM_SERVICE], { timeout: 90_000 });
+        else try { runCommand("/bin/systemctl", ["stop", PLATFORM_SERVICE], { timeout: 30_000 }); } catch {}
+      }
       if (preparation.createdUnit && existsSync(unitPath)) {
         const installed = privateFile(unitPath, null, { requirePrivate: false }).content.toString();
         check(installed === unit, "PREPARE_CLEANUP_UNIT_DRIFT");
@@ -557,6 +1059,12 @@ export async function preparePlatformService(manifest) {
         check(platformDatabaseIsEmpty(PLATFORM_DATABASE), "PREPARE_CLEANUP_DATA_NOT_EMPTY");
         rmSync(dataDirectory, { recursive: true, force: false });
       }
+      if (preparation.businessSocketGroupAdded && !businessSocketGroupInitiallyPresent) {
+        try { runCommand("/usr/sbin/gpasswd", ["-d", "sentzx", PLATFORM_SOCKET_GROUP]); } catch {}
+      }
+      if (preparation.socketGroupCreated && !socketGroupInitiallyPresent && groupRecord(PLATFORM_SOCKET_GROUP)) {
+        runCommand("/usr/sbin/groupdel", [PLATFORM_SOCKET_GROUP]);
+      }
       if (preparation.createdUser) {
         let currentAccount = "";
         try { currentAccount = runCommand("/usr/bin/getent", ["passwd", PLATFORM_USER]).trim(); } catch {}
@@ -570,26 +1078,54 @@ export async function preparePlatformService(manifest) {
   try {
     if (!account) {
       runCommand("/usr/sbin/useradd", ["--system", "--user-group", "--no-create-home", "--home-dir", dataDirectory, "--shell", "/sbin/nologin", PLATFORM_USER]);
-      accountLine = runCommand("/usr/bin/getent", ["passwd", PLATFORM_USER]).trim();
-      const fields = accountLine.split(":");
-      account = { uid: Number(fields[2]), gid: Number(fields[3]) };
+      account = passwdRecord(PLATFORM_USER);
+      check(account, "PLATFORM_ACCOUNT_CREATE_FAILED");
       persist({ createdUser: true });
-    } else {
+    } else if (!preparation.adoptedExisting) {
       check(preparation.createdUser, "PLATFORM_ACCOUNT_ALREADY_EXISTS");
     }
+    if (!groupRecord(PLATFORM_SOCKET_GROUP)) {
+      runCommand("/usr/sbin/groupadd", ["--system", PLATFORM_SOCKET_GROUP]);
+      check(groupRecord(PLATFORM_SOCKET_GROUP), "PLATFORM_SOCKET_GROUP_CREATE_FAILED");
+      persist({ socketGroupCreated: true });
+    }
+    check(groupRecord(PLATFORM_SOCKET_GROUP), "PLATFORM_SOCKET_GROUP_INVALID");
+    if (!preparation.businessSocketGroupAdded && !businessSocketGroupInitiallyPresent) {
+      runCommand("/usr/sbin/usermod", ["-a", "-G", PLATFORM_SOCKET_GROUP, businessAccount.name]);
+      check(userHasGroup(businessAccount.name, PLATFORM_SOCKET_GROUP), "BUSINESS_SOCKET_GROUP_ADD_FAILED");
+      persist({ businessSocketGroupAdded: true });
+    }
+    check(userHasGroup(businessAccount.name, PLATFORM_SOCKET_GROUP), "BUSINESS_SOCKET_GROUP_INVALID");
     if (!existsSync(dataDirectory)) {
       runCommand("/usr/bin/install", ["-d", "-o", PLATFORM_USER, "-g", PLATFORM_USER, "-m", "0700", dataDirectory]);
       persist({ createdDataDirectory: true });
     }
     check(platformDataDirectoryIsSafe(dataDirectory, account), "PLATFORM_DATA_PERMISSIONS_INVALID");
-    if (!existsSync(PLATFORM_ENV)) {
+    const expectedEnvironmentSha256 = hashBytes(candidate.platformRaw);
+    const currentEnvironment = existsSync(PLATFORM_ENV) ? privateFile(PLATFORM_ENV) : null;
+    const currentUnit = existsSync(unitPath) ? privateFile(unitPath, null, { requirePrivate: false }) : null;
+    const environmentChanged = Boolean(currentEnvironment && currentEnvironment.sha256 !== expectedEnvironmentSha256);
+    const unitChanged = Boolean(currentUnit && currentUnit.content.toString() !== unit);
+    if (preparation.adoptedExisting && (environmentChanged || unitChanged)) {
+      runCommand("/bin/systemctl", ["stop", PLATFORM_SERVICE], { timeout: 30_000 });
+      persist({ platformServiceStopped: true });
+    }
+    if (!currentEnvironment) {
       writeExclusive(PLATFORM_ENV, candidate.platformRaw);
       persist({ createdEnvironment: true });
-    } else check(privateFile(PLATFORM_ENV).sha256 === hashBytes(candidate.platformRaw), "PLATFORM_ENV_DRIFT");
+    } else if (environmentChanged) {
+      check(preparation.adoptedExisting && currentEnvironment.sha256 === preparation.platformEnvironmentBackupSha256, "PLATFORM_ENV_DRIFT");
+      atomicReplace(PLATFORM_ENV, candidate.platformRaw, currentEnvironment.sha256);
+      persist({ platformEnvironmentChanged: true });
+    }
     if (!existsSync(unitPath)) {
       writeExclusive(unitPath, unit);
       persist({ createdUnit: true });
-    } else check(privateFile(unitPath, null, { requirePrivate: false }).content.toString() === unit, "PLATFORM_UNIT_DRIFT");
+    } else if (unitChanged) {
+      check(preparation.adoptedExisting && currentUnit.sha256 === preparation.platformUnitBackupSha256, "PLATFORM_UNIT_DRIFT");
+      atomicReplace(unitPath, unit, currentUnit.sha256, { requirePrivate: false });
+      persist({ platformUnitChanged: true });
+    }
     runCommand("/usr/bin/systemd-analyze", ["verify", unitPath]);
     runCommand("/bin/systemctl", ["daemon-reload"]);
     runCommand("/bin/systemctl", ["enable", PLATFORM_SERVICE]);
@@ -607,8 +1143,17 @@ export async function preparePlatformService(manifest) {
       await sleep(1000);
     }
     check(ready, "PREPARED_PLATFORM_NOT_PAUSED");
+    const socketGroup = groupRecord(PLATFORM_SOCKET_GROUP);
+    check(socketGroup, "PLATFORM_SOCKET_GROUP_INVALID");
+    assertAiPlatformSocket(PRODUCTION_AI_SOCKET, { ownerUid: account.uid, groupGid: socketGroup.gid });
     check(JSON.stringify(before) === JSON.stringify(protectedSnapshot()), "PROTECTED_STATE_CHANGED");
-    const result = { status: "prepared", newCommit: manifest.newCommit, platformUnitSha256: unitDigest, protected: before, manifestDigest };
+    const result = {
+      status: "prepared", newCommit: manifest.newCommit, platformUnitSha256: unitDigest,
+      adoptedExisting: Boolean(preparation.adoptedExisting),
+      adoptedPlatformUnitRelease: preparation.platformUnitRelease ?? null,
+      protected: before, manifestDigest,
+      socketGroup: { name: PLATFORM_SOCKET_GROUP, gid: socketGroup.gid },
+    };
     writeOnceOrVerify(join(manifest.evidenceDir, "platform-preparation.json"), JSON.stringify(result, null, 2) + "\n");
     persist({ status: "prepared", preparedAt: new Date().toISOString(), result });
     return result;
@@ -633,7 +1178,8 @@ export async function runAiProductionPreflight(manifest) {
   }
   await verify("host.identity", () => assertHost(manifest));
   await verify("release.archive", () => {
-    privateFile(manifest.newArchive, manifest.newArchiveSha256);
+    verifyNewReleaseArchive(manifest);
+    assertRollbackMigrationCompatibility(manifest);
     check(validateAiComponentManifest(JSON.parse(readFileSync(join(manifest.newRelease, "release-manifest.json"), "utf8"))), "AI_COMPONENT_MANIFEST_INVALID");
     runCommand("/bin/bash", [
       "-c", 'source "$1"; NEW_RELEASE="$2"; EXPECTED_COMMIT="$3"; NODE_BIN="$4"; assert_candidate_release_frozen; verify_release_manifest',
@@ -646,6 +1192,7 @@ export async function runAiProductionPreflight(manifest) {
   });
   await verify("supplier.acceptance", () => {
     quality = jsonFile(manifest.qualityReport, manifest.qualityReportSha256);
+    check(!p2AcceptanceRequiredForRollout(rolloutPhase) || candidate?.p2Acceptance?.sourceCommit === manifest.newCommit, "P2_ACCEPTANCE_REQUIRED");
     check(quality.status === "passed" && quality.sourceCommit === manifest.newCommit
       && quality.executionMode === (rolloutPhase === "P1" ? "local-simulated" : "external-provider")
       && quality.currency === candidate.policy.currency
@@ -666,6 +1213,7 @@ export async function runAiProductionPreflight(manifest) {
   await verify("platform.service", () => {
     const unit = inspectUnit(PLATFORM_SERVICE);
     check(unit.ActiveState === "active" && Number(unit.MainPID) > 1 && unit.User === PLATFORM_USER
+      && unit.Group === PLATFORM_SOCKET_GROUP
       && unit.WorkingDirectory === manifest.newRelease && unit.ExecStart.includes(manifest.newRelease + "/ai-platform/src/cli.js serve"), "PLATFORM_UNIT_IDENTITY_INVALID");
     const file = privateFile("/etc/systemd/system/" + PLATFORM_SERVICE, null, { requirePrivate: false }).content.toString();
     const expected = renderPlatformUnit(readFileSync(join(manifest.newRelease, "scripts/ai-platform/systemd/sentelligent-ai-platform.service.template"), "utf8"), manifest.newRelease);
@@ -673,6 +1221,9 @@ export async function runAiProductionPreflight(manifest) {
     const account = runCommand("/usr/bin/getent", ["passwd", PLATFORM_USER]).trim().split(":");
     const directory = lstatSync("/var/lib/sentelligent-ai-platform");
     check(directory.uid === Number(account[2]) && (directory.mode & 0o077) === 0, "PLATFORM_DATA_PERMISSIONS_INVALID");
+    const socketGroup = groupRecord(PLATFORM_SOCKET_GROUP);
+    check(socketGroup && userHasGroup("sentzx", PLATFORM_SOCKET_GROUP), "PLATFORM_SOCKET_GROUP_INVALID");
+    assertAiPlatformSocket(PRODUCTION_AI_SOCKET, { ownerUid: Number(account[2]), groupGid: socketGroup.gid });
   });
   await verify("platform.database", () => {
     const db = new DatabaseSync(PLATFORM_DATABASE, { readOnly: true });
@@ -689,6 +1240,7 @@ export async function runAiProductionPreflight(manifest) {
     check(response.status === 200 && health.database === "ready" && health.proactiveScheduleOwner === "backend"
       && health.executionMode === (rolloutPhase === "P1" ? "local-simulated" : "external-provider"), "PLATFORM_RUNTIME_INVALID");
     if (rolloutPhase === "P1") check(health.executor?.admissionOpen === false, "P1_ADMISSION_MUST_BE_CLOSED");
+    else check(health.executor?.admissionOpen === true, "LIVE_ADMISSION_MUST_BE_OPEN");
     for (const binding of candidate.policy.agents) {
       const model = candidate.policy.models.find((item) => item.id === binding.modelId);
       const registered = registeredProviderPolicy(candidate.platform, model.providerId)?.models.find((item) => item.name === model.name);
@@ -702,6 +1254,7 @@ export async function runAiProductionPreflight(manifest) {
   return {
     schemaVersion: 1, generatedAt: new Date().toISOString(),
     manifestDigest: hashBytes(JSON.stringify(manifest)), sourceCommit: manifest.newCommit,
+    p2Acceptance: candidate?.p2Acceptance ?? null,
     status: checks.every((item) => item.status === "passed") ? "passed" : "failed", checks,
   };
 }

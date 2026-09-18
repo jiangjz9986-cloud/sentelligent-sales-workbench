@@ -653,7 +653,7 @@ export function createAssistantToolHandlers({
           const existingResults = existingItems.map((item) => ({
             item,
             pending: item.status === "review_required"
-              ? bookkeepingRuntime.startReview({ account: context.owner, entry: item })
+              ? bookkeepingRuntime.startReview({ account: context.owner, entry: item, receivedAt })
               : null,
           }));
           const countText = existingItems.length > 1 ? `，共识别 ${existingItems.length} 笔` : "";
@@ -664,6 +664,7 @@ export function createAssistantToolHandlers({
             items: existingItems,
             pending: existingResults[0]?.pending ?? null,
             pendingItems: existingResults.map((result) => result.pending).filter(Boolean),
+            suppressSynchronousReply: true,
           };
         }
       }
@@ -881,7 +882,7 @@ export function createAssistantToolHandlers({
       const results = capturedResults.map((result) => ({
         ...result,
         pending: result.item.status === "review_required"
-          ? bookkeepingRuntime.startReview({ account: context.owner, entry: result.item })
+          ? bookkeepingRuntime.startReview({ account: context.owner, entry: result.item, receivedAt })
           : null,
       }));
       const pendingCount = results.filter((result) => result.pending).length;
@@ -897,6 +898,7 @@ export function createAssistantToolHandlers({
         pending: results[0]?.pending ?? null,
         pendingItems: results.map((result) => result.pending).filter(Boolean),
         ...(inbox ? { documentInboxId: inbox.id } : {}),
+        suppressSynchronousReply: true,
       };
     },
 

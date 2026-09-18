@@ -291,7 +291,10 @@
 
 .ledger-workbench-desktop-table {
   min-width: 0;
-  overflow: hidden;
+  overflow-x: auto;
+  overflow-y: hidden;
+  overscroll-behavior-inline: contain;
+  scrollbar-width: thin;
 }
 
 .ledger-workbench-desktop-table table {
@@ -316,15 +319,15 @@
   letter-spacing: 0.02em;
 }
 
-/* Seven columns since v0.8.2: the 来源 column is gone and 凭证 is one of the
- * widest columns so payment-proof thumbnails stay legible at a glance. */
+/* Seven columns since v0.8.2: reserve the largest share for the compact
+ * 360x64 proof preview so the source ratio remains readable in one row. */
 .ledger-workbench-desktop-table th:nth-child(1) { width: 7.5%; }
 .ledger-workbench-desktop-table th:nth-child(2) { width: 8.5%; }
-.ledger-workbench-desktop-table th:nth-child(3) { width: 22%; }
-.ledger-workbench-desktop-table th:nth-child(4) { width: 11%; }
-.ledger-workbench-desktop-table th:nth-child(5) { width: 26%; }
-.ledger-workbench-desktop-table th:nth-child(6) { width: 14%; }
-.ledger-workbench-desktop-table th:nth-child(7) { width: 11%; }
+.ledger-workbench-desktop-table th:nth-child(3) { width: 18%; }
+.ledger-workbench-desktop-table th:nth-child(4) { width: 9%; }
+.ledger-workbench-desktop-table th:nth-child(5) { width: 35%; }
+.ledger-workbench-desktop-table th:nth-child(6) { width: 10%; }
+.ledger-workbench-desktop-table th:nth-child(7) { width: 12%; }
 
 .ledger-workbench-desktop-table tbody tr {
   transition: background 0.15s ease;
@@ -400,6 +403,11 @@
   gap: 7px;
 }
 
+.ledger-workbench-category-main > strong {
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
 .ledger-workbench-category-main > svg {
   color: #35486b;
   flex: 0 0 auto;
@@ -411,16 +419,18 @@
 }
 
 .ledger-workbench-category strong {
-  overflow: hidden;
+  min-width: 0;
+  overflow: visible;
   color: #21304d;
   font-size: 12.5px;
   font-weight: 720;
   line-height: 1.35;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  text-overflow: clip;
+  white-space: normal;
 }
 
 .ledger-workbench-category > small {
+  min-width: 0;
   padding-left: 22px;
   color: #748097;
   font-size: 11px;
@@ -430,6 +440,7 @@
 .ledger-workbench-category small.ledger-workbench-region {
   display: inline-flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 3px;
   color: #52617a;
 }
@@ -459,11 +470,14 @@
 }
 
 .ledger-workbench-state {
+  max-width: 100%;
   gap: 4px;
   padding: 3px 9px;
   border-radius: 999px;
   font-size: 11px;
   line-height: 1.35;
+  overflow-wrap: anywhere;
+  white-space: normal;
 }
 
 .ledger-workbench-state.is-attached,
@@ -492,63 +506,82 @@
 }
 
 .ledger-proof-preview {
+  min-width: 0;
+  width: 100%;
   max-width: 100%;
-  min-height: 124px;
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  padding: 3px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  align-items: start;
+  gap: 4px;
+  padding: 0;
   border: 0;
   border-radius: 8px;
   color: #304361;
   text-align: left;
   background: transparent;
+  cursor: pointer;
 }
 
 .ledger-proof-preview:hover { background: #f1f5fb; }
-/* v0.8.2: thumbnails render at more than double the previous 48×54 box so
- * receipt contents are readable directly in the ledger row. */
+.ledger-proof-preview:focus-visible {
+  outline: 2px solid #2862d5;
+  outline-offset: 2px;
+}
+/*
+ * Single-row captures provided for this view are 1320px wide and average
+ * 232.45px high. 360x64 keeps that ratio with a small clarity margin and
+ * avoids the large vertical letterbox created by the former 16:9 frame.
+ * The source derivative is generated at 720px so this 360px preview stays
+ * legible on a high-density desktop display.
+ */
 .ledger-proof-preview-image,
 .ledger-proof-pdf-mark {
-  width: 104px;
-  height: 117px;
-  flex: 0 0 auto;
+  width: min(100%, 360px);
+  height: 64px;
+  min-width: 0;
+  min-height: 0;
+  aspect-ratio: 45 / 8;
+  flex: none;
   overflow: hidden;
   border: 1px solid #dce3ed;
   border-radius: 7px;
   background: #f5f7fa;
 }
 
-/* The authenticated frame also carries a global width/height:100% rule for
- * full-size previews. Keep ledger thumbnails as a fixed flex item so the
- * attachment count and view action remain visible beside the image. */
+/* Override the shared authenticated frame's full-height rule for the compact
+ * bounded ledger preview. */
 .ledger-proof-preview-image.authenticated-image-frame {
-  width: 104px;
-  height: 117px;
-  min-width: 104px;
-  min-height: 117px;
-  flex: 0 0 104px;
+  width: min(100%, 360px);
+  height: 64px;
+  min-width: 0;
+  min-height: 0;
+  aspect-ratio: 45 / 8;
+  flex: none;
 }
 
 .ledger-proof-preview-image > img {
   width: 100%;
   height: 100%;
-  object-fit: contain;
-  background: #f7f8fa;
+  min-width: 0;
+  min-height: 0;
+  display: block;
+  object-fit: fill;
+  background: transparent;
 }
 
 .ledger-proof-preview-image > .authenticated-image-frame-state {
-  min-height: 112px;
-  padding: 3px;
-  font-size: 0;
+  min-width: 0;
+  min-height: 0;
+  padding: 8px;
+  font-size: 10px;
 }
 
-.ledger-proof-preview-image > .authenticated-image-frame-state svg { width: 15px; height: 15px; }
+.ledger-proof-preview-image > .authenticated-image-frame-state svg { width: 17px; height: 17px; }
 .ledger-proof-preview-image > .authenticated-image-frame-state button {
   min-width: 0;
   min-height: 28px;
-  padding: 3px;
-  font-size: 0;
+  padding: 4px 8px;
+  font-size: 10px;
 }
 
 .ledger-proof-pdf-mark {
@@ -560,12 +593,6 @@
   font-size: 11px;
   font-weight: 820;
 }
-
-.ledger-proof-preview > span:last-child { min-width: 0; display: grid; gap: 3px; }
-.ledger-proof-preview > span:last-child strong,
-.ledger-proof-preview > span:last-child button { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.ledger-proof-preview > span:last-child strong { color: #27405e; font-size: 10.5px; }
-.ledger-proof-preview > span:last-child button { min-height: 28px; padding: 2px 0; border: 0; color: #2862d5; background: transparent; font-size: 9.5px; text-align: left; }
 
 .ledger-workbench-link,
 .ledger-workbench-review-button {
@@ -595,9 +622,15 @@
 }
 
 .ledger-workbench-row-actions {
-  display: flex;
-  align-items: center;
+  min-width: 0;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 6px;
+}
+
+.ledger-workbench-row-actions > button {
+  width: 100%;
+  min-width: 0;
 }
 
 .ledger-workbench-delete {
@@ -831,6 +864,10 @@
   .ledger-workbench-summary-todos {
     gap: 12px;
     padding-inline: 14px;
+  }
+
+  .ledger-workbench-row-actions {
+    grid-template-columns: minmax(0, 1fr);
   }
 }
 

@@ -46,6 +46,9 @@ import { apply as applyCustomerProactiveSubjects } from "./migrations/0042_custo
 import { apply as applyHospitalTenderCanonicalBridge } from "./migrations/0043_hospital_tender_canonical_bridge.mjs";
 import { apply as applyActionRiskWritebackFields } from "./migrations/0044_action_risk_writeback_fields.mjs";
 import { apply as applyCustomerImportBatches } from "./migrations/0045_customer_import_batches.mjs";
+import { apply as applySecureSettingSync } from "./migrations/0046_secure_setting_sync.mjs";
+import { apply as applyTravelExpenseInvoiceType } from "./migrations/0047_travel_expense_invoice_type.mjs";
+import { apply as applyWeixinBookkeepingBatches } from "./migrations/0048_weixin_bookkeeping_batches.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const migrations = [
@@ -311,6 +314,24 @@ const migrations = [
     path: resolve(here, "migrations", "0045_customer_import_batches.mjs"),
     type: "module",
     apply: applyCustomerImportBatches,
+  },
+  {
+    version: "0046",
+    path: resolve(here, "migrations", "0046_secure_setting_sync.mjs"),
+    type: "module",
+    apply: applySecureSettingSync,
+  },
+  {
+    version: "0047",
+    path: resolve(here, "migrations", "0047_travel_expense_invoice_type.mjs"),
+    type: "module",
+    apply: applyTravelExpenseInvoiceType,
+  },
+  {
+    version: "0048",
+    path: resolve(here, "migrations", "0048_weixin_bookkeeping_batches.mjs"),
+    type: "module",
+    apply: applyWeixinBookkeepingBatches,
   },
 ];
 

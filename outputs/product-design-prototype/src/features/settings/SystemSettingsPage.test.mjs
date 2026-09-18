@@ -78,6 +78,9 @@ test("tender schedule settings expose the existing scheduler controls without sh
   assert.match(source, /nextRunAt/);
   assert.match(source, /立即检测下一批/);
   assert.match(source, /启用自动轮巡/);
+  assert.match(source, /固定节奏处理下一批客户/);
+  assert.doesNotMatch(source, /固定的每小时/);
+  assert.doesNotMatch(source, /每小时处理下一批/);
   assert.doesNotMatch(source, /name="intervalMinutes"/);
   assert.doesNotMatch(source, /name="batchSize"/);
   assert.doesNotMatch(source, /JSON\.stringify\s*\(/);
