@@ -1547,62 +1547,115 @@ export function createInvoiceRepository(db, {
     return { expense, invoice };
   }
 
+  function acceptCandidateRecord(current, { owner, actor, timestamp }) {
+    if (current.status !== "suggested") {
+      throw new InvoiceMatchConflictError("CANDIDATE_NOT_SUGGESTED", "Invoice match candidate is not active");
+    }
+    const context = candidateAcceptanceContext(current, owner);
+    if (!context) {
+      throw new InvoiceMatchConflictError(
+        "CANDIDATE_STALE",
+        "Invoice match candidate no longer matches the current invoice and expense facts",
+      );
+    }
+    const { expense, invoice } = context;
+    const match = createConfirmedMatch({
+      owner,
+      actor,
+      invoiceId: current.invoice_id,
+      expectedInvoiceVersion: Number(invoice.version),
+      expenseReferenceCode: expense.reference_code,
+      paymentId: current.payment_id,
+      allocatedCents: Number(current.proposed_cents),
+      matchMethod: "rule_candidate",
+    });
+    const updated = db.prepare(`
+      UPDATE invoice_match_candidates
+      SET status = 'accepted', accepted_match_id = $matchId,
+          decided_by = $actor, decided_at = $now,
+          updated_at = $now, version = version + 1
+      WHERE id = $id AND owner = $owner
+        AND version = $expectedVersion AND status = 'suggested'
+    `).run({
+      $id: current.id,
+      $owner: owner,
+      $expectedVersion: Number(current.version),
+      $matchId: match.id,
+      $actor: actor,
+      $now: timestamp,
+    });
+    if (updated.changes !== 1) candidateCurrentOrFailure(current.id, owner, Number(current.version));
+    db.prepare(`
+      UPDATE invoice_match_candidates
+      SET status = 'expired', updated_at = $now, version = version + 1
+      WHERE owner = $owner AND invoice_id = $invoiceId
+        AND id <> $id AND status = 'suggested'
+    `).run({ $owner: owner, $invoiceId: current.invoice_id, $id: current.id, $now: timestamp });
+    return {
+      candidate: candidateFromRow(db.prepare(`
+        SELECT * FROM invoice_match_candidates WHERE id = $id AND owner = $owner
+      `).get({ $id: current.id, $owner: owner })),
+      match,
+    };
+  }
+
   function acceptMatchCandidate(idValue, input = {}) {
     const id = requiredText(idValue, "id", 200);
     const { owner, actor } = ownerAndActor(input);
     const expectedVersion = positiveVersion(input.expectedVersion);
     const timestamp = nowIso(clock);
-    return runTransaction(db, () => {
-      const current = candidateCurrentOrFailure(id, owner, expectedVersion);
-      if (current.status !== "suggested") {
-        throw new InvoiceMatchConflictError("CANDIDATE_NOT_SUGGESTED", "Invoice match candidate is not active");
+    return runTransaction(db, () => acceptCandidateRecord(
+      candidateCurrentOrFailure(id, owner, expectedVersion),
+      { owner, actor, timestamp },
+    ));
+  }
+
+  function acceptMatchCandidatesForWeek(input = {}) {
+    const { owner, actor } = ownerAndActor(input);
+    const weekStart = mondayDate(input.weekStart);
+    if (!Array.isArray(input.candidates) || input.candidates.length < 1 || input.candidates.length > 500) {
+      throw new TypeError("candidates must contain between 1 and 500 invoice candidate references");
+    }
+    const candidates = input.candidates.map((candidate, index) => {
+      if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) {
+        throw new TypeError(`candidates[${index}] must be an object`);
       }
-      const context = candidateAcceptanceContext(current, owner);
-      if (!context) {
+      if (Object.keys(candidate).some((key) => key !== "id" && key !== "version")) {
+        throw new TypeError(`candidates[${index}] contains an unsupported field`);
+      }
+      return {
+        id: requiredText(candidate.id, `candidates[${index}].id`, 200),
+        version: positiveVersion(candidate.version),
+      };
+    });
+    if (new Set(candidates.map((candidate) => candidate.id)).size !== candidates.length) {
+      throw new TypeError("candidates must not contain duplicate ids");
+    }
+    const timestamp = nowIso(clock);
+    return runTransaction(db, () => {
+      const active = db.prepare(`
+        SELECT id, invoice_id FROM invoice_match_candidates
+        WHERE owner = $owner AND week_start = $weekStart AND status = 'suggested'
+        ORDER BY id
+      `).all({ $owner: owner, $weekStart: weekStart });
+      const requestedIds = candidates.map((candidate) => candidate.id).sort();
+      const activeIds = active.map((candidate) => candidate.id);
+      if (requestedIds.length !== activeIds.length || requestedIds.some((id, index) => id !== activeIds[index])) {
         throw new InvoiceMatchConflictError(
-          "CANDIDATE_STALE",
-          "Invoice match candidate no longer matches the current invoice and expense facts",
+          "CANDIDATE_SET_CHANGED",
+          "Weekly invoice suggestions changed; reload and review the complete set before accepting",
         );
       }
-      const { expense, invoice } = context;
-      const match = createConfirmedMatch({
-        owner,
-        actor,
-        invoiceId: current.invoice_id,
-        expectedInvoiceVersion: Number(invoice.version),
-        expenseReferenceCode: expense.reference_code,
-        paymentId: current.payment_id,
-        allocatedCents: Number(current.proposed_cents),
-        matchMethod: "rule_candidate",
-      });
-      const updated = db.prepare(`
-        UPDATE invoice_match_candidates
-        SET status = 'accepted', accepted_match_id = $matchId,
-            decided_by = $actor, decided_at = $now,
-            updated_at = $now, version = version + 1
-        WHERE id = $id AND owner = $owner
-          AND version = $expectedVersion AND status = 'suggested'
-      `).run({
-        $id: id,
-        $owner: owner,
-        $expectedVersion: expectedVersion,
-        $matchId: match.id,
-        $actor: actor,
-        $now: timestamp,
-      });
-      if (updated.changes !== 1) candidateCurrentOrFailure(id, owner, expectedVersion);
-      db.prepare(`
-        UPDATE invoice_match_candidates
-        SET status = 'expired', updated_at = $now, version = version + 1
-        WHERE owner = $owner AND invoice_id = $invoiceId
-          AND id <> $id AND status = 'suggested'
-      `).run({ $owner: owner, $invoiceId: current.invoice_id, $id: id, $now: timestamp });
-      return {
-        candidate: candidateFromRow(db.prepare(`
-          SELECT * FROM invoice_match_candidates WHERE id = $id AND owner = $owner
-        `).get({ $id: id, $owner: owner })),
-        match,
-      };
+      if (new Set(active.map((candidate) => candidate.invoice_id)).size !== active.length) {
+        throw new InvoiceMatchConflictError(
+          "CANDIDATE_SET_INVALID",
+          "Weekly invoice suggestions contain a duplicate invoice",
+        );
+      }
+      return candidates.map(({ id, version }) => acceptCandidateRecord(
+        candidateCurrentOrFailure(id, owner, version),
+        { owner, actor, timestamp },
+      ));
     });
   }
 
@@ -1658,6 +1711,7 @@ export function createInvoiceRepository(db, {
 
   return {
     acceptMatchCandidate,
+    acceptMatchCandidatesForWeek,
     confirmNoInvoice,
     createConfirmedMatch,
     createInvoice,

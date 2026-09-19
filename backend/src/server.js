@@ -835,6 +835,26 @@ function validateNoInvoiceRevokePayload(value) {
   return { confirmationId: payloadText(body.confirmationId, "confirmationId", { max: 200 }) };
 }
 
+function validateInvoiceCandidateBatchPayload(value) {
+  const body = plainObject(value);
+  allowedPayloadKeys(body, new Set(["candidates"]));
+  if (!Array.isArray(body.candidates) || body.candidates.length < 1 || body.candidates.length > 500) {
+    validationFailure("candidates", "a non-empty array of at most 500 candidate references");
+  }
+  const candidates = body.candidates.map((candidate, index) => {
+    const item = plainObject(candidate);
+    allowedPayloadKeys(item, new Set(["id", "version"]));
+    return {
+      id: payloadText(item.id, `candidates[${index}].id`, { max: 200 }),
+      version: payloadPositiveCents(item.version, `candidates[${index}].version`),
+    };
+  });
+  if (new Set(candidates.map((candidate) => candidate.id)).size !== candidates.length) {
+    validationFailure("candidates", "unique candidate ids");
+  }
+  return { candidates };
+}
+
 function optionalQueryBoolean(value, field) {
   if (value === null || value === undefined || value === "") return undefined;
   if (value === "true") return true;
@@ -5329,6 +5349,77 @@ export function createServer(options = {}) {
           batchId: parts[2],
         });
         sendJson(response, 200, { item }, { "Cache-Control": "no-store" });
+        return;
+      }
+
+      if (
+        request.method === "POST"
+        && parts.length === 5
+        && parts[0] === "api"
+        && parts[1] === "travel-expense-weeks"
+        && parts[2]
+        && parts[3] === "invoice-suggestions"
+        && parts[4] === "accept"
+      ) {
+        const { candidates } = validateInvoiceCandidateBatchPayload(await readJson(request));
+        const weekStart = parts[2];
+        const idempotencyScope = {
+          actor: request.authContext.account,
+          method: request.method,
+          path: url.pathname,
+          key: parseIdempotencyKey(request),
+          hash: requestHash({ weekStart, candidates }),
+        };
+        const result = withImmediateTransaction(db, () => {
+          const claim = claimIdempotency(db, idempotencyScope);
+          if (claim.replay) return { status: claim.status, body: claim.body };
+
+          let accepted;
+          try {
+            accepted = invoiceRepository.acceptMatchCandidatesForWeek({
+              owner: request.authContext.account,
+              actor: request.authContext.account,
+              weekStart,
+              candidates,
+            });
+          } catch (error) {
+            invoiceRepositoryFailure(error);
+          }
+          for (const resultItem of accepted) {
+            insertAudit(db, {
+              action: "invoice.candidate_accept",
+              entityType: "invoice_match_candidate",
+              entityId: resultItem.candidate.id,
+              actor: request.authContext.account,
+              requestId,
+              before: { status: "suggested", version: candidates.find((item) => item.id === resultItem.candidate.id)?.version },
+              after: {
+                status: resultItem.candidate.status,
+                version: resultItem.candidate.version,
+                acceptedMatchId: resultItem.match.id,
+              },
+              entityVersion: resultItem.candidate.version,
+              metadata: {
+                weekStart,
+                invoiceId: resultItem.candidate.invoiceId,
+                expenseId: resultItem.candidate.expenseId,
+                proposedCents: resultItem.candidate.proposedCents,
+                batch: true,
+              },
+            });
+          }
+          const responseBody = {
+            items: accepted.map(({ candidate, match }) => ({ item: candidate, match })),
+          };
+          completeIdempotency(db, {
+            ...idempotencyScope,
+            claimToken: claim.claimToken,
+            status: 201,
+            body: responseBody,
+          });
+          return { status: 201, body: responseBody };
+        });
+        sendJson(response, result.status, result.body);
         return;
       }
 

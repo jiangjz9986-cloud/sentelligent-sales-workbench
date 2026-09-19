@@ -2137,6 +2137,33 @@ export function createSalesWorkbenchApi({ baseUrl, fetchImpl = fetch, onUnauthor
       return apiItems(response?.items, "invoiceCandidates.items", assertInvoiceCandidate);
     },
 
+    async acceptInvoiceCandidatesForWeek(weekStart, candidates, options = {}) {
+      if (!Array.isArray(candidates) || candidates.length < 1 || candidates.length > 500) {
+        throw new TypeError("invoice candidates: expected between 1 and 500 candidate references");
+      }
+      const references = candidates.map((candidate, index) => {
+        const item = apiObject(candidate, `invoiceCandidates[${index}]`);
+        requiredApiString(item.id, `invoiceCandidates[${index}].id`);
+        requiredApiVersion(item.version, `invoiceCandidates[${index}].version`);
+        return { id: item.id, version: item.version };
+      });
+      const response = await requestApi(
+        `/api/travel-expense-weeks/${encodeURIComponent(weekStart)}/invoice-suggestions/accept`,
+        {
+          method: "POST",
+          headers: idempotencyHeaders(options, "weekly invoice candidate acceptance"),
+          body: JSON.stringify({ candidates: references }),
+        },
+      );
+      return apiItems(response?.items, "weeklyInvoiceCandidates.items", (value, path) => {
+        const result = apiObject(value, path);
+        return {
+          item: assertInvoiceCandidate(result.item, `${path}.item`),
+          match: assertInvoiceMatch(result.match, `${path}.match`),
+        };
+      });
+    },
+
     async acceptInvoiceCandidate(candidateId, expectedVersion, options = {}) {
       const response = await requestApi(`/api/invoice-match-candidates/${encodeURIComponent(candidateId)}/accept`, {
         method: "POST",
