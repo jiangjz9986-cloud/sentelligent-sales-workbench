@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -20,6 +20,15 @@ const appRoot = process.cwd();
 const workspaceRoot = resolve(appRoot, "../..");
 const backendDir = resolve(workspaceRoot, "backend");
 const chromePath = findChrome();
+const expenseQaWeekStart = getCurrentWeekRange().periodStart;
+const expenseQaDate = new Date(`${expenseQaWeekStart}T12:00:00Z`);
+expenseQaDate.setUTCDate(expenseQaDate.getUTCDate() + 1);
+const expenseQaOccurredOn = expenseQaDate.toISOString().slice(0, 10);
+const [, expenseQaMonth, expenseQaDay] = expenseQaOccurredOn.match(/^\d{4}-(\d{2})-(\d{2})$/);
+const expenseQaPurpose = `${Number(expenseQaMonth)}.${Number(expenseQaDay)} 济宁出差午餐`;
+const expenseProofFixtureBase64 = readFileSync(
+  new URL("./fixtures/payment-proof-design-qa.png", import.meta.url),
+).toString("base64");
 
 const desktopRecord =
   "周三现场拜访日照中医医院，和主任及主管工程师梁斌讨论未来 3-5 年规划。客户希望补齐本地数据中心基础架构健壮度，未来将移动云作为灾备中心。客户反馈移动云资源计费、平台封闭、数据导出配合度和后台管理权都存在问题。需要输出十五五年度规划材料，并判断是否同步到商机档案和周报。";
@@ -184,12 +193,12 @@ async function waitForHttp(url, timeoutMs = 20000) {
   throw new Error(`Timed out waiting for ${url}: ${lastError?.message ?? "no response"}`);
 }
 
-async function stopProcessTree(child) {
+async function stopProcessTree(child, dependencies = {}) {
   if (!child?.pid) return { status: "not_running", pid: null };
   if (process.platform === "win32") {
     return stopOwnedWindowsProcess(child.runtimeProcess ?? { pid: child.pid });
   }
-  return stopOwnedPosixChildProcess(child);
+  return stopOwnedPosixChildProcess(child, dependencies);
 }
 
 async function assertOwnedWslListener(port, { backendWslPath, databaseUrl }, { terminate = false } = {}) {
@@ -547,13 +556,17 @@ async function openChromeCdp() {
       ...cdp,
       async close() {
         const cleanupErrors = [];
+        await Promise.race([
+          cdp.send("Browser.close").catch(() => undefined),
+          delay(750),
+        ]);
         try {
           cdp.ws.close();
         } catch (error) {
           cleanupErrors.push(error);
         }
         try {
-          const stopResult = await stopProcessTree(chrome);
+          const stopResult = await stopProcessTree(chrome, { timeoutMs: 8000 });
           if (!["terminated", "already_closed", "not_running"].includes(stopResult.status)) {
             cleanupErrors.push(new Error(`Refused unverified browser cleanup for PID ${chrome.pid}: ${stopResult.status}`));
           }
@@ -573,7 +586,7 @@ async function openChromeCdp() {
     const cleanupErrors = [error];
     if (chrome) {
       try {
-        const stopResult = await stopProcessTree(chrome);
+        const stopResult = await stopProcessTree(chrome, { timeoutMs: 8000 });
         if (!["terminated", "already_closed", "not_running"].includes(stopResult.status)) {
           cleanupErrors.push(new Error(`Refused unverified browser cleanup for PID ${chrome.pid}: ${stopResult.status}`));
         }
@@ -598,16 +611,97 @@ async function evaluate(cdp, expression) {
     returnByValue: true,
   });
   if (result.exceptionDetails) {
-    throw new Error(
-      result.exceptionDetails.exception?.description ??
-      result.exceptionDetails.text ??
-      "Browser evaluation failed",
-    );
+    const details = result.exceptionDetails;
+    const frames = details.stackTrace?.callFrames?.slice(0, 5).map((frame) => {
+      const location = `${frame.url || "<eval>"}:${frame.lineNumber + 1}:${frame.columnNumber + 1}`;
+      return `${frame.functionName || "<anonymous>"} (${location})`;
+    }).join(" <- ");
+    const message = details.exception?.description ?? details.text ?? "Browser evaluation failed";
+    throw new Error([message, frames].filter(Boolean).join("\n"));
   }
   return result.result.value;
 }
 
-async function runViewport(cdp, url, viewport, historicalSolution, historicalItinerary, realItineraryFlow) {
+async function captureExpenseDesignScreenshots(cdp, isFlowRunning, viewport) {
+  const captures = [
+    { stage: "detail", name: "detail" },
+    { stage: "edit", name: "edit" },
+  ];
+  let captureError = null;
+
+  for (const capture of captures) {
+    const started = Date.now();
+    let stageReady = false;
+    while (isFlowRunning() && Date.now() - started < 20000) {
+      if (await evaluate(cdp, "window.__qaExpenseVisualCaptureStage ?? null") === capture.stage) {
+        stageReady = true;
+        break;
+      }
+      await delay(40);
+    }
+    if (!stageReady) return false;
+
+    try {
+      await cdp.send("Emulation.setDeviceMetricsOverride", {
+        width: 1800,
+        height: 1120,
+        deviceScaleFactor: 1,
+        mobile: false,
+      });
+      await evaluate(cdp, `document.querySelectorAll('[data-testid="toast-close"]').forEach((button) => button.click())`);
+      await delay(180);
+      const bounds = await evaluate(cdp, `(() => {
+        const element = document.querySelector('.expense-drawer[role="dialog"]');
+        if (!element) return null;
+        const rect = element.getBoundingClientRect();
+        return { x: rect.x, y: rect.y, width: rect.width, height: rect.height };
+      })()`);
+      if (!bounds || bounds.width <= 0 || bounds.height <= 0) {
+        throw new Error(`Expense ${capture.stage} drawer was not visible for screenshot capture`);
+      }
+      if (bounds.width !== 846 || bounds.height !== 792) {
+        throw new Error(`Expense ${capture.stage} drawer size differs from the approved mock: ${bounds.width}x${bounds.height}`);
+      }
+
+      const fullScreenshot = await cdp.send("Page.captureScreenshot", {
+        format: "png",
+        captureBeyondViewport: false,
+      });
+      writeFileSync(
+        `/tmp/sent-zx-expense-${capture.name}-desktop-1800x1120-full.png`,
+        Buffer.from(fullScreenshot.data, "base64"),
+      );
+      const cardScreenshot = await cdp.send("Page.captureScreenshot", {
+        format: "png",
+        captureBeyondViewport: false,
+        clip: { ...bounds, scale: 1 },
+      });
+      writeFileSync(
+        `/tmp/sent-zx-expense-${capture.name}-desktop-1800x1120-card.png`,
+        Buffer.from(cardScreenshot.data, "base64"),
+      );
+    } catch (error) {
+      captureError ??= error;
+    } finally {
+      try {
+        await cdp.send("Emulation.setDeviceMetricsOverride", {
+          width: viewport.width,
+          height: viewport.height,
+          deviceScaleFactor: 1,
+          mobile: viewport.mobile,
+        });
+        await evaluate(cdp, "window.__qaExpenseVisualCaptureResume?.()");
+      } catch (error) {
+        captureError ??= error;
+      }
+    }
+  }
+
+  if (captureError) throw captureError;
+  return true;
+}
+
+async function runViewport(cdp, url, backendUrl, viewport, historicalSolution, historicalItinerary, realItineraryFlow) {
   await cdp.send("Emulation.setDeviceMetricsOverride", {
     width: viewport.width,
     height: viewport.height,
@@ -617,10 +711,20 @@ async function runViewport(cdp, url, viewport, historicalSolution, historicalIti
   await cdp.send("Page.navigate", { url });
   await delay(1800);
 
-  return evaluate(cdp, `
+  let flowFinished = false;
+  const flowPromise = evaluate(cdp, `
     (async () => {
       const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
       const historicalSolution = ${JSON.stringify(historicalSolution)};
+      const paymentProofFixtureBase64 = ${JSON.stringify(expenseProofFixtureBase64)};
+      const captureExpenseState = async (stage) => {
+        window.__qaExpenseVisualCaptureStage = stage;
+        await new Promise((resolve) => {
+          window.__qaExpenseVisualCaptureResume = resolve;
+        });
+        window.__qaExpenseVisualCaptureStage = null;
+        window.__qaExpenseVisualCaptureResume = null;
+      };
       window.__qaRuntimeErrors = [];
       window.addEventListener('error', (event) => {
         window.__qaRuntimeErrors.push(event.error?.stack || event.message || 'window error');
@@ -1806,7 +1910,7 @@ async function runViewport(cdp, url, viewport, historicalSolution, historicalIti
         const expenseNav = document.querySelector('[data-testid="nav-expense"]');
         if (!expenseNav) throw new Error('Missing travel expense navigation');
         expenseNav.click();
-        const expensePage = await waitUntil(
+        let expensePage = await waitUntil(
           () => {
             const page = document.querySelector('[data-testid="page-expense"]');
             return page && !page.querySelector('[data-testid="route-chunk-loading"]') ? page : null;
@@ -1854,7 +1958,10 @@ async function runViewport(cdp, url, viewport, historicalSolution, historicalIti
         if (!openExpenseEditorButton) throw new Error('Missing travel expense create button');
         openExpenseEditorButton.click();
         const expenseEditor = await waitUntil(
-          () => document.querySelector('.expense-drawer[role="dialog"]'),
+          () => {
+            const dialog = document.querySelector('.expense-drawer[role="dialog"]');
+            return dialog?.dataset.mode === 'edit' ? dialog : null;
+          },
           3000,
         );
         const expenseEditorControls = [...expenseEditor.querySelectorAll('input, select, textarea')];
@@ -1882,56 +1989,224 @@ async function runViewport(cdp, url, viewport, historicalSolution, historicalIti
         const findExpenseLabeledControl = (labelText) => [...expenseEditor.querySelectorAll('label')]
           .find((label) => label.textContent?.includes(labelText))
           ?.querySelector('input, select, textarea');
-        setExpenseControlValue(findExpenseLabeledControl('费用事由'), 'Chrome详情卡验收');
+        setExpenseControlValue(findExpenseLabeledControl('费用事由'), ${JSON.stringify(expenseQaPurpose)});
+        setExpenseControlValue(findExpenseLabeledControl('备注'), ${JSON.stringify(expenseQaPurpose)});
         setExpenseControlValue(findExpenseLabeledControl('默认收款方'), '验收商户');
-        setExpenseControlValue(findExpenseLabeledControl('实付金额'), '188.00');
-        setExpenseControlValue(findExpenseLabeledControl('计入报销金额'), '188.00');
-        const saveExpenseButton = [...expenseEditor.querySelectorAll('button')]
-          .find((button) => button.textContent?.includes('保存费用'));
+        setExpenseControlValue(findExpenseLabeledControl('出差区域'), '济宁');
+        setExpenseControlValue(findExpenseLabeledControl('发生日期'), ${JSON.stringify(expenseQaOccurredOn)});
+        setExpenseControlValue(findExpenseLabeledControl('类别'), 'lunch');
+        setExpenseControlValue(findExpenseLabeledControl('付款金额'), '22.00');
+        setExpenseControlValue(findExpenseLabeledControl('计入报销金额'), '22.00');
+        setExpenseControlValue(
+          expenseEditor.querySelector('input[type="datetime-local"]'),
+          ${JSON.stringify(`${expenseQaOccurredOn}T12:41`)},
+        );
+        const initialInvoiceDefaultUnprovided = expenseEditor.querySelector('input[name="expense-invoice-status"][value="unprovided"]')?.checked === true
+          && expenseEditor.querySelectorAll('input[name="expense-invoice-status"]:checked').length === 1;
+        const createInvoiceSelectionExclusive = initialInvoiceDefaultUnprovided;
+        const saveExpenseButton = expenseEditor.querySelector('[data-expense-save]');
         if (!saveExpenseButton) throw new Error('Missing travel expense save button');
         saveExpenseButton.click();
-        await waitUntil(() => !document.querySelector('.expense-drawer[role="dialog"]'), 10000);
+        const savedCreateDetail = await waitUntil(
+          () => {
+            const dialog = document.querySelector('.expense-drawer[role="dialog"]');
+            return dialog?.dataset.mode === 'detail' && dialog.textContent?.includes(${JSON.stringify(expenseQaPurpose)})
+              ? dialog
+              : null;
+          },
+          10000,
+        );
+        const savedDetailStaysOpen = Boolean(savedCreateDetail);
+        const createdExpenseReference = savedCreateDetail.querySelector('.expense-drawer-meta code')?.textContent?.trim();
+        if (!createdExpenseReference) throw new Error('Created travel expense is missing its reference code');
+        const expenseSessionResponse = await fetch(
+          ${JSON.stringify(`${backendUrl}/api/auth/session`)},
+          { credentials: 'include' },
+        );
+        if (!expenseSessionResponse.ok) throw new Error('Travel expense QA session returned ' + expenseSessionResponse.status);
+        const expenseSession = await expenseSessionResponse.json();
+        const expenseCollectionResponse = await fetch(
+          ${JSON.stringify(`${backendUrl}/api/travel-expenses`)} + '?weekStart=' + encodeURIComponent(${JSON.stringify(expenseQaWeekStart)}),
+          { credentials: 'include' },
+        );
+        if (!expenseCollectionResponse.ok) throw new Error('Travel expense QA list returned ' + expenseCollectionResponse.status);
+        const expenseCollection = await expenseCollectionResponse.json();
+        const createdExpense = expenseCollection.items?.find((item) => item.referenceCode === createdExpenseReference);
+        if (!createdExpense?.payments?.[0]?.id) throw new Error('Created travel expense QA row was not returned by the API');
+        const addProofResponse = await fetch(
+          ${JSON.stringify(`${backendUrl}/api/travel-expenses/`)} + encodeURIComponent(createdExpense.id) + '/attachments',
+          {
+            method: 'POST',
+            credentials: 'include',
+            headers: {
+              'Content-Type': 'application/json',
+              'X-CSRF-Token': expenseSession.csrfToken,
+              'If-Match': '"' + createdExpense.version + '"',
+            },
+            body: JSON.stringify({
+              paymentIds: [createdExpense.payments[0].id],
+              kind: 'payment_proof',
+              fileName: 'qa-payment-proof.png',
+              mediaType: 'image/png',
+              contentBase64: ${JSON.stringify(expenseProofFixtureBase64)},
+              coveredCents: 2200,
+            }),
+          },
+        );
+        if (!addProofResponse.ok) {
+          throw new Error('Travel expense QA proof upload returned ' + addProofResponse.status + ': ' + await addProofResponse.text());
+        }
+        savedCreateDetail.querySelector('[aria-label="关闭记账卡片"]')?.click();
+        await waitUntil(() => !document.querySelector('.expense-drawer[role="dialog"]'), 3000);
+        [...document.querySelectorAll('.nav-item')]
+          .find((button) => button.textContent.includes('快速记录'))
+          ?.click();
+        await waitUntil(() => document.querySelector('[data-testid="page-quick"]'), 5000);
+        document.querySelector('[data-testid="nav-expense"]')?.click();
+        expensePage = await waitUntil(
+          () => {
+            const page = document.querySelector('[data-testid="page-expense"]');
+            return page && !page.querySelector('[data-testid="route-chunk-loading"]') ? page : null;
+          },
+          15000,
+        );
+        await waitUntil(() => !expensePage.querySelector('.expense-loading'), 10000);
+        const qaExpenseDayTab = [...expensePage.querySelectorAll('.ledger-workbench-days [role="tab"]')]
+          .find((tab) => tab.querySelector('time')?.dateTime === ${JSON.stringify(expenseQaOccurredOn)});
+        if (!qaExpenseDayTab) throw new Error('Travel expense QA date tab was not found');
+        qaExpenseDayTab.click();
+        await waitUntil(() => qaExpenseDayTab.getAttribute('aria-selected') === 'true', 3000);
+        const qaRecordDateSelected = qaExpenseDayTab.getAttribute('aria-selected') === 'true';
         const expenseRowAction = await waitUntil(
           () => document.querySelector('[data-ledger-primary-action]'),
           10000,
         );
         expenseRowAction.click();
-        const expenseDetail = await waitUntil(
-          () => document.querySelector('.expense-detail-card[role="dialog"]'),
+        const expenseDrawerFromRow = await waitUntil(
+          () => {
+            const dialog = document.querySelector('.expense-drawer[role="dialog"]');
+            return dialog?.dataset.mode === 'detail' ? dialog : null;
+          },
           5000,
         );
-        const expenseDetailText = expenseDetail.textContent ?? '';
-        const detailCardComplete = [
+        const expenseDrawerText = expenseDrawerFromRow.textContent ?? '';
+        const unifiedDrawerComplete = [
           '记账详情',
           '费用信息',
-          '详情内容',
           '支付时间',
           '出差区域',
-          '付款凭证和发票',
+          '付款凭证与发票',
           '发票状态',
-          'Chrome详情卡验收',
-          '¥188.00',
-        ].every((text) => expenseDetailText.includes(text));
+          ${JSON.stringify(expenseQaPurpose)},
+          '济宁',
+          '¥22.00',
+        ].every((text) => expenseDrawerText.includes(text));
+        const detailInvoiceUnprovided = expenseDrawerFromRow.querySelector('.expense-invoice-current')?.dataset.invoiceStatus === 'unprovided';
+        const detailProofCountVisible = expenseDrawerFromRow.querySelector('.expense-evidence-section .expense-evidence-heading')?.textContent?.includes('1张') === true;
+        const detailReadOnly = expenseDrawerFromRow.querySelectorAll('input:not([type="file"]), select, textarea').length === 0
+          && expenseDrawerFromRow.querySelectorAll('input[name="expense-invoice-status"]').length === 0;
         const proofListRemovedFromDetailParent = !expensePage.querySelector('.expense-ledger-child-card .expense-proof-list');
-        const detailScroller = expenseDetail.querySelector('.expense-detail-scroll');
-        const detailScrollWorks = Boolean(detailScroller)
-          && detailScroller.scrollHeight >= detailScroller.clientHeight;
-        const editDetailButton = [...expenseDetail.querySelectorAll('button')]
-          .find((button) => button.textContent?.includes('编辑记账'));
-        if (!editDetailButton) throw new Error('Missing expense detail edit button');
-        editDetailButton.click();
-        const detailEditor = await waitUntil(
-          () => document.querySelector('.expense-drawer[role="dialog"]'),
+        const onlyOneExpenseDialog = document.querySelectorAll('.expense-drawer[role="dialog"]').length === 1
+          && !document.querySelector('.expense-detail-card[role="dialog"]');
+
+        const paymentProofImage = await waitUntil(
+          () => {
+            const image = expenseDrawerFromRow.querySelector('.expense-evidence-preview img');
+            return image?.complete && image.naturalWidth > 0 ? image : null;
+          },
+          5000,
+        );
+        const paymentProofLoaded = Boolean(paymentProofImage)
+          && paymentProofImage.naturalWidth === 430
+          && paymentProofImage.naturalHeight === 150;
+        await captureExpenseState('detail');
+
+        const openExpenseEditButton = expenseDrawerFromRow.querySelector('[data-expense-edit]');
+        if (!openExpenseEditButton) throw new Error('Missing expense detail edit button');
+        openExpenseEditButton.click();
+        const expenseEditDrawer = await waitUntil(
+          () => {
+            const dialog = document.querySelector('.expense-drawer[role="dialog"]');
+            return dialog?.dataset.mode === 'edit' ? dialog : null;
+          },
+          5000,
+        );
+        const editInvoiceInput = expenseEditDrawer.querySelector('input[name="expense-invoice-status"][value="unprovided"]');
+        const editStartsWithPersistedInvoice = editInvoiceInput?.checked === true;
+        const editProofReplacementHint = expenseEditDrawer.querySelector('.expense-evidence-section .expense-evidence-heading')?.textContent?.includes('双击图片替换') === true;
+        const expenseSaveLabelMatchesDesign = expenseEditDrawer.querySelector('[data-expense-save]')?.textContent?.trim() === '保存';
+        const editorScroller = expenseEditDrawer.querySelector('.expense-editor-form');
+        const advancedExpenseFields = expenseEditDrawer.querySelector('.expense-advanced-details');
+        if (advancedExpenseFields) advancedExpenseFields.open = true;
+        await new Promise((resolve) => setTimeout(resolve, 60));
+        const editorScrollWorks = Boolean(editorScroller && advancedExpenseFields?.open)
+          && getComputedStyle(editorScroller).overflowY === 'auto'
+          && editorScroller.scrollHeight > editorScroller.clientHeight;
+        if (advancedExpenseFields) advancedExpenseFields.open = false;
+        if (editorScroller) editorScroller.scrollTop = 0;
+        await captureExpenseState('edit');
+
+        setExpenseControlValue(
+          [...expenseEditDrawer.querySelectorAll('label')]
+            .find((label) => label.textContent?.includes('出差区域'))
+            ?.querySelector('input'),
+          '济南',
+        );
+        expenseEditDrawer.querySelector('input[name="expense-invoice-status"][value="paper"]')?.click();
+        const invoiceSelectionExclusive = createInvoiceSelectionExclusive
+          && expenseEditDrawer.querySelectorAll('input[name="expense-invoice-status"]:checked').length === 1
+          && expenseEditDrawer.querySelector('input[name="expense-invoice-status"]:checked')?.value === 'paper';
+        const saveEditedExpenseButton = expenseEditDrawer.querySelector('[data-expense-save]');
+        if (!saveEditedExpenseButton) throw new Error('Missing edited travel expense save button');
+        saveEditedExpenseButton.click();
+        const savedEditDetail = await waitUntil(
+          () => {
+            const dialog = document.querySelector('.expense-drawer[role="dialog"]');
+            return dialog?.dataset.mode === 'detail'
+              && dialog.textContent?.includes('济南')
+              && dialog.querySelector('.expense-invoice-current')?.dataset.invoiceStatus === 'paper'
+              ? dialog
+              : null;
+          },
+          10000,
+        );
+        savedEditDetail.querySelector('[data-expense-edit]')?.click();
+        const reopenedExpenseEdit = await waitUntil(
+          () => {
+            const dialog = document.querySelector('.expense-drawer[role="dialog"]');
+            return dialog?.dataset.mode === 'edit' ? dialog : null;
+          },
+          5000,
+        );
+        const invoiceTypePersisted = reopenedExpenseEdit.querySelector('input[name="expense-invoice-status"]:checked')?.value === 'paper';
+        const regionPersisted = [...reopenedExpenseEdit.querySelectorAll('label')]
+          .find((label) => label.textContent?.includes('出差区域'))
+          ?.querySelector('input')?.value === '济南';
+        const cancelEditButton = [...reopenedExpenseEdit.querySelectorAll('.expense-editor-form button')]
+          .find((button) => button.textContent?.trim() === '取消');
+        if (!cancelEditButton) throw new Error('Missing expense edit cancel button');
+        cancelEditButton.click();
+        const editCancelRestoresDetails = await waitUntil(
+          () => {
+            const dialog = document.querySelector('.expense-drawer[role="dialog"]');
+            return dialog?.dataset.mode === 'detail' && dialog.textContent?.includes('济南') ? true : null;
+          },
+          5000,
+        );
+        document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+        await waitUntil(() => !document.querySelector('.expense-drawer[role="dialog"]'), 3000);
+        [...expensePage.querySelectorAll('button')]
+          .find((button) => button.textContent.includes('记一笔'))
+          ?.click();
+        const secondCreateEditor = await waitUntil(
+          () => {
+            const dialog = document.querySelector('.expense-drawer[role="dialog"]');
+            return dialog?.dataset.mode === 'edit' ? dialog : null;
+          },
           3000,
         );
-        const closeDetailEditorButton = [...detailEditor.querySelectorAll('button')]
-          .find((button) => button.getAttribute('aria-label') === '关闭费用录入');
-        if (!closeDetailEditorButton) throw new Error('Missing expense detail editor close button');
-        closeDetailEditorButton.click();
+        secondCreateEditor.querySelector('.expense-editor-form footer .ghost-button')?.click();
         await waitUntil(() => !document.querySelector('.expense-drawer[role="dialog"]'), 3000);
-        await waitUntil(() => document.querySelector('.expense-detail-card[role="dialog"]'), 3000);
-        document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
-        await waitUntil(() => !document.querySelector('.expense-detail-card[role="dialog"]'), 3000);
         window.__qaExpense = {
           pageOpened: Boolean(expensePage),
           loadedWithoutAlert: !expensePage.querySelector('.expense-loading')
@@ -1947,16 +2222,31 @@ async function runViewport(cdp, url, viewport, historicalSolution, historicalIti
           proofListRemovedFromLedger,
           legacyExportAbsent,
           reimbursementActionsPresent,
+          qaRecordDateSelected,
           regionSettingsOpened: Boolean(regionDialog),
           regionSettingsClosed: !document.querySelector('[data-testid="trip-region-settings-layer"]'),
           editorOpened: Boolean(expenseEditor),
           editorControlCount: expenseEditorControls.length,
           editorLabelsComplete: expenseEditorLabelsComplete,
           editorClosed: !document.querySelector('.expense-drawer[role="dialog"]'),
-          detailCardComplete,
-          detailScrollWorks,
+          savedDetailStaysOpen,
+          unifiedDrawerComplete,
+          detailReadOnly,
+          detailInvoiceUnprovided,
+          detailProofCountVisible,
+          invoiceSelectionExclusive,
+          invoiceTypePersisted,
+          editStartsWithPersistedInvoice,
+          initialInvoiceDefaultUnprovided,
+          editProofReplacementHint,
+          expenseSaveLabelMatchesDesign,
+          regionPersisted,
+          editCancelRestoresDetails: Boolean(editCancelRestoresDetails),
+          editorScrollWorks,
+          onlyOneExpenseDialog,
+          paymentProofLoaded,
           proofListRemovedFromDetailParent,
-          detailClosedWithEscape: !document.querySelector('.expense-detail-card[role="dialog"]'),
+          editorClosedWithEscape: !document.querySelector('.expense-drawer[role="dialog"]'),
         };
 
         [...document.querySelectorAll('.nav-item')].find((button) => button.textContent.includes('快速记录'))?.click();
@@ -2098,6 +2388,27 @@ async function runViewport(cdp, url, viewport, historicalSolution, historicalIti
       };
     })()
   `);
+  const completedFlowPromise = flowPromise.then(
+    (result) => {
+      flowFinished = true;
+      return result;
+    },
+    (error) => {
+      flowFinished = true;
+      throw error;
+    },
+  );
+  if (!viewport.fullFlow) return completedFlowPromise;
+
+  const screenshotPromise = captureExpenseDesignScreenshots(cdp, () => !flowFinished, viewport);
+  try {
+    const [result, screenshotsCaptured] = await Promise.all([completedFlowPromise, screenshotPromise]);
+    if (!screenshotsCaptured) throw new Error("Expense design screenshot stages were not reached in Chrome");
+    return result;
+  } catch (error) {
+    await Promise.allSettled([completedFlowPromise, screenshotPromise]);
+    throw error;
+  }
 }
 
 async function inspectSalesDecisionViewport(cdp, frontendUrl, viewport) {
@@ -2702,6 +3013,7 @@ async function main() {
       viewportResults.push(await runViewport(
         cdp,
         frontendUrl,
+        backendUrl,
         viewport,
         historicalSolution,
         historicalItinerary,
@@ -3154,6 +3466,7 @@ async function main() {
         assert.equal(result.expenseFlow.tabsPresent, true, "desktop travel expense page should expose exactly the expected reimbursement tabs");
         assert.equal(result.expenseFlow.naturalWeekInput, true, "desktop travel expense page should use a populated natural-week input");
         assert.equal(result.expenseFlow.ledgerOpened, true, "desktop travel expense page should open the scheme-three ledger workspace by default");
+        assert.equal(result.expenseFlow.qaRecordDateSelected, true, "desktop travel expense QA should select the day containing its synthetic record");
         assert.equal(result.expenseFlow.ledgerChildFunctionsPresent, true, "desktop ledger should retain received advances and show the WeChat proof inbox only when needed");
         assert.equal(result.expenseFlow.proofListRemovedFromLedger, true, "desktop ledger should not render a full payment-proof list below the table");
         assert.equal(result.expenseFlow.legacyExportAbsent, true, "desktop travel expense page must not expose a standalone reimbursement output tab");
@@ -3164,10 +3477,24 @@ async function main() {
         assert.ok(result.expenseFlow.editorControlCount > 0, "desktop travel expense editor should render form controls");
         assert.equal(result.expenseFlow.editorLabelsComplete, true, "desktop travel expense editor controls should all have readable labels");
         assert.equal(result.expenseFlow.editorClosed, true, "desktop travel expense editor should close without saving");
-        assert.equal(result.expenseFlow.detailCardComplete, true, "desktop expense row should open a complete detail card");
-        assert.equal(result.expenseFlow.detailScrollWorks, true, "desktop expense detail card should keep its internal content scrollable");
+        assert.equal(result.expenseFlow.savedDetailStaysOpen, true, "saving an expense should return to details in the same drawer");
+        assert.equal(result.expenseFlow.unifiedDrawerComplete, true, "desktop expense row should open complete read-only details in the unified drawer");
+        assert.equal(result.expenseFlow.detailReadOnly, true, "desktop expense details should remain read-only until edit is clicked");
+        assert.equal(result.expenseFlow.detailInvoiceUnprovided, true, "desktop expense detail should show the default unprovided invoice status");
+        assert.equal(result.expenseFlow.detailProofCountVisible, true, "desktop expense details should show the payment proof count in its heading");
+        assert.equal(result.expenseFlow.invoiceSelectionExclusive, true, "desktop expense invoice controls should remain exclusive radio options");
+        assert.equal(result.expenseFlow.invoiceTypePersisted, true, "desktop expense invoice selection should persist after saving and reopening");
+        assert.equal(result.expenseFlow.editStartsWithPersistedInvoice, true, "desktop expense edit should reflect the saved unprovided invoice status");
+        assert.equal(result.expenseFlow.initialInvoiceDefaultUnprovided, true, "desktop expense creation should default to unprovided invoice status");
+        assert.equal(result.expenseFlow.editProofReplacementHint, true, "desktop expense edit should show the double-click replacement hint");
+        assert.equal(result.expenseFlow.expenseSaveLabelMatchesDesign, true, "desktop expense save action should use the design label");
+        assert.equal(result.expenseFlow.regionPersisted, true, "desktop expense edits should persist the trip region");
+        assert.equal(result.expenseFlow.editCancelRestoresDetails, true, "desktop expense edit cancellation should return to saved details");
+        assert.equal(result.expenseFlow.editorScrollWorks, true, "desktop expense drawer should keep its internal content scrollable");
+        assert.equal(result.expenseFlow.onlyOneExpenseDialog, true, "desktop expense row should open only one expense dialog");
+        assert.equal(result.expenseFlow.paymentProofLoaded, true, "desktop expense details should render the synthetic payment proof sharply");
         assert.equal(result.expenseFlow.proofListRemovedFromDetailParent, true, "desktop ledger should not keep a full proof list beneath the table");
-        assert.equal(result.expenseFlow.detailClosedWithEscape, true, "desktop expense detail card should close on Escape");
+        assert.equal(result.expenseFlow.editorClosedWithEscape, true, "desktop expense drawer should close on Escape");
         assert.match(result.weeklyDraftText, /本周重点进展/, "desktop flow should render a backend weekly draft");
         assert.equal(result.weeklyEditor.saved, true, "desktop weekly page should save edited weekly report content");
         assert.equal(result.weeklyEditor.ready, true, "desktop weekly page should mark weekly report as ready");
@@ -3382,6 +3709,11 @@ async function main() {
   } catch (error) {
     if (cdp?.consoleErrors?.length) {
       console.error(`Browser console errors before failure: ${cdp.consoleErrors.join("; ")}`);
+    }
+    const failedResponses = cdp?.networkResponses?.filter(({ status }) => status >= 400)
+      .map(({ method, url, status }) => ({ method, url, status })) ?? [];
+    if (failedResponses.length > 0) {
+      console.error(`Browser HTTP failures before failure: ${JSON.stringify(failedResponses.slice(-20))}`);
     }
     runError = error;
   } finally {

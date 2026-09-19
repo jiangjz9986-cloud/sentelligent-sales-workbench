@@ -9,7 +9,6 @@ import {
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { AdvanceSettlement } from "./AdvanceSettlement.jsx";
-import { ExpenseDetailCard } from "./ExpenseDetailCard.jsx";
 import { ExpenseEditorDrawer } from "./ExpenseEditorDrawer.jsx";
 import { ExpenseLedgerWorkbench } from "./ExpenseLedgerWorkbench.jsx";
 import { ExpenseListPrintPreview } from "./ExpenseListPrintPreview.jsx";
@@ -105,7 +104,6 @@ export function TravelExpensePage({
   const [reloadToken, setReloadToken] = useState(0);
   const [editorOpen, setEditorOpen] = useState(false);
   const [editingExpense, setEditingExpense] = useState(null);
-  const [detailExpenseId, setDetailExpenseId] = useState(null);
   const [draftPrefill, setDraftPrefill] = useState(null);
   const [saving, setSaving] = useState(false);
   const [pendingAttachmentId, setPendingAttachmentId] = useState(null);
@@ -348,10 +346,15 @@ export function TravelExpensePage({
     setActiveTab(tab);
   }
 
+  function openExpenseEditor(expense) {
+    setEditingExpense(expense);
+    setDraftPrefill(null);
+    setEditorOpen(true);
+  }
+
   function selectWeek(value) {
     setSelectedLedgerDate(null);
     setHighlightExpenseId(null);
-    setDetailExpenseId(null);
     setLocationAnnouncement("");
     setLocationFailure(null);
     pendingLedgerLocationRef.current = null;
@@ -389,11 +392,9 @@ export function TravelExpensePage({
         // Editing the occurrence date can move a persisted expense to another
         // natural week. Never merge that row into the currently loaded week:
         // navigate to its canonical week and reload the complete projection.
-        setDetailExpenseId(null);
         setWeek(savedWeek);
       }
-      setEditorOpen(false);
-      setEditingExpense(null);
+      setEditingExpense(saved);
       setDraftPrefill(null);
       setActiveTab("ledger");
       setSelectedLedgerDate(saved.occurredOn);
@@ -411,7 +412,6 @@ export function TravelExpensePage({
     try {
       await apiClient.deleteTravelExpense(expense.id, expense.version);
       setExpenses((current) => current.filter((item) => item.id !== expense.id));
-      setDetailExpenseId((current) => current === expense.id ? null : current);
     } catch (deleteError) {
       setError(expenseErrorMessage(deleteError, "费用删除失败，请稍后重试。"));
     }
@@ -473,8 +473,11 @@ export function TravelExpensePage({
     try {
       const updated = await apiClient.deleteTravelExpenseAttachment(attachment.id, expense.version);
       setExpenses((current) => mergeById(current, updated));
+      return updated;
     } catch (deleteError) {
-      setError(expenseErrorMessage(deleteError, "付款凭证删除失败，请稍后重试。"));
+      const message = expenseErrorMessage(deleteError, "付款凭证删除失败，请稍后重试。");
+      setError(message);
+      throw new Error(message);
     } finally {
       setPendingAttachmentId(null);
     }
@@ -646,9 +649,11 @@ export function TravelExpensePage({
   }
 
   const getAttachmentUrl = (attachmentId) => apiClient.getTravelExpenseAttachmentContentUrl(attachmentId);
-  const detailExpense = useMemo(
-    () => expenses.find((expense) => expense.id === detailExpenseId) ?? null,
-    [detailExpenseId, expenses],
+  const editorExpense = useMemo(
+    () => editingExpense
+      ? expenses.find((expense) => expense.id === editingExpense.id) ?? editingExpense
+      : null,
+    [editingExpense, expenses],
   );
   const printPreview = expenseListPrintOpen
     ? <ExpenseListPrintPreview expenses={expenses} week={week} owner={owner} matches={invoiceMatches} noInvoiceConfirmations={noInvoiceConfirmations} regionProfile={regionProfile} getAttachmentUrl={getAttachmentUrl} getAttachmentContentResponse={apiClient.getTravelExpenseAttachmentContentResponse} onClose={closeExpenseListPrint} />
@@ -730,7 +735,7 @@ export function TravelExpensePage({
               onSelectDate={setSelectedLedgerDate}
               onOpenItem={(item, projection) => {
                 if (projection.kind === "expense") {
-                  setDetailExpenseId(item.id);
+                  openExpenseEditor(item);
                   return;
                 }
                 document.getElementById("expense-ledger-advances")?.scrollIntoView({ behavior: "smooth", block: "start" });
@@ -738,7 +743,8 @@ export function TravelExpensePage({
               onDeleteItem={deleteExpense}
               onOpenProof={(expense, projection) => {
                 const expenseId = projection?.sourceId ?? expense?.id;
-                if (expenseId) setDetailExpenseId(expenseId);
+                const selectedExpense = expenses.find((item) => item.id === expenseId);
+                if (selectedExpense) openExpenseEditor(selectedExpense);
               }}
               onOpenRegionSettings={() => setRegionSettingsOpen(true)}
               getAttachmentContentResponse={apiClient.getTravelExpenseAttachmentContentResponse}
@@ -762,11 +768,15 @@ export function TravelExpensePage({
         </div>
       ) : null}
 
-      <ExpenseDetailCard
-        open={Boolean(detailExpense) && !editorOpen}
-        expense={detailExpense}
+      <ExpenseEditorDrawer
+        open={editorOpen}
+        expense={editorExpense}
+        week={week}
         itineraries={itineraries}
         customers={customers}
+        regionProfile={regionProfile}
+        prefill={draftPrefill}
+        pending={saving}
         matches={invoiceMatches}
         noInvoiceConfirmations={noInvoiceConfirmations}
         getAttachmentUrl={getAttachmentUrl}
@@ -774,13 +784,9 @@ export function TravelExpensePage({
         onReplace={replaceAttachment}
         onDelete={deleteAttachment}
         pendingAttachmentId={pendingAttachmentId}
-        onEdit={(expense) => {
-          setEditingExpense(expense);
-          setEditorOpen(true);
-        }}
-        onClose={() => setDetailExpenseId(null)}
+        onClose={() => { setEditorOpen(false); setEditingExpense(null); setDraftPrefill(null); }}
+        onSave={saveExpense}
       />
-      <ExpenseEditorDrawer open={editorOpen} expense={editingExpense} week={week} itineraries={itineraries} customers={customers} regionProfile={regionProfile} prefill={draftPrefill} pending={saving} onClose={() => { setEditorOpen(false); setEditingExpense(null); setDraftPrefill(null); }} onSave={saveExpense} />
       <TripRegionSettingsCard open={selectedWeekLoaded && regionSettingsOpen} profile={regionProfile} pending={regionSaving} onClose={() => setRegionSettingsOpen(false)} onSave={saveRegionProfile} />
       </section>
     </>

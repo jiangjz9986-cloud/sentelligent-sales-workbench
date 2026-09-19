@@ -90,7 +90,7 @@ describe("form accessibility", () => {
     assert.match(ledger, /className="expense-search"[\s\S]*?<span className="sr-only">搜索费用<\/span>[\s\S]*?<input/);
     assert.match(editor, /<label className="form-field">[\s\S]*?<input/);
     assert.match(editor, /<label className="form-field">[\s\S]*?<select/);
-    assert.match(editor, /<label className="form-field expense-span-2">[\s\S]*?<textarea/);
+    assert.match(editor, /<label\b[^>]*>\s*<span>备注<\/span>\s*<textarea/);
     assert.match(proofs, /className="expense-upload-tile"[\s\S]*?<input type="file"/);
     assert.match(proofs, /type="checkbox"[\s\S]*?aria-label=/);
     assert.match(invoices, /<label[\s\S]*?<input/);
