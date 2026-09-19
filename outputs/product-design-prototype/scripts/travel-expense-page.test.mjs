@@ -413,8 +413,11 @@ describe("travel expense feature boundary", () => {
     assert.match(proofCss, /@media \(max-width: 430px\)[\s\S]*?\.expense-proof-file\s*\{\s*grid-template-columns:\s*minmax\(0,\s*1fr\);/s);
     assert.match(proofCss, /\.expense-proof-file-preview > \.authenticated-image-frame\s*\{[\s\S]*?width:\s*100%;[\s\S]*?height:\s*100%;/s);
     assert.match(proofCss, /\.expense-proof-file-preview img\s*\{[\s\S]*?object-fit:\s*fill;/s);
-    assert.match(page, /<ExpenseDetailCard/);
-    assert.match(page, /setDetailExpenseId\(item\.id\)/);
+    assert.match(page, /<ExpenseEditorDrawer/);
+    assert.match(page, /openExpenseEditor\(item\)/);
+    assert.match(page, /openExpenseEditor\(selectedExpense\)/);
+    assert.match(page, /expense=\{editorExpense\}/);
+    assert.doesNotMatch(page, /ExpenseDetailCard|detailExpenseId/);
     assert.match(page, /<PaymentProofCenter showProofs=\{false\}/);
     assert.doesNotMatch(page, /focusExpenseId=\{proofFocusExpenseId\}/);
     assert.doesNotMatch(page, /onFocusExpenseHandled=\{handleProofFocusHandled\}/);
@@ -543,7 +546,7 @@ describe("travel expense feature boundary", () => {
     assert.match(page, /data-testid="expense-draft-region-warning"/);
     assert.match(page, /打开区域设置/);
     assert.match(page, /week\.start === draftWeekStart/);
-    assert.match(editor, /function createDraft\(expense, weekStart, prefill = null, regionProfile = null\)/);
+    assert.match(editor, /function createDraft\(expense, weekStart, prefill = null, regionProfile = null, invoiceContext = \{\}\)/);
     assert.match(editor, /const occurredOn = expense\?\.occurredOn \?\? prefill\?\.occurredOn \?\? weekStart/);
     assert.match(editor, /const category = expense\?\.category \?\? \(prefill \? "transport" : "breakfast"\)/);
     assert.match(app, /expenseDraft=\{expenseDraftFromFilters\(routeFilters\)\}/);

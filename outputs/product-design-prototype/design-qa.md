@@ -536,3 +536,25 @@
 - Frontend `npm run qa:integration`: passed and verified new card interactions plus existing full business flow.
 - Root `npm run test:deploy`: passed, 8/8.
 - WSL full-stack start/health passed on backend `8897` and frontend `8088`, with backend `aiAnalysisMode=model` and `modelReady=true`.
+
+## 2026-09-19 Unified Travel Expense Detail And Editor
+
+**UI Change**
+
+- Merged row detail and edit into one right-side drawer. Clicking `编辑记账` changes the existing drawer in place; cancel returns to saved details and save returns to the updated details without a second modal.
+- Kept the payment proof preview beside invoice status in both drawer states, reduced proof height, retained double-click replacement in edit mode, and made `未提供` the exclusive default invoice option.
+- Kept the primary expense fields concise and moved secondary expense/payment fields under the collapsible `其他费用字段` section.
+
+**Mac Chrome Visual And Interaction Acceptance**
+
+- Viewport: `1800x1120`; drawer: `846x792`.
+- Payment proof decoded at `430x150`; detail and edit screenshots were inspected against the approved mockup.
+- Browser assertions passed for detail-to-edit switching, cancel restoration, save persistence, invoice exclusivity/default, proof count, a single dialog, internal scrolling, and Escape dismissal.
+- Screenshots: [`expense-detail.png`](../../docs/evidence/v0.13.6-travel-expense-unified/expense-detail.png) and [`expense-edit.png`](../../docs/evidence/v0.13.6-travel-expense-unified/expense-edit.png).
+
+**Verification**
+
+- `npm run test:travel-expense`: passed, `243/243`.
+- `CHROME_PATH='/Applications/Google Chrome.app/Contents/MacOS/Google Chrome' SENT_ZX_INTEGRATION_RUNTIME=native npm run qa:full`: passed. This includes the full deploy/security, AI Platform, Backend (`2113/2113`), frontend, Chrome integration, scroll-wheel, customer import, and WebKit automation stages.
+- WebKit automation is not iPhone real-device acceptance; no iPhone device test was performed.
+- `git diff --check`: passed.
