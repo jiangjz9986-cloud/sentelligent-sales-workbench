@@ -46,6 +46,7 @@ const ATTACHMENT_FIELDS = new Set([
   "coveredCents",
   "notes",
 ]);
+const ATTACHMENT_REPLACEMENT_FIELDS = new Set(["fileName", "mediaType", "contentBase64"]);
 const ADVANCE_FIELDS = new Set([
   "weekStart",
   "status",
@@ -275,4 +276,25 @@ export function validateTravelExpenseAttachmentPayload(value) {
   optionalProperty(result, "coveredCents", cents(value.coveredCents, "coveredCents", { optional: true }));
   optionalProperty(result, "notes", optionalText(value.notes, "notes", 2000));
   return result;
+}
+
+export function validateTravelExpenseAttachmentReplacementPayload(value) {
+  assertObject(value);
+  assertAllowedKeys(value, ATTACHMENT_REPLACEMENT_FIELDS);
+  const mediaType = enumValue(value.mediaType, MEDIA_TYPES, "mediaType");
+  const content = decodeBase64(value.contentBase64);
+  if (detectDocumentType(content) !== mediaType) fail("contentBase64", "mediaTypeMagic");
+
+  let fileName;
+  try {
+    fileName = validateDocumentFileName(value.fileName);
+  } catch {
+    fail("fileName", "invalid");
+  }
+
+  return {
+    fileName,
+    mediaType,
+    content,
+  };
 }

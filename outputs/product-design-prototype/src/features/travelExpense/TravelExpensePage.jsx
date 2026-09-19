@@ -444,6 +444,29 @@ export function TravelExpensePage({
     }
   }
 
+  async function replaceAttachment(expense, attachment, file) {
+    setPendingAttachmentId(attachment.id);
+    try {
+      const prepared = await prepareTravelExpenseDocument(file);
+      if (!prepared.mediaType.startsWith("image/")) {
+        throw new Error("付款凭证图片替换仅支持 JPEG、PNG 或 WebP 图片。");
+      }
+      const updated = await apiClient.replaceTravelExpenseAttachment(attachment.id, {
+        fileName: prepared.fileName,
+        mediaType: prepared.mediaType,
+        contentBase64: prepared.contentBase64,
+      }, expense.version);
+      setExpenses((current) => mergeById(current, updated));
+      return updated;
+    } catch (replaceError) {
+      const message = expenseErrorMessage(replaceError, "付款凭证替换失败，请稍后重试。");
+      setError(message);
+      throw new Error(message);
+    } finally {
+      setPendingAttachmentId(null);
+    }
+  }
+
   async function deleteAttachment(expense, attachment) {
     if (!globalThis.confirm?.(`确认删除凭证“${attachment.fileName}”？`)) return;
     setPendingAttachmentId(attachment.id);
@@ -744,9 +767,11 @@ export function TravelExpensePage({
         expense={detailExpense}
         itineraries={itineraries}
         customers={customers}
+        matches={invoiceMatches}
+        noInvoiceConfirmations={noInvoiceConfirmations}
         getAttachmentUrl={getAttachmentUrl}
         getAttachmentContentResponse={apiClient.getTravelExpenseAttachmentContentResponse}
-        onUpload={uploadAttachment}
+        onReplace={replaceAttachment}
         onDelete={deleteAttachment}
         pendingAttachmentId={pendingAttachmentId}
         onEdit={(expense) => {

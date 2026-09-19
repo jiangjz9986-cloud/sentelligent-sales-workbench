@@ -109,6 +109,7 @@ import { withDocumentBlobWritePreflight } from "./travelExpense/documentBlobStor
 import {
   validateTravelExpenseAdvancePayload,
   validateTravelExpenseAttachmentPayload,
+  validateTravelExpenseAttachmentReplacementPayload,
   validateTravelExpensePayload,
   validateTravelExpenseWeekStart,
 } from "./travelExpense/validation.js";
@@ -8994,6 +8995,78 @@ export function createServer(options = {}) {
           "Cache-Control": "no-store",
           "X-Content-Type-Options": "nosniff",
         });
+        return;
+      }
+
+      if (
+        request.method === "PUT" &&
+        parts.length === 4 &&
+        parts[0] === "api" &&
+        parts[1] === "travel-expense-attachments" &&
+        parts[2] &&
+        parts[3] === "content"
+      ) {
+        const expectedVersion = parseExpectedVersion(request);
+        const body = validateTravelExpenseAttachmentReplacementPayload(await readJson(request, {
+          maxBytes: TRAVEL_EXPENSE_ATTACHMENT_JSON_MAX_BYTES,
+        }));
+        let item;
+        try {
+          item = await withDocumentBlobWritePreflight(db, {
+            owner: request.authContext.account,
+            content: body.content,
+          }, (encodedDocumentBlob) => withImmediateTransaction(db, () => {
+            const attachmentRow = get(
+              db,
+              `SELECT a.id, a.expense_id
+               FROM travel_expense_attachments a
+               JOIN travel_expenses e ON e.id = a.expense_id
+               WHERE a.id = $id AND e.owner = $owner AND e.deleted_at IS NULL`,
+              { $id: parts[2], $owner: request.authContext.account },
+            );
+            if (!attachmentRow) notFound();
+            const beforeExpense = travelExpenseRepository.getExpense(attachmentRow.expense_id, {
+              owner: request.authContext.account,
+            });
+            const beforeAttachment = beforeExpense?.attachments.find((attachment) => attachment.id === parts[2]);
+            if (!beforeAttachment) notFound();
+            let updated;
+            try {
+              updated = travelExpenseRepository.replaceAttachment(parts[2], {
+                ...body,
+                owner: request.authContext.account,
+                actor: request.authContext.account,
+                expectedVersion,
+                encodedDocumentBlob,
+              });
+            } catch (error) {
+              travelExpenseRepositoryFailure(error);
+            }
+            const replacedAttachment = updated.attachments.find((attachment) => attachment.id === parts[2]);
+            if (!replacedAttachment) throw new Error("Travel expense attachment replacement did not return the attachment");
+            triggerFailpoint(options, "travelExpense.attachmentReplace.afterWrite");
+            insertAudit(db, {
+              action: "travel_expense.attachment_replace",
+              entityType: "travel_expense_attachment",
+              entityId: replacedAttachment.id,
+              actor: request.authContext.account,
+              requestId,
+              before: travelExpenseAttachmentAuditSnapshot(beforeAttachment),
+              after: travelExpenseAttachmentAuditSnapshot(replacedAttachment),
+              entityVersion: updated.version,
+              metadata: {
+                expenseId: updated.id,
+                expenseVersion: updated.version,
+                kind: replacedAttachment.kind,
+                sizeBytes: replacedAttachment.sizeBytes,
+              },
+            });
+            return updated;
+          }));
+        } catch (error) {
+          travelExpenseRepositoryFailure(error);
+        }
+        sendJson(response, 200, { item });
         return;
       }
 

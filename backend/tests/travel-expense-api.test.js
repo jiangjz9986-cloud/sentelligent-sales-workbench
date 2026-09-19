@@ -12,6 +12,7 @@ import {
   SHORT_JPEG_ENVELOPE,
   SHORT_PNG_SIGNATURE,
   SHORT_WEBP_CONTAINER,
+  VALID_JPEG,
   VALID_PDF,
   VALID_PNG,
   paddedPng,
@@ -121,7 +122,7 @@ async function startServer(databaseUrl, account, overrides = {}) {
       ...options,
       headers: {
         Cookie: cookie,
-        ...(method === "POST" || method === "PATCH" || method === "DELETE"
+        ...(method === "POST" || method === "PUT" || method === "PATCH" || method === "DELETE"
           ? { "X-CSRF-Token": csrf }
           : {}),
         ...(options.headers ?? {}),
@@ -729,13 +730,36 @@ describe("authenticated travel expense API", () => {
       const storedAttachment = uploaded.body.item.attachments[0];
       assert.deepEqual(storedAttachment.paymentIds, [created.payments[0].id]);
 
+      const replacementBody = {
+        fileName: "replacement.jpg",
+        mediaType: "image/jpeg",
+        contentBase64: VALID_JPEG.toString("base64"),
+      };
+      const missingReplaceVersion = await request(`/api/travel-expense-attachments/${encodeURIComponent(storedAttachment.id)}/content`, {
+        method: "PUT",
+        body: JSON.stringify(replacementBody),
+      });
+      assert.equal(missingReplaceVersion.response.status, 428);
+
+      const replaced = await request(`/api/travel-expense-attachments/${encodeURIComponent(storedAttachment.id)}/content`, {
+        method: "PUT",
+        headers: { "If-Match": '"2"' },
+        body: JSON.stringify(replacementBody),
+      });
+      assert.equal(replaced.response.status, 200);
+      assert.equal(replaced.body.item.version, 3);
+      assert.equal(replaced.body.item.attachments.length, 1);
+      assert.equal(replaced.body.item.attachments[0].id, storedAttachment.id);
+      assert.equal(replaced.body.item.attachments[0].fileName, "replacement.jpg");
+      assert.deepEqual(replaced.body.item.attachments[0].paymentIds, [created.payments[0].id]);
+
       const contentResponse = await authenticatedFetch(storedAttachment.contentUrl);
       assert.equal(contentResponse.status, 200);
-      assert.equal(contentResponse.headers.get("content-type"), "image/png");
-      assert.equal(contentResponse.headers.get("content-length"), String(VALID_PNG.length));
+      assert.equal(contentResponse.headers.get("content-type"), "image/jpeg");
+      assert.equal(contentResponse.headers.get("content-length"), String(VALID_JPEG.length));
       assert.equal(contentResponse.headers.get("cache-control"), "no-store");
       assert.equal(contentResponse.headers.get("x-content-type-options"), "nosniff");
-      assert.deepEqual(Buffer.from(await contentResponse.arrayBuffer()), VALID_PNG);
+      assert.deepEqual(Buffer.from(await contentResponse.arrayBuffer()), VALID_JPEG);
 
       const missingDeleteVersion = await request(`/api/travel-expense-attachments/${encodeURIComponent(storedAttachment.id)}`, {
         method: "DELETE",
@@ -745,20 +769,21 @@ describe("authenticated travel expense API", () => {
 
       const removed = await request(`/api/travel-expense-attachments/${encodeURIComponent(storedAttachment.id)}`, {
         method: "DELETE",
-        headers: { "If-Match": '"2"' },
+        headers: { "If-Match": '"3"' },
         body: "{}",
       });
       assert.equal(removed.response.status, 200);
-      assert.equal(removed.body.item.version, 3);
+      assert.equal(removed.body.item.version, 4);
       assert.deepEqual(removed.body.item.attachments, []);
       assert.equal((await authenticatedFetch(storedAttachment.contentUrl)).status, 404);
 
       const audits = await request("/api/audit-logs?entityType=travel_expense_attachment");
       assert.deepEqual(
         audits.body.items.map((item) => item.action).sort(),
-        ["travel_expense.attachment_add", "travel_expense.attachment_delete"],
+        ["travel_expense.attachment_add", "travel_expense.attachment_delete", "travel_expense.attachment_replace"],
       );
       assert.doesNotMatch(JSON.stringify(audits.body), new RegExp(uploadBody.contentBase64.slice(0, 12)));
+      assert.doesNotMatch(JSON.stringify(audits.body), new RegExp(replacementBody.contentBase64.slice(0, 12)));
     });
   });
 

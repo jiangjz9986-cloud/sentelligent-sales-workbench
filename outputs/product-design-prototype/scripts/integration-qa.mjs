@@ -1904,8 +1904,11 @@ async function runViewport(cdp, url, viewport, historicalSolution, historicalIti
         const detailCardComplete = [
           '记账详情',
           '费用信息',
-          '付款记录',
-          '付款凭证',
+          '详情内容',
+          '支付时间',
+          '出差区域',
+          '付款凭证和发票',
+          '发票状态',
           'Chrome详情卡验收',
           '¥188.00',
         ].every((text) => expenseDetailText.includes(text));
