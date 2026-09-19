@@ -1878,6 +1878,18 @@ export function createSalesWorkbenchApi({ baseUrl, fetchImpl = fetch, onUnauthor
       return assertTravelExpense(response?.item, "travelExpense.item");
     },
 
+    async replaceTravelExpenseAttachment(attachmentId, attachment, version) {
+      const response = await requestApi(
+        `/api/travel-expense-attachments/${encodeURIComponent(attachmentId)}/content`,
+        {
+          method: "PUT",
+          headers: versionHeaders(version),
+          body: JSON.stringify(pickOwnFields(attachment, ["fileName", "mediaType", "contentBase64"])),
+        },
+      );
+      return assertTravelExpense(response?.item, "travelExpense.item");
+    },
+
     async listTravelExpenseDocumentInbox({ status, documentKind, signal } = {}) {
       const response = await requestApi(queryPath("/api/travel-expense-document-inbox", { status, documentKind }), { signal });
       const items = assertApiCollection(

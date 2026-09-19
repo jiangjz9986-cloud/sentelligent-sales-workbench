@@ -901,6 +901,67 @@ export function createTravelExpenseRepository(db, {
     });
   }
 
+  function replaceAttachment(idValue, input = {}) {
+    const attachmentId = requiredText(idValue, "id", 200);
+    const { owner, actor } = ownerAndActor(input);
+    const version = positiveVersion(input.expectedVersion);
+    const mediaType = enumValue(input.mediaType, MEDIA_TYPES, "mediaType");
+    const fileName = validateDocumentFileName(input.fileName);
+    const content = Buffer.isBuffer(input.content)
+      ? Buffer.from(input.content)
+      : input.content instanceof Uint8Array
+        ? Buffer.from(input.content)
+        : null;
+    if (!content || content.length < 1 || content.length > MAX_ATTACHMENT_BYTES) {
+      throw new TypeError("content must contain between 1 byte and 12 MiB");
+    }
+    if (detectDocumentType(content) !== mediaType) {
+      throw new TypeError("content signature does not match mediaType");
+    }
+    const now = nowIso(clock);
+    const write = (encodedDocumentBlob) => runTransaction(db, () => {
+      const row = db.prepare(`
+        SELECT a.expense_id, a.document_blob_id
+        FROM travel_expense_attachments a
+        JOIN travel_expenses e ON e.id = a.expense_id
+        WHERE a.id = $id AND e.owner = $owner AND e.deleted_at IS NULL
+      `).get({ $id: attachmentId, $owner: owner });
+      if (!row) throw new TravelExpenseNotFoundError("Attachment was not found");
+
+      bumpExpenseVersion(row.expense_id, owner, actor, version, now);
+      const documentBlob = putDocumentBlob(db, {
+        owner,
+        content,
+        encoded: encodedDocumentBlob,
+        createdAt: now,
+      });
+      const result = db.prepare(`
+        UPDATE travel_expense_attachments
+        SET file_name = $fileName,
+            media_type = $mediaType,
+            size_bytes = $sizeBytes,
+            document_blob_id = $documentBlobId
+        WHERE id = $id
+      `).run({
+        $id: attachmentId,
+        $fileName: fileName,
+        $mediaType: mediaType,
+        $sizeBytes: content.length,
+        $documentBlobId: documentBlob.id,
+      });
+      if (result.changes !== 1) throw new TravelExpenseNotFoundError("Attachment was not found");
+      deleteDocumentBlobIfUnreferenced(db, { id: row.document_blob_id, owner });
+      return hydrateExpense(anyExpense.get({ $id: row.expense_id, $owner: owner }));
+    });
+
+    if (db.isTransaction) return write(input.encodedDocumentBlob);
+    return withDocumentBlobWritePreflightSync(db, {
+      owner,
+      content,
+      encoded: input.encodedDocumentBlob,
+    }, write);
+  }
+
   const activeAdvance = db.prepare(
     "SELECT * FROM travel_expense_advances WHERE id = $id AND owner = $owner AND deleted_at IS NULL",
   );
@@ -1006,6 +1067,7 @@ export function createTravelExpenseRepository(db, {
     getAttachmentContent,
     getExpense,
     listAdvances,
+    replaceAttachment,
     listExpenses,
     softDeleteAdvance,
     softDeleteExpense,

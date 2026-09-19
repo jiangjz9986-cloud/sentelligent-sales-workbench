@@ -6,6 +6,7 @@ import {
   MAX_TRAVEL_EXPENSE_ATTACHMENT_BYTES,
   validateTravelExpenseAdvancePayload,
   validateTravelExpenseAttachmentPayload,
+  validateTravelExpenseAttachmentReplacementPayload,
   validateTravelExpensePayload,
   validateTravelExpenseWeekStart,
 } from "../src/travelExpense/validation.js";
@@ -230,6 +231,35 @@ describe("travel expense request validation", () => {
       paymentIds: [],
     }));
     assert.deepEqual(invoice.paymentIds, []);
+  });
+
+  it("validates replacement payloads without allowing attachment relationship changes", () => {
+    const result = validateTravelExpenseAttachmentReplacementPayload({
+      fileName: "replacement.jpg",
+      mediaType: "image/jpeg",
+      contentBase64: VALID_JPEG.toString("base64"),
+    });
+    assert.deepEqual(result.content, VALID_JPEG);
+    assert.equal(result.fileName, "replacement.jpg");
+    assert.equal(Object.hasOwn(result, "paymentIds"), false);
+    assert.equal(Object.hasOwn(result, "kind"), false);
+    assertValidation(
+      () => validateTravelExpenseAttachmentReplacementPayload({
+        fileName: "replacement.jpg",
+        mediaType: "image/jpeg",
+        contentBase64: VALID_PNG.toString("base64"),
+      }),
+      "contentBase64",
+    );
+    assertValidation(
+      () => validateTravelExpenseAttachmentReplacementPayload({
+        fileName: "replacement.jpg",
+        mediaType: "image/jpeg",
+        contentBase64: VALID_JPEG.toString("base64"),
+        paymentIds: ["should-not-be-accepted"],
+      }),
+      "paymentIds",
+    );
   });
 
   it("rejects short magic-byte shells and structurally truncated images", () => {

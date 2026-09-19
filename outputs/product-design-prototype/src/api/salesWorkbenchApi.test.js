@@ -3339,7 +3339,9 @@ describe("sales workbench API client", () => {
           ifMatch: headerValue(options, "If-Match"),
         });
         return jsonResponse({
-          item: sampleTravelExpense({ version: options.method === "POST" ? 2 : 3 }),
+          item: sampleTravelExpense({
+            version: options.method === "POST" ? 2 : options.method === "PUT" ? 3 : 4,
+          }),
         }, options.method === "POST" ? 201 : 200);
       },
     });
@@ -3357,10 +3359,17 @@ describe("sales workbench API client", () => {
       content: "must-not-be-sent",
     }, 1);
     const contentUrl = api.getTravelExpenseAttachmentContentUrl("attachment/一号");
-    const withoutAttachment = await api.deleteTravelExpenseAttachment("attachment/一号", 2);
+    const replacedAttachment = await api.replaceTravelExpenseAttachment("attachment/一号", {
+      fileName: "替换后的付款截图.jpg",
+      mediaType: "image/jpeg",
+      contentBase64: "amVwZw==",
+      owner: "forged-owner",
+    }, 2);
+    const withoutAttachment = await api.deleteTravelExpenseAttachment("attachment/一号", 3);
 
     assert.equal(withAttachment.version, 2);
-    assert.equal(withoutAttachment.version, 3);
+    assert.equal(replacedAttachment.version, 3);
+    assert.equal(withoutAttachment.version, 4);
     assert.equal(
       contentUrl,
       "https://example.test/api/travel-expense-attachments/attachment%2F%E4%B8%80%E5%8F%B7/content",
@@ -3382,11 +3391,22 @@ describe("sales workbench API client", () => {
         ifMatch: '"1"',
       },
       {
+        url: "https://example.test/api/travel-expense-attachments/attachment%2F%E4%B8%80%E5%8F%B7/content",
+        method: "PUT",
+        body: {
+          fileName: "替换后的付款截图.jpg",
+          mediaType: "image/jpeg",
+          contentBase64: "amVwZw==",
+        },
+        csrf: "csrf-test",
+        ifMatch: '"2"',
+      },
+      {
         url: "https://example.test/api/travel-expense-attachments/attachment%2F%E4%B8%80%E5%8F%B7",
         method: "DELETE",
         body: {},
         csrf: "csrf-test",
-        ifMatch: '"2"',
+        ifMatch: '"3"',
       },
     ]);
   });

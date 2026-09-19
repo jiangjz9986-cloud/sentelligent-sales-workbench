@@ -368,6 +368,63 @@ describe("travel expense repository", () => {
     }
   });
 
+  it("replaces an attachment atomically while preserving its identity and payment links", () => {
+    const created = repository.createExpense(expense());
+    const uploaded = repository.addAttachment(created.id, {
+      owner: "owner-a",
+      actor: "owner-a",
+      expectedVersion: 1,
+      paymentIds: [created.payments[0].id],
+      kind: "payment_proof",
+      fileName: "before.png",
+      mediaType: "image/png",
+      content: VALID_PNG,
+      coveredCents: created.payments[0].reimbursementCents,
+      notes: "保留关联和说明",
+    });
+    const before = uploaded.attachments[0];
+    const oldBlob = db.prepare(
+      "SELECT document_blob_id FROM travel_expense_attachments WHERE id = $id",
+    ).get({ $id: before.id });
+
+    now = "2026-08-04T04:00:00.000Z";
+    const replaced = repository.replaceAttachment(before.id, {
+      owner: "owner-a",
+      actor: "owner-a",
+      expectedVersion: uploaded.version,
+      fileName: "after.jpg",
+      mediaType: "image/jpeg",
+      content: VALID_JPEG,
+    });
+    const after = replaced.attachments[0];
+
+    assert.equal(replaced.version, 3);
+    assert.equal(after.id, before.id);
+    assert.equal(after.sequence, before.sequence);
+    assert.equal(after.kind, before.kind);
+    assert.deepEqual(after.paymentIds, before.paymentIds);
+    assert.equal(after.coveredCents, before.coveredCents);
+    assert.equal(after.notes, before.notes);
+    assert.equal(after.fileName, "after.jpg");
+    assert.equal(after.mediaType, "image/jpeg");
+    assert.equal(after.sizeBytes, VALID_JPEG.length);
+    assert.deepEqual(repository.getAttachmentContent(after.id, { owner: "owner-a" }).content, VALID_JPEG);
+    assert.equal(db.prepare("SELECT COUNT(*) AS count FROM document_blobs WHERE id = $id").get({ $id: oldBlob.document_blob_id }).count, 0);
+
+    assert.throws(
+      () => repository.replaceAttachment(after.id, {
+        owner: "owner-a",
+        actor: "owner-a",
+        expectedVersion: uploaded.version,
+        fileName: "stale.png",
+        mediaType: "image/png",
+        content: VALID_PNG,
+      }),
+      (error) => error instanceof TravelExpenseVersionConflictError && error.currentVersion === replaced.version,
+    );
+    assert.deepEqual(repository.getAttachmentContent(after.id, { owner: "owner-a" }).content, VALID_JPEG);
+  });
+
   it("deduplicates repeated attachments and removes the blob only after the last hard reference", () => {
     const created = repository.createExpense(expense());
     const withFirst = repository.addAttachment(created.id, {
