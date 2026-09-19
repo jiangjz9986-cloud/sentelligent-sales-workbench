@@ -596,7 +596,7 @@
 
 .ledger-workbench-link,
 .ledger-workbench-review-button {
-  min-height: 32px;
+  min-height: 44px;
   padding: 5px 12px;
   border: 1px solid rgba(47, 107, 255, 0.32);
   border-radius: 7px;
@@ -637,7 +637,7 @@
   display: inline-flex;
   align-items: center;
   gap: 4px;
-  min-height: 32px;
+  min-height: 44px;
   padding: 5px 10px;
   border: 1px solid rgba(214, 69, 69, 0.36);
   border-radius: 7px;
