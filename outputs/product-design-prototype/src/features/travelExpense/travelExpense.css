@@ -1620,9 +1620,11 @@
 .expense-drawer {
   width: min(846px, calc(100vw - 36px));
   min-width: 0;
-  height: min(792px, calc(100dvh - 36px));
+  height: auto;
+  max-height: min(792px, calc(100dvh - 36px));
   display: grid;
-  grid-template-rows: auto minmax(0, 1fr) auto;
+  grid-template-rows: auto auto auto;
+  align-content: start;
   overflow: hidden;
   border: 1px solid rgba(16, 35, 75, 0.12);
   border-radius: 10px;
@@ -1702,6 +1704,7 @@
 
 .expense-editor-form {
   min-height: 0;
+  max-height: min(600px, calc(100dvh - 220px));
   overflow-y: auto;
   display: grid;
   align-content: start;
@@ -1826,6 +1829,7 @@
 
 .expense-detail-view {
   min-height: 0;
+  max-height: min(600px, calc(100dvh - 220px));
   overflow-y: auto;
   display: grid;
   align-content: start;
@@ -2050,13 +2054,11 @@
 }
 
 .expense-drawer-actions {
-  position: sticky;
-  bottom: -22px;
   z-index: 2;
   justify-content: space-between;
   gap: 14px;
-  margin: 2px -26px -22px;
-  padding: 13px 26px 4px;
+  margin: 2px -26px 0;
+  padding: 13px 26px 12px;
   border-top: 1px solid var(--expense-line);
   background: rgba(255, 255, 255, 0.96);
   backdrop-filter: blur(10px);
@@ -2141,6 +2143,7 @@
 .expense-evidence-columns {
   min-width: 0;
   display: grid;
+  align-items: start;
   grid-template-columns: minmax(0, 1.5fr) minmax(240px, 1fr);
   gap: 12px;
 }
@@ -2203,7 +2206,7 @@
 .expense-evidence-preview {
   position: relative;
   width: 100%;
-  height: 164px;
+  height: 80px;
   display: grid;
   place-items: center;
   overflow: hidden;
@@ -2287,7 +2290,7 @@
 }
 
 .expense-evidence-empty {
-  min-height: 164px;
+  min-height: 80px;
   display: grid;
   place-items: center;
   margin: 0;
@@ -2348,10 +2351,11 @@
 .expense-invoice-option.is-substitute > svg { color: #7250b7; }
 .expense-invoice-option.is-paper > svg { color: #2f64d6; }
 .expense-invoice-option.is-unprovided > svg { color: #667085; }
-.expense-invoice-option.is-electronic.is-selected { border-color: #72b899; color: #126d48; background: #eaf8f1; }
-.expense-invoice-option.is-substitute.is-selected { border-color: #ae98df; color: #604299; background: #f3edff; }
-.expense-invoice-option.is-paper.is-selected { border-color: #91addf; color: #245ac4; background: #eff4ff; }
-.expense-invoice-option.is-unprovided.is-selected { border-color: #aeb6c2; color: #475467; background: #f2f4f7; }
+.expense-invoice-option.is-selected {
+  border-color: #83bda1;
+  color: #166b49;
+  background: #eaf8f1;
+}
 
 .expense-invoice-current {
   min-height: 164px;
@@ -5529,7 +5533,7 @@
 
 @media (max-width: 760px) {
   .expense-drawer-backdrop { padding: 0; }
-  .expense-drawer { width: 100vw; height: 100dvh; border: 0; border-radius: 0; }
+  .expense-drawer { width: 100vw; height: 100dvh; max-height: none; border: 0; border-radius: 0; }
   .expense-drawer-head { padding: 16px 16px 13px; }
   .expense-editor-form { padding: 14px 16px 18px; }
   .expense-editor-aside { display: block; }
@@ -5616,7 +5620,7 @@
   .expense-evidence-panel { padding: 0; }
   .expense-evidence-panel-heading { align-items: flex-start; }
   .expense-evidence-panel-heading > span { text-align: right; }
-  .expense-evidence-preview { height: 148px; }
+  .expense-evidence-preview { height: 96px; }
   .expense-detail-view { padding: 10px 12px 14px; }
   .expense-drawer-actions { margin-inline: -12px; padding-inline: 12px; }
   .expense-payment-editor-head { align-items: flex-start; flex-wrap: wrap; }

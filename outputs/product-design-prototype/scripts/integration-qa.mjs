@@ -659,8 +659,8 @@ async function captureExpenseDesignScreenshots(cdp, isFlowRunning, viewport) {
       if (!bounds || bounds.width <= 0 || bounds.height <= 0) {
         throw new Error(`Expense ${capture.stage} drawer was not visible for screenshot capture`);
       }
-      if (bounds.width !== 846 || bounds.height !== 792) {
-        throw new Error(`Expense ${capture.stage} drawer size differs from the approved mock: ${bounds.width}x${bounds.height}`);
+      if (bounds.width !== 846 || bounds.height < 320 || bounds.height > 792) {
+        throw new Error(`Expense ${capture.stage} drawer size is outside the compact layout bounds: ${bounds.width}x${bounds.height}`);
       }
 
       const fullScreenshot = await cdp.send("Page.captureScreenshot", {
@@ -1964,6 +1964,7 @@ async function runViewport(cdp, url, backendUrl, viewport, historicalSolution, h
           },
           3000,
         );
+        const createOtherFieldsAvailable = Boolean(expenseEditor.querySelector('.expense-advanced-details'));
         const expenseEditorControls = [...expenseEditor.querySelectorAll('input, select, textarea')];
         const expenseEditorLabelsComplete = expenseEditorControls.length > 0
           && expenseEditorControls.every((control) => {
@@ -2033,6 +2034,27 @@ async function runViewport(cdp, url, backendUrl, viewport, historicalSolution, h
         const expenseCollection = await expenseCollectionResponse.json();
         const createdExpense = expenseCollection.items?.find((item) => item.referenceCode === createdExpenseReference);
         if (!createdExpense?.payments?.[0]?.id) throw new Error('Created travel expense QA row was not returned by the API');
+        const hiddenExpenseFieldsSnapshot = (item) => JSON.stringify({
+          occurredOn: item.occurredOn,
+          category: item.category,
+          purpose: item.purpose,
+          merchant: item.merchant,
+          itineraryId: item.itineraryId ?? null,
+          customerId: item.customerId ?? null,
+          notes: item.notes,
+          payments: (item.payments ?? []).map((payment) => ({
+            id: payment.id,
+            paidAt: payment.paidAt,
+            merchant: payment.merchant ?? '',
+            amountCents: payment.amountCents,
+            reimbursementCents: payment.reimbursementCents,
+            fundingSource: payment.fundingSource,
+            paymentMethod: payment.paymentMethod ?? 'other',
+            accountLast4: payment.accountLast4 ?? '',
+            differenceReason: payment.differenceReason ?? '',
+          })),
+        });
+        const originalHiddenExpenseFields = hiddenExpenseFieldsSnapshot(createdExpense);
         const addProofResponse = await fetch(
           ${JSON.stringify(`${backendUrl}/api/travel-expenses/`)} + encodeURIComponent(createdExpense.id) + '/attachments',
           {
@@ -2137,13 +2159,24 @@ async function runViewport(cdp, url, backendUrl, viewport, historicalSolution, h
         const expenseSaveLabelMatchesDesign = expenseEditDrawer.querySelector('[data-expense-save]')?.textContent?.trim() === '保存';
         const editorScroller = expenseEditDrawer.querySelector('.expense-editor-form');
         const advancedExpenseFields = expenseEditDrawer.querySelector('.expense-advanced-details');
-        if (advancedExpenseFields) advancedExpenseFields.open = true;
-        await new Promise((resolve) => setTimeout(resolve, 60));
-        const editorScrollWorks = Boolean(editorScroller && advancedExpenseFields?.open)
+        const editOtherFieldsHidden = advancedExpenseFields === null;
+        const evidencePreviewHeight = Math.round(
+          expenseEditDrawer.querySelector('.expense-evidence-preview')?.getBoundingClientRect().height ?? 0,
+        );
+        const editEvidencePreviewCompact = evidencePreviewHeight === 80;
+        const invoiceOptionsHeight = Math.round(
+          expenseEditDrawer.querySelector('.expense-invoice-section')?.getBoundingClientRect().height ?? 0,
+        );
+        const editInvoiceOptionsCompact = invoiceOptionsHeight > 0 && invoiceOptionsHeight <= 120;
+        const expenseDrawerFooter = expenseEditDrawer.querySelector('.expense-drawer-actions');
+        const drawerBottomGap = expenseDrawerFooter
+          ? Math.round(expenseEditDrawer.getBoundingClientRect().bottom - expenseDrawerFooter.getBoundingClientRect().bottom)
+          : Number.POSITIVE_INFINITY;
+        const editDrawerFitsContent = window.innerWidth <= 760 || (drawerBottomGap >= -1 && drawerBottomGap <= 32);
+        const editorFitsWithoutVerticalScroll = Boolean(editorScroller)
           && getComputedStyle(editorScroller).overflowY === 'auto'
-          && editorScroller.scrollHeight > editorScroller.clientHeight;
-        if (advancedExpenseFields) advancedExpenseFields.open = false;
-        if (editorScroller) editorScroller.scrollTop = 0;
+          && editorScroller.scrollHeight <= editorScroller.clientHeight + 1;
+        const editInvoiceSummaryRemoved = !expenseEditDrawer.querySelector('.expense-invoice-current');
         await captureExpenseState('edit');
 
         setExpenseControlValue(
@@ -2156,6 +2189,10 @@ async function runViewport(cdp, url, backendUrl, viewport, historicalSolution, h
         const invoiceSelectionExclusive = createInvoiceSelectionExclusive
           && expenseEditDrawer.querySelectorAll('input[name="expense-invoice-status"]:checked').length === 1
           && expenseEditDrawer.querySelector('input[name="expense-invoice-status"]:checked')?.value === 'paper';
+        const selectedInvoiceOption = expenseEditDrawer.querySelector('.expense-invoice-option.is-selected');
+        const selectedInvoiceStyle = selectedInvoiceOption ? getComputedStyle(selectedInvoiceOption) : null;
+        const selectedInvoicePaleGreen = selectedInvoiceStyle?.backgroundColor === 'rgb(234, 248, 241)'
+          && selectedInvoiceStyle.borderTopColor === 'rgb(131, 189, 161)';
         const saveEditedExpenseButton = expenseEditDrawer.querySelector('[data-expense-save]');
         if (!saveEditedExpenseButton) throw new Error('Missing edited travel expense save button');
         saveEditedExpenseButton.click();
@@ -2170,6 +2207,15 @@ async function runViewport(cdp, url, backendUrl, viewport, historicalSolution, h
           },
           10000,
         );
+        const updatedExpenseCollectionResponse = await fetch(
+          ${JSON.stringify(`${backendUrl}/api/travel-expenses`)} + '?weekStart=' + encodeURIComponent(${JSON.stringify(expenseQaWeekStart)}),
+          { credentials: 'include' },
+        );
+        if (!updatedExpenseCollectionResponse.ok) throw new Error('Updated travel expense QA list returned ' + updatedExpenseCollectionResponse.status);
+        const updatedExpenseCollection = await updatedExpenseCollectionResponse.json();
+        const updatedExpense = updatedExpenseCollection.items?.find((item) => item.id === createdExpense.id);
+        const hiddenExpenseFieldsPersisted = Boolean(updatedExpense)
+          && hiddenExpenseFieldsSnapshot(updatedExpense) === originalHiddenExpenseFields;
         savedEditDetail.querySelector('[data-expense-edit]')?.click();
         const reopenedExpenseEdit = await waitUntil(
           () => {
@@ -2226,6 +2272,7 @@ async function runViewport(cdp, url, backendUrl, viewport, historicalSolution, h
           regionSettingsOpened: Boolean(regionDialog),
           regionSettingsClosed: !document.querySelector('[data-testid="trip-region-settings-layer"]'),
           editorOpened: Boolean(expenseEditor),
+          createOtherFieldsAvailable,
           editorControlCount: expenseEditorControls.length,
           editorLabelsComplete: expenseEditorLabelsComplete,
           editorClosed: !document.querySelector('.expense-drawer[role="dialog"]'),
@@ -2239,10 +2286,18 @@ async function runViewport(cdp, url, backendUrl, viewport, historicalSolution, h
           editStartsWithPersistedInvoice,
           initialInvoiceDefaultUnprovided,
           editProofReplacementHint,
+          editOtherFieldsHidden,
+          editEvidencePreviewCompact,
+          editInvoiceOptionsCompact,
+          editDrawerFitsContent,
+          drawerBottomGap,
+          editInvoiceSummaryRemoved,
+          selectedInvoicePaleGreen,
+          hiddenExpenseFieldsPersisted,
           expenseSaveLabelMatchesDesign,
           regionPersisted,
           editCancelRestoresDetails: Boolean(editCancelRestoresDetails),
-          editorScrollWorks,
+          editorFitsWithoutVerticalScroll,
           onlyOneExpenseDialog,
           paymentProofLoaded,
           proofListRemovedFromDetailParent,
@@ -3474,6 +3529,7 @@ async function main() {
         assert.equal(result.expenseFlow.regionSettingsOpened, true, "desktop ledger should open the weekly region settings card");
         assert.equal(result.expenseFlow.regionSettingsClosed, true, "desktop weekly region settings card should close without saving");
         assert.equal(result.expenseFlow.editorOpened, true, "desktop travel expense create action should open the expense editor");
+        assert.equal(result.expenseFlow.createOtherFieldsAvailable, true, "new expense creation should retain its date, category, and payment fields");
         assert.ok(result.expenseFlow.editorControlCount > 0, "desktop travel expense editor should render form controls");
         assert.equal(result.expenseFlow.editorLabelsComplete, true, "desktop travel expense editor controls should all have readable labels");
         assert.equal(result.expenseFlow.editorClosed, true, "desktop travel expense editor should close without saving");
@@ -3487,10 +3543,20 @@ async function main() {
         assert.equal(result.expenseFlow.editStartsWithPersistedInvoice, true, "desktop expense edit should reflect the saved unprovided invoice status");
         assert.equal(result.expenseFlow.initialInvoiceDefaultUnprovided, true, "desktop expense creation should default to unprovided invoice status");
         assert.equal(result.expenseFlow.editProofReplacementHint, true, "desktop expense edit should show the double-click replacement hint");
+        assert.equal(result.expenseFlow.editOtherFieldsHidden, true, "editing an existing expense should hide the other-fields section");
+        assert.equal(result.expenseFlow.editEvidencePreviewCompact, true, "expense edit should use the compact payment-proof preview height");
+        assert.equal(result.expenseFlow.editInvoiceOptionsCompact, true, "expense invoice choices should not stretch into an empty status card");
+        assert.ok(
+          result.expenseFlow.editDrawerFitsContent,
+          `the expense drawer should end close to its footer instead of leaving a large empty area (gap=${result.expenseFlow.drawerBottomGap}px)`,
+        );
+        assert.equal(result.expenseFlow.editInvoiceSummaryRemoved, true, "expense edit should not duplicate the selected invoice status below its options");
+        assert.equal(result.expenseFlow.selectedInvoicePaleGreen, true, "the selected invoice option should use the pale-green treatment");
         assert.equal(result.expenseFlow.expenseSaveLabelMatchesDesign, true, "desktop expense save action should use the design label");
         assert.equal(result.expenseFlow.regionPersisted, true, "desktop expense edits should persist the trip region");
+        assert.equal(result.expenseFlow.hiddenExpenseFieldsPersisted, true, "editing visible fields should preserve hidden expense and payment data");
         assert.equal(result.expenseFlow.editCancelRestoresDetails, true, "desktop expense edit cancellation should return to saved details");
-        assert.equal(result.expenseFlow.editorScrollWorks, true, "desktop expense drawer should keep its internal content scrollable");
+        assert.equal(result.expenseFlow.editorFitsWithoutVerticalScroll, true, "the compact expense editor should fit without unnecessary vertical scrolling on desktop");
         assert.equal(result.expenseFlow.onlyOneExpenseDialog, true, "desktop expense row should open only one expense dialog");
         assert.equal(result.expenseFlow.paymentProofLoaded, true, "desktop expense details should render the synthetic payment proof sharply");
         assert.equal(result.expenseFlow.proofListRemovedFromDetailParent, true, "desktop ledger should not keep a full proof list beneath the table");
