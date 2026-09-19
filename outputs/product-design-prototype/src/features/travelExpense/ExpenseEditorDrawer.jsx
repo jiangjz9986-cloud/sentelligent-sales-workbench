@@ -482,50 +482,52 @@ export function ExpenseEditorDrawer({
                 />
               </aside>
 
-              <details className="expense-advanced-details">
-                <summary><strong>其他费用字段</strong><span>发生日期、类别、关联信息及付款明细</span></summary>
-                <div className="expense-advanced-content">
-                  <fieldset className="expense-fieldset">
-                    <legend>费用信息</legend>
-                    <div className="expense-form-grid">
-                      <label className="form-field"><span>发生日期</span><input type="date" min={week.start} max={week.end} value={draft.occurredOn} onChange={(event) => updateField("occurredOn", event.target.value)} required /></label>
-                      <label className="form-field"><span>类别</span><select value={draft.category} onChange={(event) => updateField("category", event.target.value)}>{EXPENSE_CATEGORIES.map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}</select></label>
-                      <div className="expense-derived-status" role="note"><span>票据覆盖</span><div><strong className={`expense-status ${derivedInvoiceStatus.id}`}>{derivedInvoiceStatus.label}</strong><small>由发票匹配与无票确认记录更新</small></div></div>
-                      <label className="form-field"><span>默认收款方</span><input value={draft.merchant} onChange={(event) => updateField("merchant", event.target.value)} placeholder="商户或收款方" /></label>
-                      <label className="form-field"><span>关联行程</span><select value={draft.itineraryId} onChange={(event) => updateField("itineraryId", event.target.value)}><option value="">不关联</option>{itineraries.map((item) => <option key={item.id} value={item.id}>{item.title}</option>)}</select></label>
-                      <label className="form-field"><span>关联客户</span><select value={draft.customerId} onChange={(event) => updateField("customerId", event.target.value)}><option value="">不关联</option>{customers.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label>
-                      <label className="form-field expense-span-3"><span>备注</span><textarea value={draft.notes} onChange={(event) => updateField("notes", event.target.value)} placeholder="补充客户、业务或报销说明" /></label>
-                    </div>
-                  </fieldset>
+              {!expense ? (
+                <details className="expense-advanced-details">
+                  <summary><strong>其他费用字段</strong><span>发生日期、类别、关联信息及付款明细</span></summary>
+                  <div className="expense-advanced-content">
+                    <fieldset className="expense-fieldset">
+                      <legend>费用信息</legend>
+                      <div className="expense-form-grid">
+                        <label className="form-field"><span>发生日期</span><input type="date" min={week.start} max={week.end} value={draft.occurredOn} onChange={(event) => updateField("occurredOn", event.target.value)} required /></label>
+                        <label className="form-field"><span>类别</span><select value={draft.category} onChange={(event) => updateField("category", event.target.value)}>{EXPENSE_CATEGORIES.map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}</select></label>
+                        <div className="expense-derived-status" role="note"><span>票据覆盖</span><div><strong className={`expense-status ${derivedInvoiceStatus.id}`}>{derivedInvoiceStatus.label}</strong><small>由发票匹配与无票确认记录更新</small></div></div>
+                        <label className="form-field"><span>默认收款方</span><input value={draft.merchant} onChange={(event) => updateField("merchant", event.target.value)} placeholder="商户或收款方" /></label>
+                        <label className="form-field"><span>关联行程</span><select value={draft.itineraryId} onChange={(event) => updateField("itineraryId", event.target.value)}><option value="">不关联</option>{itineraries.map((item) => <option key={item.id} value={item.id}>{item.title}</option>)}</select></label>
+                        <label className="form-field"><span>关联客户</span><select value={draft.customerId} onChange={(event) => updateField("customerId", event.target.value)}><option value="">不关联</option>{customers.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label>
+                        <label className="form-field expense-span-3"><span>备注</span><textarea value={draft.notes} onChange={(event) => updateField("notes", event.target.value)} placeholder="补充客户、业务或报销说明" /></label>
+                      </div>
+                    </fieldset>
 
-                  <fieldset className="expense-fieldset expense-payment-fieldset">
-                    <legend>实际付款</legend>
-                    <div className="expense-payment-summary" aria-live="polite">
-                      <span>实付合计 <strong>¥{totals.actual.toFixed(2)}</strong></span>
-                      <span>计入报销 <strong>¥{totals.reimbursement.toFixed(2)}</strong></span>
-                      <span>{draft.payments.length} 笔付款</span>
-                    </div>
-                    <div className="expense-payment-editors">
-                      {draft.payments.map((payment, index) => (
-                        <article className="expense-payment-editor" key={payment.id ?? index}>
-                          <div className="expense-payment-editor-head"><strong>第 {index + 1} 笔付款</strong><span>出差区域：{draft.tripRegion || "未填写"}</span><b>¥{payment.amount || "0.00"}</b><button className="icon-button" type="button" aria-label={`删除第 ${index + 1} 笔付款`} onClick={() => removePayment(index)} disabled={draft.payments.length === 1}><Trash2 size={16} /></button></div>
-                          <div className="expense-form-grid payment-grid">
-                            {index > 0 ? <label className="form-field"><span>支付时间</span><input type="datetime-local" value={payment.paidAt} onChange={(event) => updatePayment(index, "paidAt", event.target.value)} required /></label> : null}
-                            <label className="form-field"><span>收款方</span><input value={payment.merchant} onChange={(event) => updatePayment(index, "merchant", event.target.value)} placeholder={draft.merchant || "可与默认收款方不同"} /></label>
-                            {index > 0 ? <label className="form-field"><span>实付金额（元）</span><input inputMode="decimal" value={payment.amount} onChange={(event) => updatePayment(index, "amount", event.target.value)} placeholder="0.00" required /></label> : null}
-                            <label className="form-field"><span>计入报销金额（元）</span><input inputMode="decimal" value={payment.reimbursement} onChange={(event) => updatePayment(index, "reimbursement", event.target.value)} placeholder="0.00" required /></label>
-                            <label className="form-field"><span>资金来源</span><select value={payment.fundingSource} onChange={(event) => updatePayment(index, "fundingSource", event.target.value)}>{FUNDING_SOURCES.map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}</select></label>
-                            <label className="form-field"><span>支付方式</span><select value={payment.paymentMethod} onChange={(event) => updatePayment(index, "paymentMethod", event.target.value)}>{PAYMENT_METHODS.map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}</select></label>
-                            <label className="form-field"><span>账号末四位</span><input inputMode="numeric" maxLength={4} value={payment.accountLast4} onChange={(event) => updatePayment(index, "accountLast4", event.target.value.replace(/\D/g, ""))} placeholder="选填" /></label>
-                            <label className="form-field expense-span-2"><span>差额原因</span><input value={payment.differenceReason} onChange={(event) => updatePayment(index, "differenceReason", event.target.value)} placeholder="实付与计入报销不一致时必填" /></label>
-                          </div>
-                        </article>
-                      ))}
-                    </div>
-                    <button className="ghost-button expense-add-payment" type="button" onClick={() => setDraft((current) => ({ ...current, payments: [...current.payments, emptyPayment()] }))}><Plus size={16} />添加一笔付款</button>
-                  </fieldset>
-                </div>
-              </details>
+                    <fieldset className="expense-fieldset expense-payment-fieldset">
+                      <legend>实际付款</legend>
+                      <div className="expense-payment-summary" aria-live="polite">
+                        <span>实付合计 <strong>¥{totals.actual.toFixed(2)}</strong></span>
+                        <span>计入报销 <strong>¥{totals.reimbursement.toFixed(2)}</strong></span>
+                        <span>{draft.payments.length} 笔付款</span>
+                      </div>
+                      <div className="expense-payment-editors">
+                        {draft.payments.map((payment, index) => (
+                          <article className="expense-payment-editor" key={payment.id ?? index}>
+                            <div className="expense-payment-editor-head"><strong>第 {index + 1} 笔付款</strong><span>出差区域：{draft.tripRegion || "未填写"}</span><b>¥{payment.amount || "0.00"}</b><button className="icon-button" type="button" aria-label={`删除第 ${index + 1} 笔付款`} onClick={() => removePayment(index)} disabled={draft.payments.length === 1}><Trash2 size={16} /></button></div>
+                            <div className="expense-form-grid payment-grid">
+                              {index > 0 ? <label className="form-field"><span>支付时间</span><input type="datetime-local" value={payment.paidAt} onChange={(event) => updatePayment(index, "paidAt", event.target.value)} required /></label> : null}
+                              <label className="form-field"><span>收款方</span><input value={payment.merchant} onChange={(event) => updatePayment(index, "merchant", event.target.value)} placeholder={draft.merchant || "可与默认收款方不同"} /></label>
+                              {index > 0 ? <label className="form-field"><span>实付金额（元）</span><input inputMode="decimal" value={payment.amount} onChange={(event) => updatePayment(index, "amount", event.target.value)} placeholder="0.00" required /></label> : null}
+                              <label className="form-field"><span>计入报销金额（元）</span><input inputMode="decimal" value={payment.reimbursement} onChange={(event) => updatePayment(index, "reimbursement", event.target.value)} placeholder="0.00" required /></label>
+                              <label className="form-field"><span>资金来源</span><select value={payment.fundingSource} onChange={(event) => updatePayment(index, "fundingSource", event.target.value)}>{FUNDING_SOURCES.map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}</select></label>
+                              <label className="form-field"><span>支付方式</span><select value={payment.paymentMethod} onChange={(event) => updatePayment(index, "paymentMethod", event.target.value)}>{PAYMENT_METHODS.map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}</select></label>
+                              <label className="form-field"><span>账号末四位</span><input inputMode="numeric" maxLength={4} value={payment.accountLast4} onChange={(event) => updatePayment(index, "accountLast4", event.target.value.replace(/\D/g, ""))} placeholder="选填" /></label>
+                              <label className="form-field expense-span-2"><span>差额原因</span><input value={payment.differenceReason} onChange={(event) => updatePayment(index, "differenceReason", event.target.value)} placeholder="实付与计入报销不一致时必填" /></label>
+                            </div>
+                          </article>
+                        ))}
+                      </div>
+                      <button className="ghost-button expense-add-payment" type="button" onClick={() => setDraft((current) => ({ ...current, payments: [...current.payments, emptyPayment()] }))}><Plus size={16} />添加一笔付款</button>
+                    </fieldset>
+                  </div>
+                </details>
+              ) : null}
             </div>
 
             <footer className="expense-drawer-actions">

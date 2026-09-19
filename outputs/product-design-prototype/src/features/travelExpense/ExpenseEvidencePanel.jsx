@@ -198,27 +198,21 @@ export function ExpenseEvidencePanel({
               <div><strong>{selectedInvoice.label}</strong><span>{selectedInvoice.description}</span></div>
             </div>
           ) : (
-            <>
-              <div className="expense-invoice-options" role="radiogroup" aria-label="发票状态">
-                {INVOICE_OPTIONS.map(({ id, label, Icon }) => (
-                  <label className={`expense-invoice-option is-${id}${selectedInvoiceType === id ? " is-selected" : ""}`} key={id}>
-                    <input
-                      type="radio"
-                      name="expense-invoice-status"
-                      value={id}
-                      checked={selectedInvoiceType === id}
-                      onChange={() => onInvoiceTypeChange(id)}
-                    />
-                    <Icon size={17} aria-hidden="true" />
-                    <span>{label}</span>
-                  </label>
-                ))}
-              </div>
-              <div className={`expense-invoice-current is-${selectedInvoiceType}`} data-invoice-status={selectedInvoiceType}>
-                <SelectedInvoiceIcon size={20} aria-hidden="true" />
-                <div><strong>{selectedInvoice.label}</strong><span>{selectedInvoice.description}</span></div>
-              </div>
-            </>
+            <div className="expense-invoice-options" role="radiogroup" aria-label="发票状态">
+              {INVOICE_OPTIONS.map(({ id, label, Icon }) => (
+                <label className={`expense-invoice-option is-${id}${selectedInvoiceType === id ? " is-selected" : ""}`} key={id}>
+                  <input
+                    type="radio"
+                    name="expense-invoice-status"
+                    value={id}
+                    checked={selectedInvoiceType === id}
+                    onChange={() => onInvoiceTypeChange(id)}
+                  />
+                  <Icon size={17} aria-hidden="true" />
+                  <span>{label}</span>
+                </label>
+              ))}
+            </div>
           )}
         </section>
       </div>

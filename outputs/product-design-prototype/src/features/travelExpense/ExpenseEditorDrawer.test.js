@@ -30,7 +30,7 @@ describe("unified travel expense editor drawer", () => {
     assert.match(editor, /<span>支付时间<\/span>/);
     assert.match(editor, /<span>费用事由<\/span>/);
     assert.match(editor, /className="expense-edit-grid"/);
-    assert.match(editor, /<details className="expense-advanced-details">/);
+    assert.match(editor, /\{!expense \? \([\s\S]*?<details className="expense-advanced-details">[\s\S]*?<\/details>\s*\) : null\}/);
     assert.match(editor, /其他费用字段/);
     assert.match(editor, /if \(!expense\) \{[\s\S]*?invoiceType: "unprovided"[\s\S]*?\}\s+const invoiceType/);
     assert.match(editor, /invoiceType: draft\.invoiceType === "unprovided" \? null/);
@@ -52,10 +52,12 @@ describe("unified travel expense editor drawer", () => {
     assert.match(evidence, /onDelete/);
     assert.match(evidence, /onVersionChange\?\.\(updated\.version\)/);
     assert.match(evidence, /name="expense-invoice-status"/);
+    assert.match(evidence, /readOnly \? \(\s*<div className=\{`expense-invoice-current/);
+    assert.doesNotMatch(evidence, /SelectedInvoiceIcon size=\{20\}/);
     assert.doesNotMatch(evidence, /expense-evidence-file-meta|>查看</);
     for (const status of ["electronic", "substitute", "paper", "unprovided"]) {
       assert.match(evidence, new RegExp(`id: "${status}"`));
-      assert.match(css, new RegExp(`\\.expense-invoice-option\\.is-${status}\\.is-selected`));
+      assert.match(css, new RegExp(`\\.expense-invoice-option\\.is-${status} > svg`));
     }
     assert.match(page, /function openExpenseEditor\(expense\)/);
     assert.match(page, /openExpenseEditor\(item\)/);
@@ -67,18 +69,22 @@ describe("unified travel expense editor drawer", () => {
     assert.match(css, /\.expense-editor-layout\s*\{/);
     assert.match(css, /\.expense-detail-view \.expense-detail-section\s*\{[\s\S]*?border: 0;/);
     assert.match(css, /\.expense-editor-form \.expense-edit-core\s*\{[\s\S]*?border: 0;/);
-    assert.match(css, /\.expense-evidence-preview\s*\{[\s\S]*?height: 164px;/);
+    assert.match(css, /\.expense-evidence-preview\s*\{[\s\S]*?height: 80px;/);
     assert.match(css, /\.expense-evidence-columns\s*\{[\s\S]*?grid-template-columns: minmax\(0, 1\.5fr\) minmax\(240px, 1fr\);/);
+    assert.match(css, /\.expense-evidence-columns\s*\{[\s\S]*?align-items: start;/);
     assert.match(css, /\.expense-invoice-option\s*\{[\s\S]*?min-height: 28px;/);
     assert.match(css, /\.expense-evidence-delete\s*\{[\s\S]*?width: 24px;[\s\S]*?height: 24px;/);
     assert.match(css, /\.expense-drawer\s*\{[\s\S]*?width: min\(846px, calc\(100vw - 36px\)\);/);
-    assert.match(css, /\.expense-drawer\s*\{[\s\S]*?height: min\(792px, calc\(100dvh - 36px\)\);/);
+    assert.match(css, /\.expense-drawer\s*\{[\s\S]*?height: auto;[\s\S]*?max-height: min\(792px, calc\(100dvh - 36px\)\);[\s\S]*?grid-template-rows: auto auto auto;/);
+    assert.match(css, /\.expense-editor-form\s*\{[\s\S]*?max-height: min\(600px, calc\(100dvh - 220px\)\);[\s\S]*?overflow-y: auto;/);
+    assert.match(css, /\.expense-detail-view\s*\{[\s\S]*?max-height: min\(600px, calc\(100dvh - 220px\)\);[\s\S]*?overflow-y: auto;/);
+    assert.match(css, /\.expense-drawer\s*\{ width: 100vw; height: 100dvh; max-height: none;/);
+    assert.doesNotMatch(css, /\.expense-drawer-actions\s*\{[^}]*position: sticky/);
     assert.match(css, /\.expense-edit-field:focus-within/);
     assert.match(css, /\.expense-advanced-details\s*>\s*summary/);
-    assert.match(css, /\.expense-invoice-option\.is-electronic\.is-selected/);
-    assert.match(css, /\.expense-invoice-option\.is-substitute\.is-selected/);
-    assert.match(css, /\.expense-invoice-option\.is-paper\.is-selected/);
-    assert.match(css, /\.expense-invoice-option\.is-unprovided\.is-selected/);
+    assert.match(css, /\.expense-invoice-option\.is-selected\s*\{[\s\S]*?border-color: #83bda1;[\s\S]*?background: #eaf8f1;/);
+    assert.doesNotMatch(css, /\.expense-invoice-option\.is-(?:electronic|substitute|paper|unprovided)\.is-selected/);
+    assert.match(css, /\.expense-evidence-preview \{ height: 96px; \}/);
   });
 
   it("keeps the full proof center contract for the ledger and inbox surfaces", async () => {
