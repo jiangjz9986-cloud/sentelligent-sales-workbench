@@ -989,6 +989,84 @@ describe("invoice matching and weekly coverage", () => {
     assert.equal(invoiceRepository.getInvoice(suitableSmall.id, { owner: "owner-a" }).status, "unmatched");
   });
 
+  it("accepts a complete weekly invoice set atomically", () => {
+    const firstExpense = createSubstituteExpense({ purpose: "本周第一笔替票住宿" });
+    const secondExpense = createSubstituteExpense({
+      occurredOn: "2026-08-05",
+      purpose: "本周第二笔替票住宿",
+      payments: [payment({ paidAt: "2026-08-05T18:00:00+08:00" })],
+    });
+    createInvoice("weekly-batch-first", { issuedOn: "2026-08-05" });
+    createInvoice("weekly-batch-second", { issuedOn: "2026-08-06" });
+
+    const candidates = invoiceRepository.generateMatchCandidates({
+      owner: "owner-a",
+      actor: "owner-a",
+      weekStart: "2026-08-03",
+    });
+    assert.equal(candidates.length, 2);
+    assert.deepEqual(new Set(candidates.map((item) => item.expenseId)), new Set([firstExpense.id, secondExpense.id]));
+
+    const accepted = invoiceRepository.acceptMatchCandidatesForWeek({
+      owner: "owner-a",
+      actor: "owner-a",
+      weekStart: "2026-08-03",
+      candidates: candidates.map(({ id, version }) => ({ id, version })),
+    });
+
+    assert.equal(accepted.length, 2);
+    assert.ok(accepted.every(({ candidate, match }) => candidate.status === "accepted" && match.state === "confirmed"));
+    assert.equal(accepted.reduce((total, item) => total + item.match.allocatedCents, 0), 20000);
+    assert.equal(invoiceRepository.listMatches({ owner: "owner-a", state: "confirmed" }).length, 2);
+  });
+
+  it("rolls back an entire weekly invoice acceptance when any candidate is stale or omitted", () => {
+    const expense = createSubstituteExpense();
+    createSubstituteExpense({
+      occurredOn: "2026-08-05",
+      purpose: "第二笔待匹配住宿",
+      payments: [payment({ paidAt: "2026-08-05T18:00:00+08:00" })],
+    });
+    const firstInvoice = createInvoice("weekly-atomic-first", { issuedOn: "2026-08-05" });
+    createInvoice("weekly-atomic-second", { issuedOn: "2026-08-06" });
+    const candidates = invoiceRepository.generateMatchCandidates({
+      owner: "owner-a",
+      actor: "owner-a",
+      weekStart: "2026-08-03",
+    });
+    assert.equal(candidates.length, 2);
+
+    const omitted = candidates.slice(0, 1).map(({ id, version }) => ({ id, version }));
+    assert.throws(
+      () => invoiceRepository.acceptMatchCandidatesForWeek({
+        owner: "owner-a",
+        actor: "owner-a",
+        weekStart: "2026-08-03",
+        candidates: omitted,
+      }),
+      (error) => error instanceof InvoiceMatchConflictError && error.code === "CANDIDATE_SET_CHANGED",
+    );
+
+    db.prepare(`
+      UPDATE invoice_documents
+      SET issued_on = '2026-08-03', version = version + 1
+      WHERE id = $id
+    `).run({ $id: firstInvoice.id });
+    assert.throws(
+      () => invoiceRepository.acceptMatchCandidatesForWeek({
+        owner: "owner-a",
+        actor: "owner-a",
+        weekStart: "2026-08-03",
+        candidates: candidates.map(({ id, version }) => ({ id, version })),
+      }),
+      (error) => error instanceof InvoiceMatchConflictError && error.code === "CANDIDATE_STALE",
+    );
+    assert.equal(invoiceRepository.listMatches({ owner: "owner-a", state: "confirmed" }).length, 0);
+    assert.ok(invoiceRepository.listMatchCandidates({ owner: "owner-a", weekStart: "2026-08-03" })
+      .every((candidate) => candidate.status === "suggested"));
+    assert.equal(expense.invoiceType, "substitute");
+  });
+
   it("lists matches, no-invoice confirmations, and candidates with week and entity filters", () => {
     const firstExpense = createExpense();
     const secondExpense = createExpense({

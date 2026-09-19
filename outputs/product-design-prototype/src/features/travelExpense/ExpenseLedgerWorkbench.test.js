@@ -34,8 +34,14 @@ describe("expense ledger workbench shell", () => {
     assert.match(component, /data-ledger-delete-action=\{item\.sourceId\}/);
     assert.match(component, /onDeleteItem\(item\.original, item\)/);
     assert.match(page, /onDeleteItem=\{deleteExpense\}/);
-    assert.match(page, /globalThis\.confirm\?\.\(`确认删除“\$\{expense\.purpose\}”？`\)/);
-    assert.match(page, /deleteTravelExpense\(expense\.id, expense\.version\)/);
+    assert.match(page, /setDeleteTarget\(expense\)/);
+    assert.match(page, /ConfirmDialog/);
+    assert.match(page, /onConfirm=\{confirmDeleteExpense\}/);
+    assert.match(page, /EXPENSE_HAS_ACTIVE_INVOICE_STATE/);
+    const deleteFlowStart = page.indexOf("async function deleteExpense(expense)");
+    const deleteFlowEnd = page.indexOf("async function uploadAttachment", deleteFlowStart);
+    assert.doesNotMatch(page.slice(deleteFlowStart, deleteFlowEnd), /globalThis\.confirm/);
+    assert.match(page, /deleteTravelExpense\(deleteTarget\.id, deleteTarget\.version\)/);
     assert.match(css, /\.ledger-workbench-delete\s*\{/);
   });
 

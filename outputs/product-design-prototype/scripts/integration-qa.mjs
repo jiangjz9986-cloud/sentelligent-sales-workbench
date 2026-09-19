@@ -15,6 +15,7 @@ import {
   stopOwnedPosixChildProcess,
 } from "../../../scripts/owned-posix-process.mjs";
 import { hashPassword } from "../../../backend/src/auth/password.js";
+import { minimalPdf } from "../../../backend/tests/helpers/image-fixtures.js";
 
 const appRoot = process.cwd();
 const workspaceRoot = resolve(appRoot, "../..");
@@ -26,6 +27,12 @@ expenseQaDate.setUTCDate(expenseQaDate.getUTCDate() + 1);
 const expenseQaOccurredOn = expenseQaDate.toISOString().slice(0, 10);
 const [, expenseQaMonth, expenseQaDay] = expenseQaOccurredOn.match(/^\d{4}-(\d{2})-(\d{2})$/);
 const expenseQaPurpose = `${Number(expenseQaMonth)}.${Number(expenseQaDay)} 济宁出差午餐`;
+const expenseQaRunId = Date.now();
+const expenseQaInvoicePurpose = `${expenseQaPurpose}（替票组合验收）`;
+const expenseQaDeletePurpose = `删除按钮验收 ${expenseQaRunId}`;
+const expenseQaInvoicePdfBase64 = ["a", "b"].map((suffix) => (
+  minimalPdf(`expense-qa-invoice-${suffix}-${expenseQaRunId}`).toString("base64")
+));
 const expenseProofFixtureBase64 = readFileSync(
   new URL("./fixtures/payment-proof-design-qa.png", import.meta.url),
 ).toString("base64");
@@ -624,8 +631,9 @@ async function evaluate(cdp, expression) {
 
 async function captureExpenseDesignScreenshots(cdp, isFlowRunning, viewport) {
   const captures = [
-    { stage: "detail", name: "detail" },
-    { stage: "edit", name: "edit" },
+    { stage: "detail", name: "detail", selector: ".expense-drawer[role=\"dialog\"]", card: true },
+    { stage: "edit", name: "edit", selector: ".expense-drawer[role=\"dialog\"]", card: true },
+    { stage: "invoice-candidates", name: "invoice-candidates", selector: ".invoice-candidate-card", card: false },
   ];
   let captureError = null;
 
@@ -648,18 +656,19 @@ async function captureExpenseDesignScreenshots(cdp, isFlowRunning, viewport) {
         deviceScaleFactor: 1,
         mobile: false,
       });
+      await evaluate(cdp, `document.querySelector(${JSON.stringify(capture.selector)})?.scrollIntoView({ block: "center" })`);
       await evaluate(cdp, `document.querySelectorAll('[data-testid="toast-close"]').forEach((button) => button.click())`);
       await delay(180);
       const bounds = await evaluate(cdp, `(() => {
-        const element = document.querySelector('.expense-drawer[role="dialog"]');
+        const element = document.querySelector(${JSON.stringify(capture.selector)});
         if (!element) return null;
         const rect = element.getBoundingClientRect();
         return { x: rect.x, y: rect.y, width: rect.width, height: rect.height };
       })()`);
       if (!bounds || bounds.width <= 0 || bounds.height <= 0) {
-        throw new Error(`Expense ${capture.stage} drawer was not visible for screenshot capture`);
+        throw new Error(`Expense ${capture.stage} surface was not visible for screenshot capture`);
       }
-      if (bounds.width !== 846 || bounds.height < 320 || bounds.height > 792) {
+      if (capture.card && (bounds.width !== 846 || bounds.height < 320 || bounds.height > 792)) {
         throw new Error(`Expense ${capture.stage} drawer size is outside the compact layout bounds: ${bounds.width}x${bounds.height}`);
       }
 
@@ -671,6 +680,7 @@ async function captureExpenseDesignScreenshots(cdp, isFlowRunning, viewport) {
         `/tmp/sent-zx-expense-${capture.name}-desktop-1800x1120-full.png`,
         Buffer.from(fullScreenshot.data, "base64"),
       );
+      if (capture.card) {
       const cardScreenshot = await cdp.send("Page.captureScreenshot", {
         format: "png",
         captureBeyondViewport: false,
@@ -680,6 +690,7 @@ async function captureExpenseDesignScreenshots(cdp, isFlowRunning, viewport) {
         `/tmp/sent-zx-expense-${capture.name}-desktop-1800x1120-card.png`,
         Buffer.from(cardScreenshot.data, "base64"),
       );
+      }
     } catch (error) {
       captureError ??= error;
     } finally {
@@ -2244,15 +2255,269 @@ async function runViewport(cdp, url, backendUrl, viewport, historicalSolution, h
         [...expensePage.querySelectorAll('button')]
           .find((button) => button.textContent.includes('记一笔'))
           ?.click();
-        const secondCreateEditor = await waitUntil(
+        const candidateExpenseEditor = await waitUntil(
           () => {
             const dialog = document.querySelector('.expense-drawer[role="dialog"]');
             return dialog?.dataset.mode === 'edit' ? dialog : null;
           },
           3000,
         );
-        secondCreateEditor.querySelector('.expense-editor-form footer .ghost-button')?.click();
+        const setScopedExpenseValue = (scope, labelText, value) => {
+          const label = [...scope.querySelectorAll('label')]
+            .find((item) => item.textContent?.includes(labelText));
+          return setExpenseControlValue(label?.querySelector('input, select, textarea'), value);
+        };
+        setScopedExpenseValue(candidateExpenseEditor, '费用事由', ${JSON.stringify(expenseQaInvoicePurpose)});
+        setScopedExpenseValue(candidateExpenseEditor, '备注', ${JSON.stringify(expenseQaInvoicePurpose)});
+        setScopedExpenseValue(candidateExpenseEditor, '默认收款方', '验收商户');
+        setScopedExpenseValue(candidateExpenseEditor, '出差区域', '济宁');
+        setScopedExpenseValue(candidateExpenseEditor, '发生日期', ${JSON.stringify(expenseQaOccurredOn)});
+        setScopedExpenseValue(candidateExpenseEditor, '类别', 'lunch');
+        setScopedExpenseValue(candidateExpenseEditor, '付款金额', '22.00');
+        setScopedExpenseValue(candidateExpenseEditor, '计入报销金额', '22.00');
+        setScopedExpenseValue(candidateExpenseEditor.querySelector('.expense-editor-form'), '支付时间', ${JSON.stringify(`${expenseQaOccurredOn}T12:41`)});
+        candidateExpenseEditor.querySelector('input[name="expense-invoice-status"][value="substitute"]')?.click();
+        const candidateExpenseSave = candidateExpenseEditor.querySelector('[data-expense-save]');
+        if (!candidateExpenseSave) throw new Error('Missing substitute-expense save button');
+        candidateExpenseSave.click();
+        const candidateExpenseDetail = await waitUntil(
+          () => {
+            const dialog = document.querySelector('.expense-drawer[role="dialog"]');
+            return dialog?.dataset.mode === 'detail'
+              && dialog.textContent?.includes(${JSON.stringify(expenseQaInvoicePurpose)})
+              ? dialog
+              : null;
+          },
+          10000,
+        );
+        const candidateExpenseReference = candidateExpenseDetail.querySelector('.expense-drawer-meta code')?.textContent?.trim();
+        if (!candidateExpenseReference) throw new Error('Substitute expense is missing its reference code');
+        candidateExpenseDetail.querySelector('[aria-label="关闭记账卡片"]')?.click();
         await waitUntil(() => !document.querySelector('.expense-drawer[role="dialog"]'), 3000);
+
+        const candidateExpenseCollectionResponse = await fetch(
+          ${JSON.stringify(`${backendUrl}/api/travel-expenses`)} + '?weekStart=' + encodeURIComponent(${JSON.stringify(expenseQaWeekStart)}),
+          { credentials: 'include' },
+        );
+        if (!candidateExpenseCollectionResponse.ok) throw new Error('Substitute expense QA list returned ' + candidateExpenseCollectionResponse.status);
+        const candidateExpenseCollection = await candidateExpenseCollectionResponse.json();
+        const candidateExpense = candidateExpenseCollection.items?.find((item) => item.referenceCode === candidateExpenseReference);
+        if (!candidateExpense?.payments?.[0]?.id || candidateExpense.invoiceType !== 'substitute') {
+          throw new Error('Substitute expense QA row was not persisted with its explicit invoice status');
+        }
+
+        const uploadAndReviewQaInvoice = async ({ suffix, totalCents, amountExTaxCents, taxCents, contentBase64 }) => {
+          const uploadResponse = await fetch(${JSON.stringify(`${backendUrl}/api/invoices`)}, {
+            method: 'POST',
+            credentials: 'include',
+            headers: {
+              'Content-Type': 'application/json',
+              'X-CSRF-Token': expenseSession.csrfToken,
+              'Idempotency-Key': 'expense-qa-invoice-' + ${JSON.stringify(String(expenseQaRunId))} + '-' + suffix,
+            },
+            body: JSON.stringify({
+              fileName: 'expense-qa-' + suffix + '.pdf',
+              mediaType: 'application/pdf',
+              contentBase64,
+              sourceRef: null,
+            }),
+          });
+          const uploadBody = await uploadResponse.json();
+          if (uploadResponse.status !== 201 || !uploadBody.item?.id) {
+            throw new Error('Invoice warehouse QA upload failed: ' + uploadResponse.status + ' ' + JSON.stringify(uploadBody.error ?? {}));
+          }
+          const sequence = String((Date.now() % 1000000) + (suffix === 'b' ? 1 : 0));
+          const reviewResponse = await fetch(
+            ${JSON.stringify(`${backendUrl}/api/invoices/`)} + encodeURIComponent(uploadBody.item.id) + '/review',
+            {
+              method: 'PATCH',
+              credentials: 'include',
+              headers: {
+                'Content-Type': 'application/json',
+                'X-CSRF-Token': expenseSession.csrfToken,
+                'If-Match': '"' + uploadBody.item.version + '"',
+              },
+              body: JSON.stringify({
+                invoiceCode: '04400210' + sequence.padStart(4, '0').slice(-4),
+                invoiceNumber: String(70000000 + Number(sequence)).slice(-8),
+                issuedOn: ${JSON.stringify(expenseQaOccurredOn)},
+                sellerName: '验收商户',
+                buyerName: '森特公司',
+                amountExTaxCents,
+                taxCents,
+                totalCents,
+                suggestedCategory: 'lunch',
+              }),
+            },
+          );
+          const reviewBody = await reviewResponse.json();
+          if (reviewResponse.status !== 200 || reviewBody.item?.status !== 'unmatched') {
+            throw new Error('Invoice warehouse QA review failed: ' + reviewResponse.status + ' ' + JSON.stringify(reviewBody.error ?? {}));
+          }
+          return reviewBody.item;
+        };
+        const qaWarehouseInvoices = await Promise.all([
+          uploadAndReviewQaInvoice({
+            suffix: 'a',
+            totalCents: 1000,
+            amountExTaxCents: 943,
+            taxCents: 57,
+            contentBase64: ${JSON.stringify(expenseQaInvoicePdfBase64[0])},
+          }),
+          uploadAndReviewQaInvoice({
+            suffix: 'b',
+            totalCents: 1200,
+            amountExTaxCents: 1132,
+            taxCents: 68,
+            contentBase64: ${JSON.stringify(expenseQaInvoicePdfBase64[1])},
+          }),
+        ]);
+        expensePage.querySelector('[data-testid="expense-tab-invoices"]')?.click();
+        await waitUntil(() => document.querySelector('.invoice-candidate-week-summary'), 10000);
+        const parseCnyCents = (value) => Math.round(Number(String(value ?? '').replace(/[^\\d.]/g, '')) * 100);
+        const candidateSummaryValues = () => [...document.querySelectorAll('.invoice-candidate-week-summary > span')]
+          .map((span) => parseCnyCents(span.querySelector('strong')?.textContent));
+        const coverageBeforeCandidatesResponse = await fetch(
+          ${JSON.stringify(`${backendUrl}/api/travel-expense-weeks/`)} + encodeURIComponent(${JSON.stringify(expenseQaWeekStart)}) + '/invoice-coverage',
+          { credentials: 'include' },
+        );
+        const coverageBeforeCandidates = await coverageBeforeCandidatesResponse.json();
+        const displayedMissingCents = await waitUntil(() => {
+          const [missingCents, substituteCents] = candidateSummaryValues();
+          return coverageBeforeCandidatesResponse.ok
+            && Number.isSafeInteger(coverageBeforeCandidates.item?.missingInvoiceCents)
+            && missingCents === coverageBeforeCandidates.item.missingInvoiceCents
+            && substituteCents === 2200
+            ? [missingCents, substituteCents]
+            : null;
+        }, 10000);
+        const weeklyMissingSummaryMatchesApi = coverageBeforeCandidatesResponse.ok
+          && displayedMissingCents[0] === coverageBeforeCandidates.item?.missingInvoiceCents;
+        const substituteTargetSummaryMatches = displayedMissingCents[1] === 2200;
+        const generateWeekCandidatesButton = document.querySelector('.invoice-candidate-card > header > button');
+        await waitUntil(() => generateWeekCandidatesButton && !generateWeekCandidatesButton.disabled, 10000);
+        generateWeekCandidatesButton.click();
+        await waitUntil(
+          () => document.querySelectorAll('[data-testid="invoice-candidate-group"]').length === 1
+            && document.querySelectorAll('[data-testid="invoice-candidate-group"] article').length === 2,
+          10000,
+        );
+        const candidateExpenseGroup = document.querySelector('[data-testid="invoice-candidate-group"]');
+        const generatedCandidateSummary = candidateSummaryValues();
+        const candidateCombinationExact = candidateExpenseGroup?.textContent?.includes('目标 ¥22.00')
+          && candidateExpenseGroup?.textContent?.includes('组合 ¥22.00')
+          && generatedCandidateSummary[2] === 2200
+          && generatedCandidateSummary[3] === 0;
+        const suggestedCandidatesResponse = await fetch(
+          ${JSON.stringify(`${backendUrl}/api/travel-expense-weeks/`)} + encodeURIComponent(${JSON.stringify(expenseQaWeekStart)})
+            + '/invoice-suggestions?expenseId=' + encodeURIComponent(candidateExpense.id) + '&status=suggested',
+          { credentials: 'include' },
+        );
+        const suggestedCandidatesBody = await suggestedCandidatesResponse.json();
+        const suggestedCandidateIds = new Set((suggestedCandidatesBody.items ?? []).map((item) => item.invoiceId));
+        const candidatesReviewableBeforeBatchAccept = suggestedCandidatesResponse.ok
+          && suggestedCandidatesBody.items?.length === 2
+          && qaWarehouseInvoices.every((invoice) => invoice.status === 'unmatched' && suggestedCandidateIds.has(invoice.id));
+        await captureExpenseState('invoice-candidates');
+        const acceptWeekCandidatesButton = document.querySelector('[data-testid="invoice-candidates-accept-week"]');
+        if (!acceptWeekCandidatesButton) throw new Error('Missing weekly invoice candidate confirmation button');
+        acceptWeekCandidatesButton.click();
+        await waitUntil(() => !document.querySelector('[data-testid="invoice-candidates-accept-week"]'), 10000);
+        const acceptedInvoiceMatchesResponse = await fetch(
+          ${JSON.stringify(`${backendUrl}/api/invoice-matches?weekStart=`)} + encodeURIComponent(${JSON.stringify(expenseQaWeekStart)})
+            + '&expenseId=' + encodeURIComponent(candidateExpense.id) + '&state=confirmed',
+          { credentials: 'include' },
+        );
+        const acceptedInvoiceMatchesBody = await acceptedInvoiceMatchesResponse.json();
+        const acceptedInvoiceAllocationCents = (acceptedInvoiceMatchesBody.items ?? [])
+          .reduce((sum, item) => sum + item.allocatedCents, 0);
+        const invoiceWeekBatchAccepted = acceptedInvoiceMatchesResponse.ok
+          && acceptedInvoiceMatchesBody.items?.length === 2
+          && acceptedInvoiceAllocationCents === 2200;
+        const coverageAfterCandidatesResponse = await fetch(
+          ${JSON.stringify(`${backendUrl}/api/travel-expense-weeks/`)} + encodeURIComponent(${JSON.stringify(expenseQaWeekStart)}) + '/invoice-coverage',
+          { credentials: 'include' },
+        );
+        const coverageAfterCandidates = await coverageAfterCandidatesResponse.json();
+        const invoiceWeekSubstituteCoverageMatches = coverageAfterCandidatesResponse.ok
+          && coverageAfterCandidates.item?.substituteInvoiceCoverageCents === 2200;
+
+        expensePage.querySelector('[data-testid="expense-tab-ledger"]')?.click();
+        await waitUntil(() => expensePage.querySelector('[data-testid="expense-ledger-workbench"]')
+          && !expensePage.querySelector('.expense-loading'), 10000);
+        [...expensePage.querySelectorAll('button')]
+          .find((button) => button.textContent.includes('记一笔'))
+          ?.click();
+        const deleteExpenseEditor = await waitUntil(
+          () => {
+            const dialog = document.querySelector('.expense-drawer[role="dialog"]');
+            return dialog?.dataset.mode === 'edit' ? dialog : null;
+          },
+          3000,
+        );
+        setScopedExpenseValue(deleteExpenseEditor, '费用事由', ${JSON.stringify(expenseQaDeletePurpose)});
+        setScopedExpenseValue(deleteExpenseEditor, '备注', ${JSON.stringify(expenseQaDeletePurpose)});
+        setScopedExpenseValue(deleteExpenseEditor, '默认收款方', '验收商户');
+        setScopedExpenseValue(deleteExpenseEditor, '出差区域', '济宁');
+        setScopedExpenseValue(deleteExpenseEditor, '发生日期', ${JSON.stringify(expenseQaOccurredOn)});
+        setScopedExpenseValue(deleteExpenseEditor, '类别', 'lunch');
+        setScopedExpenseValue(deleteExpenseEditor, '付款金额', '1.00');
+        setScopedExpenseValue(deleteExpenseEditor, '计入报销金额', '1.00');
+        setScopedExpenseValue(deleteExpenseEditor.querySelector('.expense-editor-form'), '支付时间', ${JSON.stringify(`${expenseQaOccurredOn}T12:42`)});
+        const deleteExpenseSave = deleteExpenseEditor.querySelector('[data-expense-save]');
+        if (!deleteExpenseSave) throw new Error('Missing delete QA expense save button');
+        deleteExpenseSave.click();
+        const deleteExpenseDetail = await waitUntil(
+          () => {
+            const dialog = document.querySelector('.expense-drawer[role="dialog"]');
+            return dialog?.dataset.mode === 'detail'
+              && dialog.textContent?.includes(${JSON.stringify(expenseQaDeletePurpose)})
+              ? dialog
+              : null;
+          },
+          10000,
+        );
+        const deleteExpenseReference = deleteExpenseDetail.querySelector('.expense-drawer-meta code')?.textContent?.trim();
+        if (!deleteExpenseReference) throw new Error('Delete QA expense is missing its reference code');
+        deleteExpenseDetail.querySelector('[aria-label="关闭记账卡片"]')?.click();
+        await waitUntil(() => !document.querySelector('.expense-drawer[role="dialog"]'), 3000);
+        const deleteExpenseCollectionResponse = await fetch(
+          ${JSON.stringify(`${backendUrl}/api/travel-expenses`)} + '?weekStart=' + encodeURIComponent(${JSON.stringify(expenseQaWeekStart)}),
+          { credentials: 'include' },
+        );
+        const deleteExpenseCollection = await deleteExpenseCollectionResponse.json();
+        const deleteQaExpense = deleteExpenseCollection.items?.find((item) => item.referenceCode === deleteExpenseReference);
+        if (!deleteExpenseCollectionResponse.ok || !deleteQaExpense) throw new Error('Delete QA expense was not returned by the API');
+        const visibleExpenseRow = (id) => [...document.querySelectorAll('[data-ledger-expense-id]')]
+          .find((row) => row.getAttribute('data-ledger-expense-id') === id && row.getClientRects().length > 0);
+        await waitUntil(() => visibleExpenseRow(deleteQaExpense.id), 5000);
+        const deleteQaButton = visibleExpenseRow(deleteQaExpense.id)?.querySelector('[data-testid="expense-delete-ledger"]');
+        if (!deleteQaButton) throw new Error('Missing visible delete button for the QA expense');
+        deleteQaButton.click();
+        const deleteDialog = await waitUntil(
+          () => document.querySelector('[data-testid="travel-expense-delete-dialog"]'),
+          3000,
+        );
+        const deleteDialogOpened = deleteDialog.getAttribute('role') === 'alertdialog'
+          && deleteDialog.textContent?.includes(${JSON.stringify(expenseQaDeletePurpose)})
+          && document.activeElement === deleteDialog.querySelector('[data-testid="travel-expense-delete-cancel"]');
+        deleteDialog.querySelector('[data-testid="travel-expense-delete-cancel"]')?.click();
+        await waitUntil(() => !document.querySelector('[data-testid="travel-expense-delete-dialog"]'), 3000);
+        const deleteCancelKeepsEntry = Boolean(visibleExpenseRow(deleteQaExpense.id));
+        visibleExpenseRow(deleteQaExpense.id)?.querySelector('[data-testid="expense-delete-ledger"]')?.click();
+        const confirmDeleteDialog = await waitUntil(
+          () => document.querySelector('[data-testid="travel-expense-delete-dialog"]'),
+          3000,
+        );
+        confirmDeleteDialog.querySelector('[data-testid="travel-expense-delete-confirm"]')?.click();
+        await waitUntil(() => !visibleExpenseRow(deleteQaExpense.id), 10000);
+        const deleteAfterCollectionResponse = await fetch(
+          ${JSON.stringify(`${backendUrl}/api/travel-expenses`)} + '?weekStart=' + encodeURIComponent(${JSON.stringify(expenseQaWeekStart)}),
+          { credentials: 'include' },
+        );
+        const deleteAfterCollection = await deleteAfterCollectionResponse.json();
+        const deleteConfirmedAndRemoved = deleteAfterCollectionResponse.ok
+          && !deleteAfterCollection.items?.some((item) => item.id === deleteQaExpense.id);
         window.__qaExpense = {
           pageOpened: Boolean(expensePage),
           loadedWithoutAlert: !expensePage.querySelector('.expense-loading')
@@ -2302,6 +2567,16 @@ async function runViewport(cdp, url, backendUrl, viewport, historicalSolution, h
           paymentProofLoaded,
           proofListRemovedFromDetailParent,
           editorClosedWithEscape: !document.querySelector('.expense-drawer[role="dialog"]'),
+          weeklyMissingSummaryMatchesApi,
+          substituteTargetSummaryMatches,
+          candidateCombinationExact: Boolean(candidateCombinationExact),
+          candidatesReviewableBeforeBatchAccept,
+          invoiceWeekBatchAccepted,
+          acceptedInvoiceAllocationCents,
+          invoiceWeekSubstituteCoverageMatches,
+          deleteDialogOpened: Boolean(deleteDialogOpened),
+          deleteCancelKeepsEntry,
+          deleteConfirmedAndRemoved,
         };
 
         [...document.querySelectorAll('.nav-item')].find((button) => button.textContent.includes('快速记录'))?.click();
@@ -3561,6 +3836,16 @@ async function main() {
         assert.equal(result.expenseFlow.paymentProofLoaded, true, "desktop expense details should render the synthetic payment proof sharply");
         assert.equal(result.expenseFlow.proofListRemovedFromDetailParent, true, "desktop ledger should not keep a full proof list beneath the table");
         assert.equal(result.expenseFlow.editorClosedWithEscape, true, "desktop expense drawer should close on Escape");
+        assert.equal(result.expenseFlow.weeklyMissingSummaryMatchesApi, true, "weekly missing-invoice amount should match the authoritative coverage API");
+        assert.equal(result.expenseFlow.substituteTargetSummaryMatches, true, "weekly substitute target should reflect manually marked substitute expenses");
+        assert.equal(result.expenseFlow.candidateCombinationExact, true, "weekly invoice suggestions should combine warehouse invoices to the exact substitute target");
+        assert.equal(result.expenseFlow.candidatesReviewableBeforeBatchAccept, true, "invoice candidates should remain reviewable before explicit confirmation");
+        assert.equal(result.expenseFlow.invoiceWeekBatchAccepted, true, "weekly invoice batch confirmation should confirm the complete candidate group");
+        assert.equal(result.expenseFlow.acceptedInvoiceAllocationCents, 2200, "weekly confirmed invoice allocations should equal the substitute target");
+        assert.equal(result.expenseFlow.invoiceWeekSubstituteCoverageMatches, true, "weekly substitute coverage should update after confirming candidates");
+        assert.equal(result.expenseFlow.deleteDialogOpened, true, "travel-expense deletion should open the in-app confirmation dialog");
+        assert.equal(result.expenseFlow.deleteCancelKeepsEntry, true, "canceling travel-expense deletion should preserve the entry");
+        assert.equal(result.expenseFlow.deleteConfirmedAndRemoved, true, "confirming travel-expense deletion should remove the entry");
         assert.match(result.weeklyDraftText, /本周重点进展/, "desktop flow should render a backend weekly draft");
         assert.equal(result.weeklyEditor.saved, true, "desktop weekly page should save edited weekly report content");
         assert.equal(result.weeklyEditor.ready, true, "desktop weekly page should mark weekly report as ready");

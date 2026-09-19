@@ -694,6 +694,74 @@ describe("authenticated invoice API", () => {
     );
   });
 
+  it("accepts a reviewed weekly candidate set as one idempotent transaction", async () => {
+    await startHarness({
+      invoiceRecognizer: async () => recognized({
+        fields: { ...recognized().fields, issuedOn: "2026-08-06" },
+      }),
+    });
+    const firstExpense = await createExpense({ invoiceType: "substitute", purpose: "第一笔替票住宿" });
+    await createExpense({
+      occurredOn: "2026-08-05",
+      purpose: "第二笔替票住宿",
+      invoiceType: "substitute",
+      payments: [{ ...expenseBody().payments[0], paidAt: "2026-08-05T18:00:00+08:00" }],
+    });
+    await request("/api/invoices", {
+      method: "POST",
+      headers: { "Idempotency-Key": "weekly-batch-invoice-a" },
+      body: JSON.stringify({
+        ...uploadBody("weekly batch A"),
+        contentBase64: minimalPdf("weekly-batch-a").toString("base64"),
+      }),
+    });
+    await request("/api/invoices", {
+      method: "POST",
+      headers: { "Idempotency-Key": "weekly-batch-invoice-b" },
+      body: JSON.stringify({
+        ...uploadBody("weekly batch B"),
+        contentBase64: minimalPdf("weekly-batch-b").toString("base64"),
+      }),
+    });
+    const generated = await request("/api/travel-expense-weeks/2026-08-03/invoice-suggestions", {
+      method: "POST",
+      headers: { "Idempotency-Key": "weekly-batch-generate" },
+      body: "{}",
+    });
+    assert.equal(generated.response.status, 201);
+    assert.equal(generated.body.items.length, 2);
+
+    const acceptUrl = "/api/travel-expense-weeks/2026-08-03/invoice-suggestions/accept";
+    const acceptOptions = {
+      method: "POST",
+      headers: { "Idempotency-Key": "weekly-batch-accept" },
+      body: JSON.stringify({
+        candidates: generated.body.items.map(({ id, version }) => ({ id, version })),
+      }),
+    };
+    const accepted = await request(acceptUrl, acceptOptions);
+    const replayed = await request(acceptUrl, acceptOptions);
+    assert.equal(accepted.response.status, 201);
+    assert.equal(accepted.body.items.length, 2);
+    assert.deepEqual(replayed.body, accepted.body);
+    assert.ok(accepted.body.items.every(({ item, match }) => item.status === "accepted" && match.state === "confirmed"));
+    assert.equal(accepted.body.items.reduce((total, entry) => total + entry.match.allocatedCents, 0), 20000);
+    assertApiCollection("invoiceMatchCandidate", accepted.body.items.map((entry) => entry.item));
+    assertApiCollection("invoiceMatch", accepted.body.items.map((entry) => entry.match));
+
+    const incompleteReplay = await request(acceptUrl, {
+      method: "POST",
+      headers: { "Idempotency-Key": "weekly-batch-incomplete" },
+      body: JSON.stringify({ candidates: [{ id: generated.body.items[0].id, version: 1 }] }),
+    });
+    assert.equal(incompleteReplay.response.status, 409);
+    assert.equal(incompleteReplay.body.error.code, "CANDIDATE_SET_CHANGED");
+
+    const audits = await request(`/api/audit-logs?entityType=invoice_match_candidate&entityId=${encodeURIComponent(generated.body.items[0].id)}`);
+    assert.ok(audits.body.items.some((item) => item.action === "invoice.candidate_accept"));
+    assert.equal((await request(`/api/travel-expenses/${encodeURIComponent(firstExpense.id)}`)).body.item.invoiceType, "substitute");
+  });
+
   it("soft-deletes an unmatched invoice with optimistic locking and audit", async () => {
     await startHarness();
     const uploaded = await request("/api/invoices", {

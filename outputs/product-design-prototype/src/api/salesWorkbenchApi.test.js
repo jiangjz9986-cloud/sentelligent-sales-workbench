@@ -3715,6 +3715,7 @@ describe("sales workbench API client", () => {
         if (url.endsWith("/api/travel-expense-weeks/2026-08-03/invoice-coverage")) return jsonResponse({ item: { weekStart: "2026-08-03", reimbursementCents: 10000, confirmedCoverageCents: 0, electronicInvoiceCoverageCents: 0, substituteInvoiceCoverageCents: 0, noInvoiceConfirmedCents: 6800, missingInvoiceCents: 10000, invoiceWarehouseAvailableCents: 24000 } });
         if (url.includes("/api/travel-expense-weeks/2026-08-03/invoice-suggestions?")) return jsonResponse({ items: [sampleInvoiceCandidate()] });
         if (url.endsWith("/api/travel-expense-weeks/2026-08-03/invoice-suggestions")) return jsonResponse({ items: [sampleInvoiceCandidate()] }, 201);
+        if (url.endsWith("/api/travel-expense-weeks/2026-08-03/invoice-suggestions/accept")) return jsonResponse({ items: [{ item: sampleInvoiceCandidate({ status: "accepted" }), match: sampleInvoiceMatch() }] }, 201);
         if (url.endsWith("/api/invoice-match-candidates/candidate-1/accept")) return jsonResponse({ item: sampleInvoiceCandidate({ status: "accepted" }) });
         if (url.endsWith("/api/invoice-match-candidates/candidate-1/reject")) return jsonResponse({ item: sampleInvoiceCandidate({ status: "rejected" }) });
         return jsonResponse({ error: "not_found" }, 404);
@@ -3739,6 +3740,9 @@ describe("sales workbench API client", () => {
     const coverage = await api.getWeekInvoiceCoverage("2026-08-03");
     const candidates = await api.listInvoiceCandidates({ weekStart: "2026-08-03", status: "suggested" });
     const generated = await api.generateInvoiceCandidates("2026-08-03", { idempotencyKey: "candidate-generate-1" });
+    const acceptedWeekly = await api.acceptInvoiceCandidatesForWeek("2026-08-03", [sampleInvoiceCandidate()], {
+      idempotencyKey: "candidate-week-accept-1",
+    });
     const accepted = await api.acceptInvoiceCandidate("candidate-1", 1, { idempotencyKey: "candidate-accept-1" });
     const rejected = await api.rejectInvoiceCandidate("candidate-1", 1, { idempotencyKey: "candidate-reject-1" });
 
@@ -3752,6 +3756,9 @@ describe("sales workbench API client", () => {
     assert.equal(coverage.invoiceWarehouseAvailableCents, 24000);
     assert.equal(candidates[0].status, "suggested");
     assert.equal(generated.length, 1);
+    assert.equal(acceptedWeekly.length, 1);
+    assert.equal(acceptedWeekly[0].item.status, "accepted");
+    assert.equal(acceptedWeekly[0].match.state, "confirmed");
     assert.equal(accepted.status, "accepted");
     assert.equal(rejected.status, "rejected");
     assert.equal(calls[1].ifMatch, '"1"');
@@ -3760,10 +3767,14 @@ describe("sales workbench API client", () => {
     assert.deepEqual(calls[5].body, { confirmationId: "no-invoice-1" });
     assert.match(calls[7].url, /\/api\/travel-expense-weeks\/2026-08-03\/invoice-suggestions\?status=suggested$/);
     assert.equal(calls[8].idempotencyKey, "candidate-generate-1");
-    assert.equal(calls[9].idempotencyKey, "candidate-accept-1");
-    assert.equal(calls[9].ifMatch, '"1"');
-    assert.equal(calls[10].idempotencyKey, "candidate-reject-1");
+    assert.equal(calls[9].url, "https://example.test/api/travel-expense-weeks/2026-08-03/invoice-suggestions/accept");
+    assert.deepEqual(calls[9].body, { candidates: [{ id: "candidate-1", version: 1 }] });
+    assert.equal(calls[9].idempotencyKey, "candidate-week-accept-1");
+    assert.equal(calls[9].ifMatch, undefined);
+    assert.equal(calls[10].idempotencyKey, "candidate-accept-1");
     assert.equal(calls[10].ifMatch, '"1"');
+    assert.equal(calls[11].idempotencyKey, "candidate-reject-1");
+    assert.equal(calls[11].ifMatch, '"1"');
   });
 
   it("rejects malformed nested travel-expense responses", async () => {

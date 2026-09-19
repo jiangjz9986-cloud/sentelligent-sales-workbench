@@ -291,6 +291,49 @@ export function InvoiceManager({
     && Number.isSafeInteger(coverage?.invoiceWarehouseAvailableCents)
     && coverage.invoiceWarehouseAvailableCents > 0;
   const hasSuggestedCandidate = candidates.some((candidate) => candidate.status === "suggested");
+  const suggestedCandidates = candidates.filter((candidate) => candidate.status === "suggested");
+  const substituteTargetCents = expenses.reduce((total, expense) => {
+    if (expense.invoiceType !== "substitute" || !Array.isArray(expense.payments)) return total;
+    const reimbursementCents = expense.payments.reduce((sum, payment) => (
+      Number.isSafeInteger(payment?.reimbursementCents) && payment.reimbursementCents >= 0
+        ? sum + payment.reimbursementCents
+        : Number.POSITIVE_INFINITY
+    ), 0);
+    if (!Number.isSafeInteger(reimbursementCents)) return total;
+    const uncovered = Math.max(0, reimbursementCents - (confirmedCentsByExpense.get(expense.id) ?? 0));
+    return Number.isSafeInteger(total + uncovered) ? total + uncovered : Number.MAX_SAFE_INTEGER;
+  }, 0);
+  const suggestedCoverageCents = suggestedCandidates.reduce((total, candidate) => (
+    Number.isSafeInteger(candidate.proposedCents) && candidate.proposedCents > 0
+      && Number.isSafeInteger(total + candidate.proposedCents)
+      ? total + candidate.proposedCents
+      : total
+  ), 0);
+  const candidateShortfallCents = Math.max(0, substituteTargetCents - suggestedCoverageCents);
+  const candidateGroups = useMemo(() => {
+    const groups = new Map();
+    for (const candidate of suggestedCandidates) {
+      const group = groups.get(candidate.expenseId) ?? { expenseId: candidate.expenseId, candidates: [] };
+      group.candidates.push(candidate);
+      groups.set(candidate.expenseId, group);
+    }
+    return [...groups.values()].map((group) => {
+      const expense = expenses.find((item) => item.id === group.expenseId);
+      const targetCents = expense?.payments?.reduce((sum, payment) => (
+        Number.isSafeInteger(payment?.reimbursementCents) && payment.reimbursementCents >= 0
+          ? sum + payment.reimbursementCents
+          : sum
+      ), 0);
+      return {
+        ...group,
+        expense,
+        targetCents: Number.isSafeInteger(targetCents)
+          ? Math.max(0, targetCents - (confirmedCentsByExpense.get(group.expenseId) ?? 0))
+          : 0,
+      };
+    }).sort((first, second) => String(first.expense?.occurredOn ?? "").localeCompare(String(second.expense?.occurredOn ?? ""))
+      || first.expenseId.localeCompare(second.expenseId));
+  }, [confirmedCentsByExpense, expenses, suggestedCandidates]);
   const candidateGenerationPending = pendingAction === "generate-candidates";
   const candidateGenerationTitle = candidateGenerationPending
     ? "正在自动生成候选发票"
@@ -497,6 +540,21 @@ export function InvoiceManager({
     }
   }
 
+  async function acceptWeekCandidates() {
+    if (suggestedCandidates.length === 0) return;
+    const accepted = await perform("accept-week-candidates", () => apiClient.acceptInvoiceCandidatesForWeek(
+      week.start,
+      suggestedCandidates,
+      { idempotencyKey: actionKey("invoice-week-candidates-accept") },
+    ));
+    if (!accepted) return;
+    const acceptedById = new Map(accepted.map((item) => [item.item.id, item.item]));
+    setCandidates((current) => current.map((item) => acceptedById.get(item.id) ?? item));
+    setMatches((current) => [...accepted.map((item) => item.match), ...current]);
+    setReload((current) => ({ ...current, invoices: current.invoices + 1, matches: current.matches + 1, noInvoice: current.noInvoice + 1 }));
+    onExpenseChanged();
+  }
+
   return (
     <section className="invoice-manager">
       <header className="expense-section-intro invoice-manager-intro">
@@ -632,15 +690,31 @@ export function InvoiceManager({
         </section>
 
         <section className="invoice-operation-card invoice-candidate-card">
-          <header><div><Sparkles size={17} /><strong>候选发票</strong></div><button type="button" onClick={generateCandidates} disabled={candidateGenerationDisabled} title={candidateGenerationTitle} aria-describedby={candidateGenerationDisabled ? "invoice-candidate-generation-status" : undefined}>{candidateGenerationPending ? <LoaderCircle className="state-spinner" size={15} /> : <Sparkles size={15} />}自动生成候选</button></header>
+          <header><div><Sparkles size={17} /><strong>本周替票组合</strong></div><button type="button" onClick={generateCandidates} disabled={candidateGenerationDisabled} title={candidateGenerationTitle} aria-describedby={candidateGenerationDisabled ? "invoice-candidate-generation-status" : undefined}>{candidateGenerationPending ? <LoaderCircle className="state-spinner" size={15} /> : <Sparkles size={15} />}按周汇总并匹配</button></header>
+          <div className="invoice-candidate-week-summary" aria-label="本周替票组合汇总">
+            <span><small>本周缺票总额</small><strong>{formatCny(coverage?.missingInvoiceCents ?? 0)}</strong></span>
+            <span><small>已标为替票的缺口</small><strong>{formatCny(substituteTargetCents)}</strong></span>
+            <span><small>候选组合已覆盖</small><strong>{formatCny(suggestedCoverageCents)}</strong></span>
+            <span className={candidateShortfallCents > 0 ? "is-warning" : "is-clear"}><small>候选未覆盖</small><strong>{formatCny(candidateShortfallCents)}</strong></span>
+          </div>
+          <p className="invoice-candidate-policy-note">仅为手动标记“替票”的费用生成建议；系统按付款与开票日期、费用类别和可用余额组合发票。逐笔核实后再确认，不会自动把候选记为已匹配。</p>
           {candidateGenerationDisabled ? <p id="invoice-candidate-generation-status" className="invoice-inline-state" role="status">{candidateGenerationTitle}</p> : null}
-          <ResourceState state={resource.candidates} loadingText="正在读取候选发票" empty="暂无可用候选发票" isEmpty={candidates.filter((item) => item.status === "suggested").length === 0} retryLabel="重新加载候选发票" onRetry={() => setReload((current) => ({ ...current, candidates: current.candidates + 1 }))} />
+          {suggestedCandidates.length > 0 ? <div className="invoice-candidate-batch-action">
+            <span>已为 {candidateGroups.length} 笔替票费用组合 {suggestedCandidates.length} 张发票</span>
+            <button type="button" onClick={acceptWeekCandidates} disabled={pendingAction !== ""} data-testid="invoice-candidates-accept-week">
+              {pendingAction === "accept-week-candidates" ? <LoaderCircle className="state-spinner" size={15} /> : <Check size={15} />}
+              一次确认本周 {suggestedCandidates.length} 张候选（{formatCny(suggestedCoverageCents)}）
+            </button>
+          </div> : null}
+          <ResourceState state={resource.candidates} loadingText="正在读取候选发票" empty="暂无待确认的发票组合" isEmpty={suggestedCandidates.length === 0} retryLabel="重新加载候选发票" onRetry={() => setReload((current) => ({ ...current, candidates: current.candidates + 1 }))} />
           {resource.candidates.status === "ready" ? <div className="invoice-candidate-list">
-            {candidates.filter((candidate) => candidate.status === "suggested").map((candidate) => {
-              const invoice = invoices.find((item) => item.id === candidate.invoiceId);
-              const expense = expenses.find((item) => item.id === candidate.expenseId);
-              return <article key={candidate.id}><div className="invoice-candidate-score"><strong>{Math.round(candidate.score ?? 0)}</strong><span>匹配分</span></div><div><strong>{invoice?.fileName ?? candidate.invoiceId}</strong><span>→ {expense?.purpose ?? candidate.expenseId}</span><small>{formatCny(candidate.proposedCents ?? 0)} · {(candidate.rationale ?? []).join(" · ") || "等待人工判断"}</small></div><nav><button type="button" className="accept" onClick={() => decideCandidate(candidate, "accept")} disabled={pendingAction === `accept-${candidate.id}`}><Check size={14} />接受</button><button type="button" onClick={() => decideCandidate(candidate, "reject")} disabled={pendingAction === `reject-${candidate.id}`}><X size={14} />忽略</button></nav></article>;
-            })}
+            {candidateGroups.map((group) => <section className="invoice-candidate-expense-group" key={group.expenseId} data-testid="invoice-candidate-group">
+              <header><strong>{group.expense?.purpose ?? group.expenseId}</strong><small>{group.expense?.occurredOn ?? ""} · 目标 {formatCny(group.targetCents)} · 组合 {formatCny(group.candidates.reduce((sum, item) => sum + (item.proposedCents ?? 0), 0))}</small></header>
+              {group.candidates.map((candidate) => {
+                const invoice = invoices.find((item) => item.id === candidate.invoiceId);
+                return <article key={candidate.id}><div className="invoice-candidate-score"><strong>{Math.round(candidate.score ?? 0)}</strong><span>匹配分</span></div><div><strong>{invoice?.fileName ?? candidate.invoiceId}</strong><span>→ {formatCny(candidate.proposedCents ?? 0)}</span><small>{(candidate.rationale ?? []).join(" · ") || "等待人工判断"}</small></div><nav><button type="button" className="accept" onClick={() => decideCandidate(candidate, "accept")} disabled={pendingAction !== ""}><Check size={14} />接受</button><button type="button" onClick={() => decideCandidate(candidate, "reject")} disabled={pendingAction !== ""}><X size={14} />忽略</button></nav></article>;
+              })}
+            </section>)}
           </div> : null}
         </section>
       </div>

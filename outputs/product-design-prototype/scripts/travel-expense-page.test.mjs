@@ -87,6 +87,7 @@ describe("travel expense feature boundary", () => {
     const ledgerCss = await source("src/features/travelExpense/expenseLedgerWorkbench.css");
     const proofs = await source("src/features/travelExpense/PaymentProofCenter.jsx");
     const invoices = await source("src/features/travelExpense/InvoiceManager.jsx");
+    const api = await source("src/api/salesWorkbenchApi.js");
     const settlement = await source("src/features/travelExpense/AdvanceSettlement.jsx");
 
     assert.match(page, /\{ id: "ledger", label: "账本" \}/);
@@ -128,6 +129,15 @@ describe("travel expense feature boundary", () => {
     assert.match(page, /<AdvanceSettlement/);
     assert.match(invoices, /确认无票/);
     assert.match(invoices, /候选发票/);
+    assert.match(invoices, /本周替票组合/);
+    assert.match(invoices, /本周缺票总额/);
+    assert.match(invoices, /候选组合已覆盖/);
+    assert.match(invoices, /候选未覆盖/);
+    assert.match(invoices, /acceptInvoiceCandidatesForWeek/);
+    assert.match(invoices, /data-testid="invoice-candidates-accept-week"/);
+    assert.match(invoices, /data-testid="invoice-candidate-group"/);
+    assert.match(api, /acceptInvoiceCandidatesForWeek/);
+    assert.match(api, /weeklyInvoiceCandidates\.items/);
     assert.match(invoices, /const noInvoiceConfirmationDisabled =/);
     assert.match(invoices, /!noInvoiceReason\.trim\(\)/);
     assert.match(invoices, /disabled=\{noInvoiceConfirmationDisabled\}/);
