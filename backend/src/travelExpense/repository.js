@@ -43,10 +43,11 @@ export class TravelExpenseVersionConflictError extends Error {
 }
 
 export class TravelExpenseDependencyConflictError extends Error {
-  constructor(code, message) {
+  constructor(code, message, details = null) {
     super(message);
     this.name = "TravelExpenseDependencyConflictError";
     this.code = code;
+    this.details = details;
   }
 }
 
@@ -501,31 +502,110 @@ export function createTravelExpenseRepository(db, {
     };
   }
 
-  function activeExpenseInvoiceDependency(expenseId) {
+  function activeExpenseInvoiceDependency(expenseId, owner) {
     return db.prepare(`
       SELECT dependency FROM (
-        SELECT 'invoice_match' AS dependency
-        FROM invoice_matches
-        WHERE expense_id = $expenseId AND state IN ('suggested', 'confirmed')
-        UNION ALL
-        SELECT 'no_invoice_confirmation'
-        FROM travel_expense_no_invoice_confirmations
-        WHERE expense_id = $expenseId AND revoked_at IS NULL
-        UNION ALL
-        SELECT 'match_candidate'
-        FROM invoice_match_candidates
-        WHERE expense_id = $expenseId AND status = 'suggested'
-        UNION ALL
-        SELECT 'ingestion'
-        FROM travel_expense_ingestions
-        WHERE expense_id = $expenseId
-        UNION ALL
-        SELECT 'document_inbox'
-        FROM travel_expense_document_inbox
-        WHERE matched_expense_id = $expenseId
+        SELECT 'confirmed_invoice_match' AS dependency
+        FROM invoice_matches match
+        WHERE match.expense_id = $expenseId AND match.owner = $owner
+          AND match.state = 'confirmed'
+          AND (
+            match.match_method <> 'rule_candidate'
+            OR EXISTS (
+              SELECT 1
+              FROM invoice_match_candidates candidate
+              WHERE candidate.owner = match.owner
+                AND candidate.accepted_match_id = match.id
+                AND candidate.status = 'accepted'
+            )
+          )
       )
       LIMIT 1
-    `).get({ $expenseId: expenseId });
+    `).get({ $expenseId: expenseId, $owner: owner });
+  }
+
+  function retireUnconfirmedExpenseInvoiceWorkflow(expenseId, owner, actor, timestamp) {
+    const affectedInvoiceIds = db.prepare(`
+      SELECT DISTINCT invoice_id
+      FROM invoice_matches
+      WHERE expense_id = $expenseId AND owner = $owner
+        AND (
+          state = 'suggested'
+          OR (
+            state = 'confirmed' AND match_method = 'rule_candidate'
+            AND NOT EXISTS (
+              SELECT 1
+              FROM invoice_match_candidates candidate
+              WHERE candidate.owner = invoice_matches.owner
+                AND candidate.accepted_match_id = invoice_matches.id
+                AND candidate.status = 'accepted'
+            )
+          )
+        )
+    `).all({ $expenseId: expenseId, $owner: owner }).map((row) => row.invoice_id);
+    db.prepare(`
+      UPDATE invoice_matches
+      SET state = 'revoked', revoked_by = $actor, revoked_at = $now,
+          updated_at = $now, version = version + 1
+      WHERE expense_id = $expenseId AND owner = $owner
+        AND (
+          state = 'suggested'
+          OR (
+            state = 'confirmed' AND match_method = 'rule_candidate'
+            AND NOT EXISTS (
+              SELECT 1
+              FROM invoice_match_candidates candidate
+              WHERE candidate.owner = invoice_matches.owner
+                AND candidate.accepted_match_id = invoice_matches.id
+                AND candidate.status = 'accepted'
+            )
+          )
+        )
+    `).run({ $expenseId: expenseId, $owner: owner, $actor: actor, $now: timestamp });
+    db.prepare(`
+      UPDATE invoice_match_candidates
+      SET status = 'expired', decided_by = $actor, decided_at = $now,
+          updated_at = $now, version = version + 1
+      WHERE expense_id = $expenseId AND owner = $owner AND status = 'suggested'
+    `).run({ $expenseId: expenseId, $owner: owner, $actor: actor, $now: timestamp });
+    db.prepare(`
+      UPDATE travel_expense_no_invoice_confirmations
+      SET revoked_by = $actor, revoked_at = $now, updated_at = $now,
+          version = version + 1
+      WHERE expense_id = $expenseId AND owner = $owner AND revoked_at IS NULL
+    `).run({ $expenseId: expenseId, $owner: owner, $actor: actor, $now: timestamp });
+
+    for (const invoiceId of affectedInvoiceIds) {
+      const invoice = db.prepare(`
+        SELECT total_cents, status
+        FROM invoice_documents
+        WHERE id = $invoiceId AND owner = $owner AND deleted_at IS NULL
+      `).get({ $invoiceId: invoiceId, $owner: owner });
+      if (!invoice) continue;
+      const confirmedCents = Number(db.prepare(`
+        SELECT COALESCE(SUM(allocated_cents), 0) AS total
+        FROM invoice_matches
+        WHERE invoice_id = $invoiceId AND owner = $owner AND state = 'confirmed'
+      `).get({ $invoiceId: invoiceId, $owner: owner }).total);
+      const status = invoice.total_cents !== null
+        && Number(invoice.total_cents) > 0
+        && confirmedCents >= Number(invoice.total_cents)
+        ? "matched"
+        : "unmatched";
+      if (invoice.status === status) continue;
+      db.prepare(`
+        UPDATE invoice_documents
+        SET status = $status, updated_by = $actor, updated_at = $now,
+            version = version + 1
+        WHERE id = $invoiceId AND owner = $owner AND deleted_at IS NULL
+      `).run({
+        $status: status,
+        $actor: actor,
+        $now: timestamp,
+        $invoiceId: invoiceId,
+        $owner: owner,
+      });
+    }
   }
 
   function persistPayments(expenseId, payments, timestamp) {
@@ -726,13 +806,18 @@ export function createTravelExpenseRepository(db, {
       if (Number(current.version) !== version) {
         throw new TravelExpenseVersionConflictError(Number(current.version));
       }
-      const dependency = activeExpenseInvoiceDependency(expenseId);
+      const dependency = activeExpenseInvoiceDependency(expenseId, owner);
       if (dependency) {
         throw new TravelExpenseDependencyConflictError(
           "EXPENSE_HAS_ACTIVE_INVOICE_STATE",
-          `Expense cannot be deleted while ${dependency.dependency} records are active`,
+          "Expense cannot be deleted while a confirmed invoice match is active",
+          { dependency: dependency.dependency },
         );
       }
+      // Preserve ingestion and matched-document rows as source history. Manual
+      // selections and accepted replacement candidates block deletion; only
+      // automatic rule matches and unaccepted suggestions are retired here.
+      retireUnconfirmedExpenseInvoiceWorkflow(expenseId, owner, actor, now);
       const result = db.prepare(`
         UPDATE travel_expenses
         SET deleted_at = $now, deleted_by = $actor, updated_by = $actor,
