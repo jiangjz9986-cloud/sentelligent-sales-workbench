@@ -115,6 +115,8 @@ export function ConfirmDialog({
   title,
   description,
   confirmLabel = "确认删除",
+  confirmVariant = "danger",
+  confirmIcon: ConfirmIcon = Trash2,
   busy = false,
   errorMessage = "",
   onCancel,
@@ -167,13 +169,13 @@ export function ConfirmDialog({
             取消
           </button>
           <button
-            className="primary-button danger-button"
+            className={`primary-button${confirmVariant === "danger" ? " danger-button" : ""}`}
             type="button"
             data-testid={`${testIdPrefix}-confirm`}
             disabled={busy}
             onClick={onConfirm}
           >
-            <Trash2 size={16} />
+            <ConfirmIcon size={16} />
             {busy ? "删除中" : confirmLabel}
           </button>
         </div>
