@@ -36,13 +36,40 @@ describe("expense ledger workbench shell", () => {
     assert.match(page, /onDeleteItem=\{deleteExpense\}/);
     assert.match(page, /setDeleteTarget\(expense\)/);
     assert.match(page, /ConfirmDialog/);
-    assert.match(page, /onConfirm=\{confirmDeleteExpense\}/);
+    assert.match(page, /onConfirm=\{deleteBlockedByInvoice \? openInvoiceManagerFromDelete : confirmDeleteExpense\}/);
     assert.match(page, /EXPENSE_HAS_ACTIVE_INVOICE_STATE/);
-    const deleteFlowStart = page.indexOf("async function deleteExpense(expense)");
-    const deleteFlowEnd = page.indexOf("async function uploadAttachment", deleteFlowStart);
+    const deleteFlowStart = page.indexOf("function deleteExpense(expense)");
+    const deleteFlowEnd = page.indexOf("function closeDeleteDialog", deleteFlowStart);
     assert.doesNotMatch(page.slice(deleteFlowStart, deleteFlowEnd), /globalThis\.confirm/);
     assert.match(page, /deleteTravelExpense\(deleteTarget\.id, deleteTarget\.version\)/);
     assert.match(css, /\.ledger-workbench-delete\s*\{/);
+  });
+
+  it("turns invoice-blocked deletes into a recoverable route to invoice management", async () => {
+    const page = await source("TravelExpensePage.jsx");
+    const dialog = await source("../salesWorkbench/pages/shared.jsx");
+    const deleteFlowStart = page.indexOf("function deleteExpense(expense)");
+    const deleteFlowEnd = page.indexOf("async function confirmDeleteExpense", deleteFlowStart);
+    const deleteOpenFlow = page.slice(deleteFlowStart, deleteFlowEnd);
+    const invoiceRecoveryStart = page.indexOf("function openInvoiceManagerFromDelete()");
+    const invoiceRecoveryEnd = page.indexOf("async function confirmDeleteExpense", invoiceRecoveryStart);
+    const invoiceRecovery = page.slice(invoiceRecoveryStart, invoiceRecoveryEnd);
+    const closeFlowStart = page.indexOf("function closeDeleteDialog()");
+    const closeFlowEnd = page.indexOf("function openInvoiceManagerFromDelete", closeFlowStart);
+    const closeFlow = page.slice(closeFlowStart, closeFlowEnd);
+
+    assert.match(deleteOpenFlow, /setDeleteBlockedByInvoice\(false\)/);
+    assert.match(page, /setDeleteBlockedByInvoice\(deleteError\?\.code === "EXPENSE_HAS_ACTIVE_INVOICE_STATE"\)/);
+    assert.match(page, /title=\{deleteBlockedByInvoice \? "这笔记账暂不能删除"/);
+    assert.match(page, /confirmLabel=\{deleteBlockedByInvoice \? "去处理票据关联"/);
+    assert.match(closeFlow, /setDeleteBlockedByInvoice\(false\)/);
+    assert.match(closeFlow, /setDeleteError\(""\)/);
+    assert.match(invoiceRecovery, /setActiveTab\("invoices"\)/);
+    assert.match(invoiceRecovery, /setDeleteTarget\(null\)/);
+    assert.match(invoiceRecovery, /setDeleteBlockedByInvoice\(false\)/);
+    assert.match(dialog, /confirmVariant = "danger"/);
+    assert.match(dialog, /confirmIcon: ConfirmIcon = Trash2/);
+    assert.match(dialog, /confirmVariant === "danger" \? " danger-button" : ""/);
   });
 
   it("visually and semantically separates pending reviews from formal entries", async () => {

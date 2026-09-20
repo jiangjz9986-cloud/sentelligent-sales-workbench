@@ -4,6 +4,7 @@ import {
   LoaderCircle,
   MapPin,
   Plus,
+  ReceiptText,
   RefreshCw,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -66,7 +67,7 @@ function mergeById(items, item) {
 
 function expenseErrorMessage(error, fallback) {
   if (error?.code === "EXPENSE_HAS_ACTIVE_INVOICE_STATE") {
-    return "这笔费用仍关联发票匹配、替票候选、无票确认或待处理凭证。请先在发票/凭证管理中撤销或处理关联，再删除费用；发票原件不会被删除。";
+    return "这笔费用仍有关联：发票匹配、替票候选、无票确认或待处理凭证。费用记录和发票原件均未删除。";
   }
   if (error?.code === "VERSION_CONFLICT") {
     return "记录已在其他窗口更新，请重新加载后再编辑。";
@@ -121,6 +122,7 @@ export function TravelExpensePage({
   const [deleteTarget, setDeleteTarget] = useState(null);
   const [deletePending, setDeletePending] = useState(false);
   const [deleteError, setDeleteError] = useState("");
+  const [deleteBlockedByInvoice, setDeleteBlockedByInvoice] = useState(false);
   const [invoicePrintItems, setInvoicePrintItems] = useState(null);
   const [selectedLedgerDate, setSelectedLedgerDate] = useState(null);
   const [highlightExpenseId, setHighlightExpenseId] = useState(null);
@@ -415,21 +417,39 @@ export function TravelExpensePage({
     }
   }
 
-  async function deleteExpense(expense) {
+  function deleteExpense(expense) {
     setDeleteError("");
+    setDeleteBlockedByInvoice(false);
     setDeleteTarget(expense);
+  }
+
+  function closeDeleteDialog() {
+    if (deletePending) return;
+    setDeleteTarget(null);
+    setDeleteError("");
+    setDeleteBlockedByInvoice(false);
+  }
+
+  function openInvoiceManagerFromDelete() {
+    if (deletePending) return;
+    setActiveTab("invoices");
+    setDeleteTarget(null);
+    setDeleteError("");
+    setDeleteBlockedByInvoice(false);
   }
 
   async function confirmDeleteExpense() {
     if (!deleteTarget || deletePending) return;
     setDeletePending(true);
     setDeleteError("");
+    setDeleteBlockedByInvoice(false);
     try {
       await apiClient.deleteTravelExpense(deleteTarget.id, deleteTarget.version);
       setExpenses((current) => current.filter((item) => item.id !== deleteTarget.id));
       setDeleteTarget(null);
       setReloadToken((current) => current + 1);
     } catch (deleteError) {
+      setDeleteBlockedByInvoice(deleteError?.code === "EXPENSE_HAS_ACTIVE_INVOICE_STATE");
       setDeleteError(expenseErrorMessage(deleteError, "费用删除失败，请稍后重试。"));
     } finally {
       setDeletePending(false);
@@ -808,15 +828,19 @@ export function TravelExpensePage({
       />
       <ConfirmDialog
         open={Boolean(deleteTarget)}
-        title="删除这笔记账？"
-        description={deleteTarget
-          ? `将从账本中移除“${deleteTarget.purpose}”（${deleteTarget.occurredOn}）。已关联的发票、替票候选、无票确认或待处理凭证需要先处理，避免账目与票据失去对应关系。`
-          : ""}
-        confirmLabel="删除记账"
+        title={deleteBlockedByInvoice ? "这笔记账暂不能删除" : "删除这笔记账？"}
+        description={deleteBlockedByInvoice
+          ? "请先前往发票管理处理上述关联，完成后返回账本再删除。"
+          : deleteTarget
+            ? `将从账本中移除“${deleteTarget.purpose}”（${deleteTarget.occurredOn}）。已关联的发票、替票候选、无票确认或待处理凭证需要先处理，避免账目与票据失去对应关系。`
+            : ""}
+        confirmLabel={deleteBlockedByInvoice ? "去处理票据关联" : "删除记账"}
+        confirmVariant={deleteBlockedByInvoice ? "primary" : "danger"}
+        confirmIcon={deleteBlockedByInvoice ? ReceiptText : undefined}
         busy={deletePending}
         errorMessage={deleteError}
-        onCancel={() => setDeleteTarget(null)}
-        onConfirm={confirmDeleteExpense}
+        onCancel={closeDeleteDialog}
+        onConfirm={deleteBlockedByInvoice ? openInvoiceManagerFromDelete : confirmDeleteExpense}
         testIdPrefix="travel-expense-delete"
       />
       <TripRegionSettingsCard open={selectedWeekLoaded && regionSettingsOpen} profile={regionProfile} pending={regionSaving} onClose={() => setRegionSettingsOpen(false)} onSave={saveRegionProfile} />
