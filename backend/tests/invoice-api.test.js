@@ -329,6 +329,42 @@ describe("authenticated invoice API", () => {
     assert.equal(revoked.body.item.state, "revoked");
   });
 
+  it("returns the confirmed invoice dependency when an expense delete is blocked", async () => {
+    await startHarness();
+    const expense = await createExpense({
+      payments: [{ ...expenseBody().payments[0], amountCents: 4500, reimbursementCents: 4500 }],
+    });
+    const uploaded = await request("/api/invoices", {
+      method: "POST",
+      headers: { "Idempotency-Key": "delete-blocked-invoice-upload" },
+      body: JSON.stringify(uploadBody("删除拦截发票")),
+    });
+    assert.equal(uploaded.response.status, 201);
+
+    const match = await request(`/api/invoices/${encodeURIComponent(uploaded.body.item.id)}/matches`, {
+      method: "POST",
+      headers: { "If-Match": '"1"', "Idempotency-Key": "delete-blocked-invoice-match" },
+      body: JSON.stringify({
+        expenseReferenceCode: expense.referenceCode,
+        paymentId: expense.payments[0].id,
+        allocatedCents: 4500,
+        matchMethod: "manual_code",
+      }),
+    });
+    assert.equal(match.response.status, 201);
+
+    const current = await request(`/api/travel-expenses/${encodeURIComponent(expense.id)}`);
+    const deletion = await request(`/api/travel-expenses/${encodeURIComponent(expense.id)}`, {
+      method: "DELETE",
+      headers: { "If-Match": `"${current.body.item.version}"` },
+    });
+
+    assert.equal(deletion.response.status, 409);
+    assert.equal(deletion.body.error.code, "EXPENSE_HAS_ACTIVE_INVOICE_STATE");
+    assert.deepEqual(deletion.body.error.fields, { dependency: "confirmed_invoice_match" });
+    assert.equal((await request(`/api/travel-expenses/${encodeURIComponent(expense.id)}`)).response.status, 200);
+  });
+
   it("advances the invoice aggregate version for every partial match", async () => {
     await startHarness({
       invoiceRecognizer: async () => recognized({

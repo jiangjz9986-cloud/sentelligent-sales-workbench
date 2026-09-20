@@ -437,9 +437,171 @@ describe("invoice matching and weekly coverage", () => {
         actor: "owner-a",
         expectedVersion: current.version,
       }),
-      (error) => error?.code === "EXPENSE_HAS_ACTIVE_INVOICE_STATE",
+      (error) => error?.code === "EXPENSE_HAS_ACTIVE_INVOICE_STATE"
+        && error?.details?.dependency === "confirmed_invoice_match",
     );
     assert.ok(expenseRepository.getExpense(expense.id, { owner: "owner-a" }));
+  });
+
+  it("allows deleting an expense with retained ingestion and matched-document history", () => {
+    const expense = createExpense();
+    const sourceDocument = createInvoice("expense-delete-source-document");
+    const documentMetadata = db.prepare(`
+      SELECT size_bytes, sha256, document_blob_id
+      FROM invoice_documents
+      WHERE id = $id
+    `).get({ $id: sourceDocument.id });
+    db.prepare(`
+      INSERT INTO travel_expense_ingestions (
+        id, owner, actor, source, idempotency_key_hash, request_hash,
+        source_id, raw_text, captured_at, status, expense_id, payment_id
+      ) VALUES (
+        'ingestion-delete-history', 'owner-a', 'owner-a', 'manual',
+        $idempotencyHash, $requestHash, 'manual-delete-history', 'fixture',
+        '2026-08-04T10:00:00.000Z', 'accepted', $expenseId, $paymentId
+      )
+    `).run({
+      $idempotencyHash: "3".repeat(64),
+      $requestHash: "4".repeat(64),
+      $expenseId: expense.id,
+      $paymentId: expense.payments[0].id,
+    });
+    db.prepare(`
+      INSERT INTO travel_expense_document_inbox (
+        id, owner, actor, source, source_message_id, document_kind,
+        file_name, media_type, size_bytes, sha256, document_blob_id,
+        status, matched_expense_id, matched_payment_id
+      ) VALUES (
+        'inbox-delete-history', 'owner-a', 'owner-a', 'manual',
+        'message-delete-history', 'payment_proof', 'proof.pdf',
+        'application/pdf', $sizeBytes, $sha256, $documentBlobId,
+        'matched', $expenseId, $paymentId
+      )
+    `).run({
+      $sizeBytes: documentMetadata.size_bytes,
+      $sha256: documentMetadata.sha256,
+      $documentBlobId: documentMetadata.document_blob_id,
+      $expenseId: expense.id,
+      $paymentId: expense.payments[0].id,
+    });
+
+    const current = expenseRepository.getExpense(expense.id, { owner: "owner-a" });
+    const deleted = expenseRepository.softDeleteExpense(expense.id, {
+      owner: "owner-a",
+      actor: "owner-a",
+      expectedVersion: current.version,
+    });
+
+    assert.ok(deleted.deletedAt);
+    assert.equal(db.prepare("SELECT status FROM travel_expense_ingestions WHERE id = 'ingestion-delete-history'").get().status, "accepted");
+    assert.equal(db.prepare("SELECT status FROM travel_expense_document_inbox WHERE id = 'inbox-delete-history'").get().status, "matched");
+    assert.ok(invoiceRepository.getInvoice(sourceDocument.id, { owner: "owner-a" }));
+    assert.equal(expenseRepository.getExpense(expense.id, { owner: "owner-a" }), null);
+  });
+
+  it("expires unaccepted replacement candidates and revokes no-invoice confirmations on delete", () => {
+    const substituteExpense = createSubstituteExpense();
+    const invoice = createInvoice("expense-delete-unaccepted-candidate");
+    const [candidate] = invoiceRepository.generateMatchCandidates({
+      owner: "owner-a",
+      actor: "owner-a",
+      weekStart: "2026-08-03",
+    });
+    assert.equal(candidate.expenseId, substituteExpense.id);
+
+    const noInvoiceExpense = createExpense({ purpose: "已确认无票后删除" });
+    const confirmation = invoiceRepository.confirmNoInvoice({
+      owner: "owner-a",
+      actor: "owner-a",
+      expenseId: noInvoiceExpense.id,
+      paymentId: noInvoiceExpense.payments[0].id,
+      reason: "等待补票",
+    });
+    const candidateExpense = expenseRepository.getExpense(substituteExpense.id, { owner: "owner-a" });
+    const deletedCandidateExpense = expenseRepository.softDeleteExpense(substituteExpense.id, {
+      owner: "owner-a",
+      actor: "owner-a",
+      expectedVersion: candidateExpense.version,
+    });
+    const confirmedExpense = expenseRepository.getExpense(noInvoiceExpense.id, { owner: "owner-a" });
+    const deletedConfirmedExpense = expenseRepository.softDeleteExpense(noInvoiceExpense.id, {
+      owner: "owner-a",
+      actor: "owner-a",
+      expectedVersion: confirmedExpense.version,
+    });
+
+    assert.ok(deletedCandidateExpense.deletedAt);
+    assert.equal(db.prepare("SELECT status FROM invoice_match_candidates WHERE id = $id").get({ $id: candidate.id }).status, "expired");
+    assert.ok(invoiceRepository.getInvoice(invoice.id, { owner: "owner-a" }));
+    assert.ok(deletedConfirmedExpense.deletedAt);
+    const revokedConfirmation = invoiceRepository.listNoInvoiceConfirmations({
+      owner: "owner-a",
+      expenseId: noInvoiceExpense.id,
+      active: false,
+    }).find((item) => item.id === confirmation.id);
+    assert.equal(revokedConfirmation.revokedBy, "owner-a");
+    assert.ok(revokedConfirmation.revokedAt);
+  });
+
+  it("releases an automatically matched invoice back to the warehouse when deleting its expense", () => {
+    const expense = createExpense();
+    const invoice = createInvoice("expense-delete-auto-match");
+    const autoMatch = confirmMatch({
+      owner: "owner-a",
+      actor: "owner-a",
+      invoiceId: invoice.id,
+      expenseReferenceCode: expense.referenceCode,
+      paymentId: expense.payments[0].id,
+      allocatedCents: 10000,
+      matchMethod: "rule_candidate",
+    });
+    assert.equal(invoiceRepository.getInvoice(invoice.id, { owner: "owner-a" }).status, "matched");
+
+    const current = expenseRepository.getExpense(expense.id, { owner: "owner-a" });
+    const deleted = expenseRepository.softDeleteExpense(expense.id, {
+      owner: "owner-a",
+      actor: "owner-a",
+      expectedVersion: current.version,
+    });
+
+    assert.ok(deleted.deletedAt);
+    assert.equal(db.prepare("SELECT state FROM invoice_matches WHERE id = $id").get({ $id: autoMatch.id }).state, "revoked");
+    assert.equal(invoiceRepository.getInvoice(invoice.id, { owner: "owner-a" }).status, "unmatched");
+    assert.ok(invoiceRepository.getInvoice(invoice.id, { owner: "owner-a" }), "the original invoice remains in the warehouse");
+  });
+
+  it("keeps an explicitly accepted replacement candidate attached to its expense", () => {
+    const expense = createSubstituteExpense();
+    const invoice = createInvoice("expense-delete-accepted-candidate");
+    const [candidate] = invoiceRepository.generateMatchCandidates({
+      owner: "owner-a",
+      actor: "owner-a",
+      weekStart: "2026-08-03",
+    });
+    assert.equal(candidate.expenseId, expense.id);
+
+    const accepted = invoiceRepository.acceptMatchCandidate(candidate.id, {
+      owner: "owner-a",
+      actor: "owner-a",
+      expectedVersion: candidate.version,
+    });
+    assert.equal(accepted.candidate.status, "accepted");
+    assert.equal(accepted.candidate.acceptedMatchId, accepted.match.id);
+    assert.equal(accepted.match.invoiceId, invoice.id);
+    const current = expenseRepository.getExpense(expense.id, { owner: "owner-a" });
+
+    assert.throws(
+      () => expenseRepository.softDeleteExpense(expense.id, {
+        owner: "owner-a",
+        actor: "owner-a",
+        expectedVersion: current.version,
+      }),
+      (error) => error?.code === "EXPENSE_HAS_ACTIVE_INVOICE_STATE"
+        && error?.details?.dependency === "confirmed_invoice_match",
+    );
+    assert.ok(expenseRepository.getExpense(expense.id, { owner: "owner-a" }));
+    assert.equal(db.prepare("SELECT state FROM invoice_matches WHERE id = $id").get({ $id: accepted.match.id }).state, "confirmed");
+    assert.equal(db.prepare("SELECT status FROM invoice_match_candidates WHERE id = $id").get({ $id: candidate.id }).status, "accepted");
   });
 
   it("separates electronic and substitute coverage and reports unused warehouse value", () => {

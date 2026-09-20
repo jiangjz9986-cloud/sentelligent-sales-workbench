@@ -60,6 +60,8 @@ describe("expense ledger workbench shell", () => {
 
     assert.match(deleteOpenFlow, /setDeleteBlockedByInvoice\(false\)/);
     assert.match(page, /setDeleteBlockedByInvoice\(deleteError\?\.code === "EXPENSE_HAS_ACTIVE_INVOICE_STATE"\)/);
+    assert.match(page, /error\?\.details\?\.dependency === "confirmed_invoice_match"/);
+    assert.match(page, /已确认的发票或替票关联/);
     assert.match(page, /title=\{deleteBlockedByInvoice \? "这笔记账暂不能删除"/);
     assert.match(page, /confirmLabel=\{deleteBlockedByInvoice \? "去处理票据关联"/);
     assert.match(closeFlow, /setDeleteBlockedByInvoice\(false\)/);

@@ -67,7 +67,10 @@ function mergeById(items, item) {
 
 function expenseErrorMessage(error, fallback) {
   if (error?.code === "EXPENSE_HAS_ACTIVE_INVOICE_STATE") {
-    return "这笔费用仍有关联：发票匹配、替票候选、无票确认或待处理凭证。费用记录和发票原件均未删除。";
+    if (error?.details?.dependency === "confirmed_invoice_match") {
+      return "这笔记账已有已确认的发票或替票关联，请先在发票管理解除匹配。记账记录和票据原件均未删除。";
+    }
+    return "这笔记账仍有已确认的票据关联，请先在发票管理处理。记账记录和发票原件均未删除。";
   }
   if (error?.code === "VERSION_CONFLICT") {
     return "记录已在其他窗口更新，请重新加载后再编辑。";

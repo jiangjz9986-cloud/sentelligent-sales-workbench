@@ -3281,7 +3281,7 @@ function travelExpenseRepositoryFailure(error) {
     });
   }
   if (error instanceof TravelExpenseDependencyConflictError) {
-    throw new HttpError(409, error.code, error.message);
+    throw new HttpError(409, error.code, error.message, error.details ?? undefined);
   }
   throw error;
 }

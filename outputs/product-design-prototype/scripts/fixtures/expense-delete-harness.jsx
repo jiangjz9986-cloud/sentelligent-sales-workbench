@@ -46,6 +46,7 @@ const apiClient = {
     const error = new Error("ticket state blocks delete");
     error.code = "EXPENSE_HAS_ACTIVE_INVOICE_STATE";
     error.status = 409;
+    error.details = { dependency: "confirmed_invoice_match" };
     throw error;
   },
   async listInvoices() { return []; },

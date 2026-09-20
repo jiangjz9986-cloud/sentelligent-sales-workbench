@@ -60,8 +60,8 @@ test("routes invoice-blocked expense deletion to invoice management without repe
 
   assert.equal(await page.evaluate(() => window.__expenseDeleteAttempts), 1);
   assert.equal(await expenseRow.count(), 1);
-  assert.match(await page.locator(".confirm-dialog-error").textContent(), /发票匹配、替票候选、无票确认或待处理凭证/);
-  assert.match(await page.locator(".confirm-dialog-error").textContent(), /费用记录和发票原件均未删除/);
+  assert.match(await page.locator(".confirm-dialog-error").textContent(), /已确认的发票或替票关联/);
+  assert.match(await page.locator(".confirm-dialog-error").textContent(), /记账记录和票据原件均未删除/);
   assert.equal(await page.getByTestId("travel-expense-delete-confirm").textContent(), "去处理票据关联");
   assert.equal(await page.getByTestId("travel-expense-delete-confirm").getAttribute("class"), "primary-button");
   await page.screenshot({ path: "/tmp/expense-delete-recovery.png" });
