@@ -571,7 +571,15 @@ export function createShortcutBookkeepingRepository(db, {
       ORDER BY updated_at DESC, id DESC
       LIMIT $limit
     `).all({ $owner: normalizedOwner, $limit: limit }).flatMap((row) => {
-      const receipt = ledgerReceiptFromAcceptedRow(row);
+      let receipt;
+      try {
+        receipt = ledgerReceiptFromAcceptedRow(row);
+      } catch (error) {
+        // Recent receipts are an ancillary projection; stale history must not
+        // make the canonical weekly ledger unavailable.
+        if (error instanceof HttpError && error.code === "SHORTCUT_LEDGER_RECEIPT_INCOMPLETE") return [];
+        throw error;
+      }
       return receipt ? [{
         ...receipt,
         acceptedAt: dateTime(row.updated_at, "acceptedAt"),

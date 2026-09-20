@@ -18,6 +18,13 @@ function appSource() {
 }
 
 describe("travel expense feature boundary", () => {
+  it("shows a failed week load accurately and includes its diagnostic request id", async () => {
+    const page = await source("src/features/travelExpense/TravelExpensePage.jsx");
+
+    assert.match(page, /expenseWeekSyncLabel\(\{ status, loaded: selectedWeekLoaded/);
+    assert.match(page, /expenseWeekLoadConflictMessage\(loadError\)/);
+  });
+
   it("places travel reimbursement between itinerary and weekly reporting", async () => {
     const data = await source("src/data/salesWorkbenchData.js");
     const itineraryIndex = data.indexOf('{ id: "itinerary"');

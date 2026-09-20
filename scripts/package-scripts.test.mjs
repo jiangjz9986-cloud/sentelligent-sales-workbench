@@ -43,6 +43,10 @@ describe("root package QA scripts", () => {
       assert.equal(frontendPackageJson.scripts?.[name], `node ${file}`);
       assert.ok(frontendPackageJson.scripts["qa:integration"].split(" && ").includes(`npm run ${name}`));
     }
+    assert.match(
+      frontendPackageJson.scripts["qa:integration"],
+      /scripts\/travel-expense-sync-browser\.test\.mjs/,
+    );
     assert.equal(frontendPackageJson.scripts.build, "vite build");
   });
 

@@ -408,6 +408,7 @@ describe("Shortcut bookkeeping repository invariants", () => {
       }
       assert.equal(db.prepare("SELECT COUNT(*) AS count FROM travel_expenses").get().count, 0);
       assert.equal(db.prepare("SELECT COUNT(*) AS count FROM travel_expense_payments").get().count, 0);
+      assert.deepEqual(repository.listRecentLedgerReceipts({ owner: "owner-a" }), []);
 
       for (const readReceipt of [
         () => repository.getLedgerReceipt(received.item.id, { owner: "owner-a" }),
