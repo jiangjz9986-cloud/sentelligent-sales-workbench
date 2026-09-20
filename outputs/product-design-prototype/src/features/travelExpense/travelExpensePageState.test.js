@@ -4,9 +4,29 @@ import { describe, it } from "node:test";
 import {
   canSaveRegionProfileForWeek,
   defaultExpenseOccurredOn,
+  expenseWeekLoadConflictMessage,
+  expenseWeekSyncLabel,
 } from "./travelExpensePageState.js";
 
 describe("travel expense page week-scoped state", () => {
+  it("distinguishes a failed initial load from an active sync", () => {
+    assert.equal(expenseWeekSyncLabel({ status: "loading", loaded: false, readyLabel: "已同步" }), "正在同步");
+    assert.equal(expenseWeekSyncLabel({ status: "error", loaded: false, readyLabel: "已同步" }), "同步失败");
+    assert.equal(expenseWeekSyncLabel({ status: "error", loaded: true, readyLabel: "济宁、东营" }), "济宁、东营");
+  });
+
+  it("labels workbench 409 responses as read conflicts and exposes their request id", () => {
+    assert.equal(
+      expenseWeekLoadConflictMessage({
+        status: 409,
+        code: "SHORTCUT_LEDGER_RECEIPT_INCOMPLETE",
+        requestId: "request-123",
+      }),
+      "本周账本读取冲突（HTTP 409），数据未加载，请重新加载后再试。SHORTCUT_LEDGER_RECEIPT_INCOMPLETE；请求编号：request-123",
+    );
+    assert.equal(expenseWeekLoadConflictMessage({ status: 500, requestId: "request-456" }), null);
+  });
+
   it("blocks an old-week region draft before and during a new-week load", () => {
     assert.equal(canSaveRegionProfileForWeek({
       loadedWeekStart: "2026-08-17",

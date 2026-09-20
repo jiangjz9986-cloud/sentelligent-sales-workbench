@@ -298,6 +298,64 @@ describe("authenticated travel expense API", () => {
     });
   });
 
+  it("keeps the weekly ledger readable when an accepted receipt points to a deleted expense", async () => {
+    await withHarness(async ({ databaseUrl, request }) => {
+      const visibleExpense = await createExpense(request, { purpose: "Visible weekly expense" });
+      const db = openDatabase({ databaseUrl });
+      let accepted;
+      try {
+        const repository = createShortcutBookkeepingRepository(db, {
+          idFactory: (() => {
+            let sequence = 0;
+            return () => `orphan-receipt-${++sequence}`;
+          })(),
+        });
+        const received = repository.receive({
+          owner: "travel-owner",
+          actor: "travel-owner",
+          ledgerName: "出差报销",
+          entryType: "expense",
+          category: "餐饮",
+          subcategory: "午餐",
+          idempotencyKey: "orphan-receipt-weekly-ledger",
+          requestHash: "b".repeat(64),
+          rawText: "synthetic accepted travel expense",
+        });
+        const claimed = repository.claim(received.item.id);
+        accepted = repository.completeLocal(received.item.id, {
+          leaseToken: claimed.leaseToken,
+          analysis: {
+            status: "ready",
+            confidence: 1,
+            expense: {
+              occurredOn: "2026-08-04",
+              amountCents: 4800,
+              reimbursementCents: 4500,
+              purpose: "Synthetic accepted expense",
+              paidAt: "2026-08-04T12:30:00+08:00",
+            },
+            warnings: [],
+            source: { provider: "test" },
+          },
+        });
+      } finally {
+        db.close();
+      }
+
+      const deleted = await request(`/api/travel-expenses/${encodeURIComponent(accepted.item.expenseId)}`, {
+        method: "DELETE",
+        headers: { "If-Match": '"1"' },
+        body: "{}",
+      });
+      assert.equal(deleted.response.status, 200);
+
+      const projected = await request("/api/travel-expense-workbench?weekStart=2026-08-03");
+      assert.equal(projected.response.status, 200);
+      assert.deepEqual(projected.body.item.expenses, [visibleExpense]);
+      assert.deepEqual(projected.body.item.recentLedgerReceipts, []);
+    });
+  });
+
   it("reads and version-saves one owner-scoped natural-week region profile", async () => {
     await withHarness(async ({ csrf, request }) => {
       const empty = await request("/api/travel-expense-region-profile?weekStart=2026-08-24");

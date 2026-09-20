@@ -26,6 +26,8 @@ import { prepareTravelExpenseDocument } from "./travelExpenseDocument.js";
 import {
   canSaveRegionProfileForWeek,
   defaultExpenseOccurredOn,
+  expenseWeekLoadConflictMessage,
+  expenseWeekSyncLabel,
 } from "./travelExpensePageState.js";
 import { hasResponsibleCity } from "./responsibleRegionModel.js";
 import {
@@ -224,7 +226,8 @@ export function TravelExpensePage({
     } catch (loadError) {
       if (signal?.aborted) return;
       setStatus("error");
-      setError(expenseErrorMessage(loadError, "差旅费用加载失败，请稍后重试。"));
+      setError(expenseWeekLoadConflictMessage(loadError)
+        ?? expenseErrorMessage(loadError, "差旅费用加载失败，请稍后重试。"));
     }
   }, [apiClient, backendStatus, week.start]);
 
@@ -744,7 +747,7 @@ export function TravelExpensePage({
           <IsoWeekFallback value={week.start} onChange={setWeek} />
         )}</label>
         <div className="expense-week-stat"><small>当前范围</small><strong>{week.start}—{week.end}</strong></div>
-        <div className="expense-week-stat"><small>行程 / 说明</small><strong>{selectedWeekLoaded ? itineraryLabel : "正在同步"}</strong></div>
+        <div className="expense-week-stat"><small>行程 / 说明</small><strong>{expenseWeekSyncLabel({ status, loaded: selectedWeekLoaded, readyLabel: itineraryLabel })}</strong></div>
         <div className="expense-week-stat"><small>费用与付款</small><strong>{selectedWeekLoaded ? `${summary.expenseCount} 条 · ${summary.paymentCount} 笔` : "—"}</strong></div>
         <button className="icon-button" type="button" aria-label="重新加载本周费用" onClick={() => setReloadToken((value) => value + 1)}><RefreshCw size={17} /></button>
       </section>
