@@ -228,6 +228,29 @@ describe("invoice matching and weekly coverage", () => {
     assert.deepEqual(invoiceRepository.listMatches({ owner: "owner-a", invoiceId: invoice.id }), []);
   });
 
+  it("never automatically matches an invoice to an explicitly selected substitute expense", () => {
+    const expense = createSubstituteExpense({
+      payments: [payment({ paidAt: "2026-08-04T18:00:00+08:00" })],
+    });
+    const invoice = createInvoice("manual-substitute-auto-match-guard", {
+      issuedOn: "2026-08-05",
+    });
+
+    const result = invoiceRepository.autoMatchInvoice({
+      owner: "owner-a",
+      actor: "owner-a",
+      invoiceId: invoice.id,
+      priorityWeekStart: "2026-08-03",
+    });
+
+    assert.equal(result.status, "review_required");
+    assert.equal(result.reason, "no_unique_exact_amount");
+    assert.deepEqual(result.candidates, []);
+    assert.deepEqual(invoiceRepository.listMatches({ owner: "owner-a", invoiceId: invoice.id }), []);
+    assert.equal(invoiceRepository.getInvoice(invoice.id, { owner: "owner-a" }).status, "unmatched");
+    assert.equal(expense.invoiceType, "substitute");
+  });
+
   it("rejects removing a payment referenced by invoice workflow evidence", () => {
     const expense = createSubstituteExpense({
       payments: [

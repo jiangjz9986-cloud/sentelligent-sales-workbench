@@ -1371,6 +1371,7 @@ export function createInvoiceRepository(db, {
         FROM travel_expenses expense
         JOIN travel_expense_payments payment ON payment.expense_id = expense.id
         WHERE expense.owner = $owner AND expense.deleted_at IS NULL
+          AND (expense.invoice_type IS NULL OR expense.invoice_type <> 'substitute')
           AND payment.reimbursement_cents > 0
           AND payment.reimbursement_cents > COALESCE((
             SELECT SUM(match.allocated_cents)
