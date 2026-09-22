@@ -472,7 +472,14 @@ describe("weixin sales workbench agent", () => {
       apiToken: "machine-token",
       fetchImpl: async (url, options = {}) => {
         calls.push({ url, options });
-        return jsonResponse({ item: { id: "invoice-1", status: "review_required" } }, 201);
+        return jsonResponse({ item: {
+          id: "invoice-1",
+          status: "review_required",
+          invoiceNumber: "INV-20260918",
+          issuedOn: "2026-09-18",
+          sellerName: "示例酒店",
+          totalCents: 20000,
+        } }, 201);
       },
     });
 
@@ -492,8 +499,8 @@ describe("weixin sales workbench agent", () => {
       contentBase64: pdf.toString("base64"),
       sourceRef: "wx-invoice-message-1",
     });
-    assert.match(reply.text, /发票已存入发票仓库/);
-    assert.match(reply.text, /无需先匹配费用/);
+    assert.equal(reply.text, "发票已入库：发票号 INV-20260918，开票日 2026-09-18，销售方 示例酒店，金额 200.00 元。");
+    assert.doesNotMatch(reply.text, /候选|编号|人工复核|匹配费用/u);
   });
 
   it("returns recoverable Chinese guidance for missing media, unsupported media, and missing files", async () => {

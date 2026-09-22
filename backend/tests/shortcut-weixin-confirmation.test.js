@@ -1330,7 +1330,8 @@ describe("小小微信图片记账与自然语言确认闭环", () => {
     });
 
     assert.equal(received.response.status, 200, JSON.stringify(received.body));
-    assert.match(received.body.text, /发票已存入/u);
+    assert.match(received.body.text, /发票已入库/u);
+    assert.doesNotMatch(received.body.text, /候选|编号|人工复核|自动绑定费用/u);
     assert.equal(lastRecognitionOptions?.referenceDate, "2026-08-25");
     const db = openDatabase({ databaseUrl: join(tempDir, "assistant.sqlite") });
     assert.equal(db.prepare("SELECT COUNT(*) AS count FROM invoice_documents").get().count, 1);
@@ -1434,7 +1435,8 @@ describe("小小微信图片记账与自然语言确认闭环", () => {
       }),
     });
     assert.equal(received.response.status, 200);
-    assert.match(received.body.text, /发票已存入/u);
+    assert.match(received.body.text, /发票已入库/u);
+    assert.doesNotMatch(received.body.text, /候选|编号|人工复核|自动绑定费用/u);
     const db = openDatabase({ databaseUrl: join(tempDir, "assistant.sqlite") });
     assert.equal(db.prepare("SELECT COUNT(*) AS count FROM invoice_documents").get().count, 1);
     assert.equal(db.prepare("SELECT COUNT(*) AS count FROM shortcut_bookkeeping_entries").get().count, 0);
@@ -1460,7 +1462,8 @@ describe("小小微信图片记账与自然语言确认闭环", () => {
       }),
     });
     assert.equal(received.response.status, 200);
-    assert.match(received.body.text, /发票已存入/u);
+    assert.match(received.body.text, /发票已入库/u);
+    assert.doesNotMatch(received.body.text, /候选|编号|人工复核|自动绑定费用/u);
     const db = openDatabase({ databaseUrl: join(tempDir, "assistant.sqlite") });
     assert.equal(db.prepare("SELECT COUNT(*) AS count FROM invoice_documents").get().count, 1);
     assert.equal(db.prepare("SELECT COUNT(*) AS count FROM shortcut_bookkeeping_entries").get().count, 0);
@@ -2605,7 +2608,8 @@ describe("小小微信图片记账与自然语言确认闭环", () => {
     });
     assert.equal(invoice.response.status, 200, JSON.stringify(invoice.body));
     assert.equal(invoice.body.status, "ok");
-    assert.match(invoice.body.text, /自动绑定费用/u);
+    assert.match(invoice.body.text, /发票已入库/u);
+    assert.doesNotMatch(invoice.body.text, /候选|编号|人工复核|自动绑定费用/u);
 
     const replayedInvoice = await request("/api/integrations/weixin-agent/events", {
       method: "POST",
@@ -2626,7 +2630,8 @@ describe("小小微信图片记账与自然语言确认闭环", () => {
       }),
     });
     assert.equal(replayedInvoice.response.status, 200, JSON.stringify(replayedInvoice.body));
-    assert.match(replayedInvoice.body.text, /自动绑定费用/u);
+    assert.match(replayedInvoice.body.text, /发票已在仓库/u);
+    assert.doesNotMatch(replayedInvoice.body.text, /候选|编号|人工复核|自动绑定费用/u);
 
     const db = openDatabase({ databaseUrl: join(tempDir, "assistant.sqlite") });
     assert.equal(db.prepare("SELECT COUNT(*) AS count FROM invoice_matches WHERE state = 'confirmed'").get().count, 1);

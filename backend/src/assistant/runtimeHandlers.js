@@ -213,6 +213,25 @@ function moneyFromCents(value) {
   return Number.isSafeInteger(value) && value >= 0 ? `${(value / 100).toFixed(2)} 元` : "金额待确认";
 }
 
+function invoiceReceiptText(item, { duplicate = false } = {}) {
+  const invoiceCode = weixinClip(item?.invoiceCode, 30, "");
+  const invoiceNumber = weixinClip(item?.invoiceNumber, 30, "");
+  const invoiceIdentity = [invoiceCode, invoiceNumber].filter(Boolean).join(" / ");
+  const sellerName = weixinClip(item?.sellerName, 48, "");
+  const fields = [
+    invoiceIdentity ? `发票号 ${invoiceIdentity}` : null,
+    item?.issuedOn ? `开票日 ${item.issuedOn}` : null,
+    sellerName ? `销售方 ${sellerName}` : null,
+    Number.isSafeInteger(item?.totalCents) && item.totalCents >= 0
+      ? `金额 ${moneyFromCents(item.totalCents)}`
+      : null,
+  ].filter(Boolean);
+  const title = duplicate ? "发票已在仓库" : "发票已入库";
+  return fields.length > 0
+    ? `${title}：${fields.join("，")}。`
+    : `${title}，识别信息待补充。`;
+}
+
 function shanghaiWeekStart(value) {
   const date = value instanceof Date ? value : new Date(value ?? Date.now());
   if (Number.isNaN(date.getTime())) return null;
@@ -2786,9 +2805,7 @@ export function createAssistantToolHandlers({
         const expenseAttachment = attachmentResult?.attachment ?? null;
         const attachmentPending = reconciliation.some((result) => result.status === "pending");
         return {
-          text: attachmentPending
-            ? `发票金额已自动匹配费用：${match.selected?.expenseReferenceCode ?? activeMatch?.expenseId ?? "待确认"}，但报销附件正在后台补传。`
-            : `发票${duplicate ? "已存在并" : "已存入并"}自动绑定费用：${match.selected?.expenseReferenceCode ?? activeMatch?.expenseId ?? "待确认"}，金额 ${moneyFromCents(activeMatch?.allocatedCents)}。`,
+          text: invoiceReceiptText(item, { duplicate }),
           status: attachmentPending ? "review_required" : "matched",
           item,
           match: { ...match, match: activeMatch },
@@ -2797,11 +2814,8 @@ export function createAssistantToolHandlers({
           ...(expenseAttachment ? { expenseAttachment } : {}),
         };
       }
-      const candidateText = Array.isArray(match?.candidates) && match.candidates.length
-        ? `候选：${match.candidates.slice(0, 3).map((candidate) => `${candidate.expenseReferenceCode}（${candidate.occurredOn}，${moneyFromCents(candidate.paymentRemainingCents)}）`).join("；")}`
-        : "当前没有唯一金额候选";
       return {
-        text: `发票${duplicate ? "已在" : "已存入"}发票仓库，编号：${item.id}。${candidateText}。当前未形成唯一自动匹配，请在系统内人工复核。`,
+        text: invoiceReceiptText(item, { duplicate }),
         status: duplicate ? "duplicate" : "review_required",
         item,
         match,
