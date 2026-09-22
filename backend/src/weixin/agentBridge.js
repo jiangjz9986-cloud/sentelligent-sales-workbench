@@ -328,8 +328,22 @@ function formatPaymentProofReply(item, commandInput) {
   ].join("\n");
 }
 
-function formatInvoiceReply() {
-  return "发票已存入发票仓库，无需先匹配费用。请在系统中人工复核识别结果。";
+function formatInvoiceReply(item) {
+  const invoiceCode = cleanText(item?.invoiceCode);
+  const invoiceNumber = cleanText(item?.invoiceNumber);
+  const invoiceIdentity = [invoiceCode, invoiceNumber].filter(Boolean).join(" / ");
+  const sellerName = compact(item?.sellerName, 48);
+  const fields = [
+    invoiceIdentity ? `发票号 ${invoiceIdentity}` : null,
+    cleanText(item?.issuedOn) ? `开票日 ${cleanText(item.issuedOn)}` : null,
+    sellerName ? `销售方 ${sellerName}` : null,
+    Number.isSafeInteger(item?.totalCents) && item.totalCents >= 0
+      ? `金额 ${(item.totalCents / 100).toFixed(2)} 元`
+      : null,
+  ].filter(Boolean);
+  return fields.length > 0
+    ? `发票已入库：${fields.join("，")}。`
+    : "发票已入库，识别信息待补充。";
 }
 
 const documentErrorReplies = new Map([
@@ -374,13 +388,13 @@ async function uploadPaymentProofCommand(request, command, client, now) {
 async function uploadInvoiceCommand(request, client) {
   try {
     const document = await readWeixinDocument(request?.media);
-    await client.uploadInvoice({
+    const item = await client.uploadInvoice({
       fileName: document.fileName,
       mediaType: document.mediaType,
       contentBase64: document.contentBase64,
       sourceRef: weixinDocumentSourceRef(request, document.sha256),
     });
-    return { text: formatInvoiceReply() };
+    return { text: formatInvoiceReply(item) };
   } catch (error) {
     return { text: documentCommandFailure(error) };
   }
