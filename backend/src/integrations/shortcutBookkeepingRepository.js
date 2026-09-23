@@ -410,6 +410,7 @@ export function applyShortcutSelectionAnalysis(value, selection) {
 export function createShortcutBookkeepingRepository(db, {
   idFactory = randomUUID,
   clock = () => new Date(),
+  invoiceRepository = null,
 } = {}) {
   if (!db || typeof db.prepare !== "function") {
     throw new TypeError("A synchronous SQLite connection is required");
@@ -981,7 +982,7 @@ export function createShortcutBookkeepingRepository(db, {
     reviewPatch,
     revisionSource = "capture",
   } = {}) {
-    return runTransaction(db, () => {
+    const completed = runTransaction(db, () => {
       const state = currentProcessing(idValue, leaseToken, "sentelligent");
       if (state.replayed) return completedResult(state.current, { replayed: true });
       const { id, current } = state;
@@ -1226,6 +1227,32 @@ export function createShortcutBookkeepingRepository(db, {
       });
       return completedResult(selectById.get({ $id: id }), { replayed: false });
     });
+    if (
+      invoiceRepository
+      && typeof invoiceRepository.autoMatchExpense === "function"
+      && completed.item?.status === "accepted"
+      && completed.item?.entryType === "expense"
+      && completed.item?.expenseId
+    ) {
+      try {
+        completed.invoiceMatch = invoiceRepository.autoMatchExpense({
+          owner: completed.item.owner,
+          actor: completed.item.actor,
+          expenseId: completed.item.expenseId,
+          priorityWeekStart: mondayInShanghai(completed.item.occurredOn),
+        });
+      } catch {
+        // The ledger write is authoritative. A failed reverse-match attempt
+        // remains recoverable through the normal invoice review workflow.
+        completed.invoiceMatch = {
+          status: "review_required",
+          expenseId: completed.item.expenseId,
+          candidates: [],
+          reason: "automatic_match_failed",
+        };
+      }
+    }
+    return completed;
   }
 
   function release(idValue, { leaseToken, errorCode = "PROCESSING_FAILED" } = {}) {

@@ -156,6 +156,52 @@ describe("invoice matching and weekly coverage", () => {
     assert.equal(invoiceRepository.getInvoice(invoice.id, { owner: "owner-a" }).status, "matched");
   });
 
+  it("automatically matches an expense created after its invoice was stored", () => {
+    const invoice = createInvoice("reverse-auto-match", { issuedOn: "2026-08-05" });
+    const expense = createExpense({
+      occurredOn: "2026-08-05",
+      purpose: "发票先到、记账后补录",
+      payments: [payment({ paidAt: "2026-08-05T18:00:00+08:00" })],
+    });
+
+    const result = invoiceRepository.autoMatchExpense({
+      owner: "owner-a",
+      actor: "owner-a",
+      expenseId: expense.id,
+      priorityWeekStart: "2026-08-03",
+    });
+
+    assert.equal(result.status, "matched");
+    assert.equal(result.match.invoiceId, invoice.id);
+    assert.equal(result.match.expenseId, expense.id);
+    assert.equal(result.match.paymentId, expense.payments[0].id);
+    assert.equal(result.match.allocatedCents, 10000);
+    assert.equal(invoiceRepository.getInvoice(invoice.id, { owner: "owner-a" }).status, "matched");
+    assert.equal(invoiceRepository.listMatches({ owner: "owner-a", expenseId: expense.id }).length, 1);
+  });
+
+  it("keeps reverse matching in review when more than one exact invoice is eligible", () => {
+    createInvoice("reverse-ambiguous-one", { issuedOn: "2026-08-06" });
+    createInvoice("reverse-ambiguous-two", { issuedOn: "2026-08-07" });
+    const expense = createExpense({
+      occurredOn: "2026-08-06",
+      purpose: "两张同额发票待人工确认",
+      payments: [payment({ paidAt: "2026-08-06T18:00:00+08:00" })],
+    });
+
+    const result = invoiceRepository.autoMatchExpense({
+      owner: "owner-a",
+      actor: "owner-a",
+      expenseId: expense.id,
+      priorityWeekStart: "2026-08-03",
+    });
+
+    assert.equal(result.status, "review_required");
+    assert.equal(result.reason, "multiple_exact_amounts");
+    assert.equal(result.candidates.length, 2);
+    assert.deepEqual(invoiceRepository.listMatches({ owner: "owner-a", expenseId: expense.id }), []);
+  });
+
   it("automatically binds a unique cross-week exact amount at the 31-day boundary", () => {
     const expense = createExpense({ occurredOn: "2026-07-04", purpose: "跨周窗内消费" });
     const invoice = createInvoice("auto-match-cross-week-in-window", { issuedOn: "2026-08-04" });

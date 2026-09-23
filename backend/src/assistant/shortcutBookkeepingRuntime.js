@@ -309,13 +309,18 @@ function renderDraftMessage(entry, {
   return lines.join("\n").slice(0, MAX_MESSAGE_LENGTH);
 }
 
-function resultMessage(entry) {
+function resultMessage(entry, { invoiceMatchMethod = null } = {}) {
   const occurredOn = dateOnly(entry.occurredOn);
   const dateLabel = occurredOn
     ? `${occurredOn.slice(0, 4)}年${Number(occurredOn.slice(5, 7))}月${Number(occurredOn.slice(8, 10))}日`
     : "日期待确认";
   const note = fieldText(entry.note ?? entry.purpose, "本次记账");
-  return `已确认并录入小小记账：${dateLabel}${note}，金额 ${formatMoney(entry.amountCents)}。`;
+  const invoiceSuffix = invoiceMatchMethod === "rule_candidate"
+    ? "，已自动关联发票"
+    : invoiceMatchMethod
+      ? "，已关联发票"
+      : "";
+  return `已确认并录入小小记账：${dateLabel}${note}，金额 ${formatMoney(entry.amountCents)}${invoiceSuffix}。`;
 }
 
 // 修改… only counts as bookkeeping language when the remainder opens with a
@@ -1321,6 +1326,7 @@ export function createShortcutBookkeepingAssistantRuntime({
              entry.purpose,
              entry.amount_cents,
              entry.expense_id,
+             entry.payment_id,
              expense.reference_code AS expense_reference_code,
              expense.occurred_on AS expense_occurred_on,
              expense.notes AS expense_notes
@@ -1694,7 +1700,26 @@ export function createShortcutBookkeepingAssistantRuntime({
           ? `${occurredOn.slice(0, 4)}年${Number(occurredOn.slice(5, 7))}月${Number(occurredOn.slice(8, 10))}日`
           : "日期待确认";
         const note = fieldText(row.expense_notes ?? row.note ?? row.purpose, "本次记账");
-        return `${index + 1}. ${dateLabel}${note}，${formatMoney(Number(row.amount_cents))}`;
+        const invoiceMatch = db.prepare(`
+          SELECT match_method
+          FROM invoice_matches
+          WHERE owner = $owner
+            AND expense_id = $expenseId
+            AND payment_id = $paymentId
+            AND state = 'confirmed'
+          ORDER BY confirmed_at, id
+          LIMIT 1
+        `).get({
+          $owner: outboxItem.owner,
+          $expenseId: row.expense_id,
+          $paymentId: row.payment_id,
+        });
+        const invoiceSuffix = invoiceMatch?.match_method === "rule_candidate"
+          ? "，已自动关联发票"
+          : invoiceMatch
+            ? "，已关联发票"
+            : "";
+        return `${index + 1}. ${dateLabel}${note}，${formatMoney(Number(row.amount_cents))}${invoiceSuffix}`;
       });
       return [
         `本次已确认并录入小小记账，共 ${acceptedRows.length} 笔：`,
@@ -1747,6 +1772,20 @@ export function createShortcutBookkeepingAssistantRuntime({
         WHERE entry.id = $id AND entry.owner = $owner
       `).get({ $id: payload.entryId, $owner: outboxItem.owner });
       if (!row) throw new Error("entry_not_found");
+      const invoiceMatch = db.prepare(`
+        SELECT match_method
+        FROM invoice_matches
+        WHERE owner = $owner
+          AND expense_id = $expenseId
+          AND payment_id = $paymentId
+          AND state = 'confirmed'
+        ORDER BY confirmed_at, id
+        LIMIT 1
+      `).get({
+        $owner: outboxItem.owner,
+        $expenseId: row.expense_id,
+        $paymentId: row.payment_id,
+      });
       return resultMessage({
         expenseReferenceCode: row.expense_reference_code,
         expenseId: row.expense_id,
@@ -1756,7 +1795,7 @@ export function createShortcutBookkeepingAssistantRuntime({
         note: row.expense_notes ?? row.note,
         purpose: row.purpose,
         amountCents: row.amount_cents === null ? null : Number(row.amount_cents),
-      });
+      }, { invoiceMatchMethod: invoiceMatch?.match_method ?? null });
     }
     const entry = shortcutBookkeepingRepository.getReview(payload.entryId, { owner: outboxItem.owner });
     if (!entry) throw new Error("entry_not_found");
@@ -2151,7 +2190,9 @@ export function createShortcutBookkeepingAssistantRuntime({
         status: 200,
         body: {
           status: "ok",
-          text: resultMessage(accepted),
+          text: resultMessage(completed.item, {
+            invoiceMatchMethod: completed.invoiceMatch?.match?.matchMethod ?? null,
+          }),
           result: {
             entryId: target.entryId,
             expenseId: completed.item.expenseId,

@@ -253,6 +253,33 @@ describe("authenticated invoice API", () => {
     assert.equal(duplicate.body.error.code, "DUPLICATE_INVOICE");
   });
 
+  it("reverse-matches an invoice already stored before a direct expense is created", async () => {
+    await startHarness();
+    const uploaded = await request("/api/invoices", {
+      method: "POST",
+      headers: { "Idempotency-Key": "reverse-direct-invoice" },
+      body: JSON.stringify(uploadBody("先入库发票")),
+    });
+    assert.equal(uploaded.response.status, 201);
+    assert.equal(uploaded.body.item.status, "unmatched");
+
+    const created = await createExpense({
+      payments: [{
+        ...expenseBody().payments[0],
+        paidAt: "2026-08-04T18:00:00+08:00",
+        amountCents: 10000,
+        reimbursementCents: 10000,
+      }],
+    });
+    assert.equal(created.invoiceStatus, "covered");
+
+    const matches = await request(`/api/invoice-matches?invoiceId=${encodeURIComponent(uploaded.body.item.id)}`);
+    assert.equal(matches.response.status, 200);
+    assert.equal(matches.body.items.length, 1);
+    assert.equal(matches.body.items[0].state, "confirmed");
+    assert.equal(matches.body.items[0].matchMethod, "rule_candidate");
+  });
+
   it("preserves the invoice filename and emits an RFC 5987 content disposition", async () => {
     await startHarness();
     const originalFileName = "  invoice's (proof) 甲.pdf  ";
