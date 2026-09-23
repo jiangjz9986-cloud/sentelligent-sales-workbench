@@ -122,6 +122,7 @@ import {
   applyShortcutSelectionAnalysis,
   createShortcutBookkeepingRepository,
 } from "./integrations/shortcutBookkeepingRepository.js";
+import { createBookkeepingCategoryRepository } from "./bookkeeping/categoryRepository.js";
 import { createShortcutAdvanceAllocationRepository } from "./integrations/shortcutAdvanceAllocationRepository.js";
 import { planVisitItinerary } from "./itinerary/planner.js";
 import { AmapServiceError, createAmapClient } from "./maps/amapClient.js";
@@ -1894,6 +1895,38 @@ function validateSecureSettingBody(value, { field, max = 500 } = {}) {
     validationFailure(field, "format");
   }
   return body[field].trim();
+}
+
+function validateBookkeepingCategoryPayload(value, { partial = false } = {}) {
+  const body = plainObject(value);
+  allowedPayloadKeys(
+    body,
+    partial
+      ? new Set(["name", "subcategories", "status"])
+      : new Set(["ledgerName", "entryType", "name", "subcategories"]),
+  );
+  if (!partial && body.ledgerName !== undefined && body.ledgerName !== "出差报销") {
+    validationFailure("ledgerName", "notAllowed");
+  }
+  if (!partial || Object.hasOwn(body, "entryType")) {
+    if (!new Set(["income", "expense", "收入", "支出"]).has(body.entryType)) {
+      validationFailure("entryType", "enum");
+    }
+  }
+  if (!partial || Object.hasOwn(body, "name")) payloadText(body.name, "name", { max: 100 });
+  if (Object.hasOwn(body, "subcategories")) {
+    if (!Array.isArray(body.subcategories) || body.subcategories.length > 20) {
+      validationFailure("subcategories", "array_of_at_most_20_strings");
+    }
+    body.subcategories.forEach((valueItem, index) => {
+      payloadText(valueItem, `subcategories[${index}]`, { max: 100 });
+    });
+  }
+  if (Object.hasOwn(body, "status") && !new Set(["active", "archived"]).has(body.status)) {
+    validationFailure("status", "enum");
+  }
+  if (partial && Object.keys(body).length === 0) validationFailure("body", "minKeys");
+  return body;
 }
 
 function validationFailure(field, rule = "reference") {
@@ -3841,8 +3874,14 @@ export function createServer(options = {}) {
         : {}),
     });
   });
+  const bookkeepingCategoryRepository = options.bookkeepingCategoryRepository
+    ?? createBookkeepingCategoryRepository(db, {
+      ...(options.bookkeepingCategoryIdFactory ? { idFactory: options.bookkeepingCategoryIdFactory } : {}),
+      ...(options.bookkeepingCategoryClock ? { clock: options.bookkeepingCategoryClock } : {}),
+    });
   const shortcutBookkeepingRepository = createShortcutBookkeepingRepository(db, {
     invoiceRepository,
+    categoryRepository: bookkeepingCategoryRepository,
     ...(options.shortcutBookkeepingIdFactory ? { idFactory: options.shortcutBookkeepingIdFactory } : {}),
     ...(options.shortcutBookkeepingClock ? { clock: options.shortcutBookkeepingClock } : {}),
   });
@@ -4345,6 +4384,7 @@ export function createServer(options = {}) {
       db,
       config,
       shortcutBookkeepingRepository,
+      categoryRepository: bookkeepingCategoryRepository,
       travelExpenseRepository,
       travelExpenseRegionRepository,
       travelExpenseDocumentInboxRepository,
@@ -7773,6 +7813,114 @@ export function createServer(options = {}) {
       if (request.method === "GET" && url.pathname === "/api/hospital-tenders/scheduler/runs") {
         if (request.authContext.kind !== "user") return unauthorized(response);
         sendJson(response, 200, { items: hospitalTenderScheduler.listRuns(50) });
+        return;
+      }
+
+      if (
+        url.pathname === "/api/bookkeeping/categories"
+        || (parts.length === 4
+          && parts[0] === "api"
+          && parts[1] === "bookkeeping"
+          && parts[2] === "categories"
+          && parts[3])
+      ) {
+        if (request.authContext.kind !== "user") return unauthorized(response);
+        const owner = request.authContext.account;
+        if (request.method === "GET" && parts.length === 4 && parts[3]) {
+          const categoryId = decodeURIComponent(parts[3]);
+          const item = bookkeepingCategoryRepository.get(categoryId, { owner });
+          if (!item) throw new HttpError(404, "BOOKKEEPING_CATEGORY_NOT_FOUND", "记账分类不存在");
+          sendJson(response, 200, { item }, { "Cache-Control": "no-store", ETag: `"${item.version}"` });
+          return;
+        }
+        if (request.method === "GET" && url.pathname === "/api/bookkeeping/categories") {
+          const rawEntryType = url.searchParams.get("entryType");
+          const includeArchived = ["true", "1"].includes(url.searchParams.get("includeArchived"));
+          const items = bookkeepingCategoryRepository.list({
+            owner,
+            entryType: rawEntryType || null,
+            includeArchived,
+          });
+          sendJson(response, 200, { items }, { "Cache-Control": "no-store" });
+          return;
+        }
+        if (request.method === "POST" && url.pathname === "/api/bookkeeping/categories") {
+          const body = validateBookkeepingCategoryPayload(await readJson(request));
+          const item = withImmediateTransaction(db, () => {
+            const created = bookkeepingCategoryRepository.create({
+              owner,
+              ledgerName: body.ledgerName,
+              entryType: body.entryType,
+              name: body.name,
+              subcategories: body.subcategories,
+            });
+            insertAudit(db, {
+              action: "bookkeeping_category.create",
+              entityType: "bookkeeping_category",
+              entityId: created.id,
+              actor: owner,
+              requestId,
+              after: created,
+              entityVersion: created.version,
+              metadata: { owner, ledgerName: created.ledgerName, entryType: created.entryType },
+            });
+            return created;
+          });
+          sendJson(response, 201, { item }, { "Cache-Control": "no-store" });
+          return;
+        }
+        if (parts.length !== 4 || !parts[3] || !["PATCH", "DELETE"].includes(request.method)) {
+          sendHttpError(
+            response,
+            new HttpError(405, "METHOD_NOT_ALLOWED", "Only GET, POST, PATCH and DELETE are allowed for bookkeeping categories"),
+            responseOptions(response, { Allow: "GET, POST, PATCH, DELETE" }),
+          );
+          return;
+        }
+        const categoryId = decodeURIComponent(parts[3]);
+        const expectedVersion = parseExpectedVersion(request);
+        const patchBody = request.method === "PATCH"
+          ? validateBookkeepingCategoryPayload(await readJson(request), { partial: true })
+          : null;
+        const item = withImmediateTransaction(db, () => {
+          const before = bookkeepingCategoryRepository.get(categoryId, { owner });
+          if (!before) throw new HttpError(404, "BOOKKEEPING_CATEGORY_NOT_FOUND", "记账分类不存在");
+          if (request.method === "PATCH") {
+            const updated = bookkeepingCategoryRepository.update(categoryId, {
+              owner,
+              expectedVersion,
+              name: patchBody.name,
+              subcategories: patchBody.subcategories,
+              status: patchBody.status,
+            });
+            insertAudit(db, {
+              action: "bookkeeping_category.update",
+              entityType: "bookkeeping_category",
+              entityId: updated.id,
+              actor: owner,
+              requestId,
+              before,
+              after: updated,
+              entityVersion: updated.version,
+              metadata: { owner },
+            });
+            return updated;
+          }
+          const archived = bookkeepingCategoryRepository.remove(categoryId, { owner, expectedVersion });
+          insertAudit(db, {
+            action: "bookkeeping_category.archive",
+            entityType: "bookkeeping_category",
+            entityId: archived.id,
+            actor: owner,
+            requestId,
+            before,
+            after: archived,
+            entityVersion: archived.version,
+            metadata: { owner },
+          });
+          return archived;
+        });
+        sendJson(response, 200, { item }, { "Cache-Control": "no-store", ETag: `"${item.version}"` });
         return;
       }
 

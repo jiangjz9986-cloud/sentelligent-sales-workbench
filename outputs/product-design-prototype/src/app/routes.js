@@ -25,6 +25,7 @@ const PAGE_META = Object.freeze({
   "settings/notifications": Object.freeze({ active: "settings", defaultMode: "index", readOnly: false }),
   "settings/tender-schedule": Object.freeze({ active: "settings", defaultMode: "index", readOnly: false }),
   "settings/bookkeeping-log": Object.freeze({ active: "settings", defaultMode: "index", readOnly: false }),
+  "settings/bookkeeping-categories": Object.freeze({ active: "settings", defaultMode: "index", readOnly: false }),
   "hospital-tenders": Object.freeze({ active: "customer", defaultMode: "index", readOnly: true }),
   solutions: Object.freeze({ active: "solution", defaultMode: "list", readOnly: true }),
 });
@@ -201,6 +202,9 @@ function matchRoute(segments) {
   }
   if (page === "settings" && segments.length === 2 && segments[1] === "bookkeeping-log") {
     return routeState("settings/bookkeeping-log", "index");
+  }
+  if (page === "settings" && segments.length === 2 && segments[1] === "bookkeeping-categories") {
+    return routeState("settings/bookkeeping-categories", "index");
   }
   if (page === "solutions") {
     if (segments.length === 1) return routeState(page, "list");
@@ -591,7 +595,7 @@ function pathForRoute(route) {
     throw new TypeError("Invalid route mode");
   }
   if (
-    (page === "travel-expenses" || page === "weekly-reports" || page === "settings/weixin" || page === "settings/config" || page === "settings/users" || page === "settings/notifications" || page === "settings/tender-schedule" || page === "settings/bookkeeping-log") &&
+    (page === "travel-expenses" || page === "weekly-reports" || page === "settings/weixin" || page === "settings/config" || page === "settings/users" || page === "settings/notifications" || page === "settings/tender-schedule" || page === "settings/bookkeeping-log" || page === "settings/bookkeeping-categories") &&
     mode === "index"
   ) {
     assertNoEntityId(route);

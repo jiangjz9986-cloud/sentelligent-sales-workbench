@@ -8,12 +8,18 @@ import {
   KeyRound,
   LoaderCircle,
   LockKeyhole,
+  Pencil,
   Play,
+  Plus,
   Power,
   RefreshCw,
+  RotateCcw,
+  Save,
   ScrollText,
   ShieldCheck,
+  Tags,
   Trash2,
+  X,
 } from "lucide-react";
 import { useEffect, useState } from "react";
 
@@ -133,6 +139,14 @@ function bookkeepingLogTone(action = "") {
   return "success";
 }
 
+function categoryEntryTypeLabel(value) {
+  return value === "income" ? "收入" : "支出";
+}
+
+function categorySubcategoryLabel(item) {
+  return item.subcategories?.length ? item.subcategories.join("、") : "无小类";
+}
+
 function bookkeepingLogSummary(item) {
   const source = (item?.after && typeof item.after === "object" ? item.after : null)
     ?? (item?.metadata && typeof item.metadata === "object" ? item.metadata : null)
@@ -184,9 +198,14 @@ export function SystemSettingsPage({ apiClient, backendStatus, section = "securi
   const [notice, setNotice] = useState("");
   const [bookkeepingLog, setBookkeepingLog] = useState({ loading: true, error: "", items: [], updatedAt: null });
   const [bookkeepingLogReloadToken, setBookkeepingLogReloadToken] = useState(0);
+  const [categoryState, setCategoryState] = useState({ loading: true, error: "", items: [], updatedAt: null });
+  const [categoryEntryType, setCategoryEntryType] = useState("expense");
+  const [categoryShowArchived, setCategoryShowArchived] = useState(false);
+  const [categoryEditor, setCategoryEditor] = useState(null);
+  const [categoryReloadToken, setCategoryReloadToken] = useState(0);
 
   async function loadSettings() {
-    if (["notifications", "tender-schedule", "bookkeeping-log"].includes(section)) {
+    if (["notifications", "tender-schedule", "bookkeeping-log", "bookkeeping-categories"].includes(section)) {
       setLoading(false);
       return;
     }
@@ -331,6 +350,34 @@ export function SystemSettingsPage({ apiClient, backendStatus, section = "securi
     };
   }, [apiClient, backendStatus, section, bookkeepingLogReloadToken]);
 
+  useEffect(() => {
+    if (section !== "bookkeeping-categories") return undefined;
+    if (!apiClient?.isEnabled || backendStatus !== "connected" || typeof apiClient.listBookkeepingCategories !== "function") {
+      setCategoryState({ loading: false, error: "", items: [], updatedAt: null });
+      return undefined;
+    }
+    let disposed = false;
+    const load = async () => {
+      try {
+        const items = await apiClient.listBookkeepingCategories({ includeArchived: categoryShowArchived });
+        if (disposed) return;
+        setCategoryState({ loading: false, error: "", items, updatedAt: new Date().toISOString() });
+      } catch (loadError) {
+        if (disposed) return;
+        setCategoryState((current) => ({
+          ...current,
+          loading: false,
+          error: loadError?.message ?? "记账分类暂时无法读取。",
+        }));
+      }
+    };
+    setCategoryState((current) => ({ ...current, loading: true, error: "" }));
+    void load();
+    return () => {
+      disposed = true;
+    };
+  }, [apiClient, backendStatus, section, categoryShowArchived, categoryReloadToken]);
+
   async function saveApiKey(event) {
     event.preventDefault();
     if (!apiKey.trim()) {
@@ -451,6 +498,115 @@ export function SystemSettingsPage({ apiClient, backendStatus, section = "securi
     }
   }
 
+  function beginCreateCategory() {
+    setCategoryEditor({
+      id: null,
+      version: null,
+      entryType: categoryEntryType,
+      name: "",
+      subcategoriesText: "",
+      isSystem: false,
+      status: "active",
+    });
+    setError("");
+    setNotice("");
+  }
+
+  function beginEditCategory(item) {
+    setCategoryEditor({
+      id: item.id,
+      version: item.version,
+      entryType: item.entryType,
+      name: item.name,
+      subcategoriesText: item.subcategories.join("、"),
+      isSystem: item.isSystem,
+      status: item.status,
+    });
+    setError("");
+    setNotice("");
+  }
+
+  async function saveCategory(event) {
+    event.preventDefault();
+    if (!categoryEditor?.name.trim()) {
+      setError("请输入分类名称。");
+      return;
+    }
+    const subcategories = categoryEditor.subcategoriesText
+      .split(/[、,，]/u)
+      .map((item) => item.trim())
+      .filter(Boolean);
+    setBusy("category-save");
+    setError("");
+    setNotice("");
+    try {
+      if (categoryEditor.id) {
+        const updatePayload = categoryEditor.isSystem
+          ? { subcategories }
+          : { name: categoryEditor.name.trim(), subcategories, status: categoryEditor.status };
+        await apiClient.updateBookkeepingCategory(
+          categoryEditor.id,
+          updatePayload,
+          categoryEditor.version,
+        );
+        setNotice("记账分类已更新。");
+      } else {
+        await apiClient.createBookkeepingCategory({
+          entryType: categoryEditor.entryType,
+          name: categoryEditor.name.trim(),
+          subcategories,
+        });
+        setNotice("记账分类已添加。");
+      }
+      setCategoryEditor(null);
+      setCategoryReloadToken((value) => value + 1);
+    } catch (saveError) {
+      if (saveError?.code === "BOOKKEEPING_CATEGORY_EXISTS") {
+        setError("同一类账本中已经存在同名分类。");
+      } else if (saveError?.code === "VERSION_CONFLICT") {
+        setError("分类已被其他操作更新，请刷新后重新编辑。");
+      } else {
+        setError(saveError?.message ?? "记账分类保存失败，请稍后重试。");
+      }
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function archiveCategory(item) {
+    const confirmed = typeof window !== "undefined"
+      && window.confirm(`确定停用“${item.name}”吗？历史记账仍会保留该分类。`);
+    if (!confirmed) return;
+    setBusy(`category-archive-${item.id}`);
+    setError("");
+    setNotice("");
+    try {
+      await apiClient.deleteBookkeepingCategory(item.id, item.version);
+      setNotice(`“${item.name}”已停用。`);
+      setCategoryReloadToken((value) => value + 1);
+      if (categoryEditor?.id === item.id) setCategoryEditor(null);
+    } catch (archiveError) {
+      setError(archiveError?.message ?? "记账分类停用失败，请刷新后重试。");
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function restoreCategory(item) {
+    setBusy(`category-restore-${item.id}`);
+    setError("");
+    setNotice("");
+    try {
+      await apiClient.updateBookkeepingCategory(item.id, { status: "active" }, item.version);
+      setNotice(`“${item.name}”已恢复。`);
+      setCategoryReloadToken((value) => value + 1);
+    } catch (restoreError) {
+      setError(restoreError?.message ?? "记账分类恢复失败，请刷新后重试。");
+    } finally {
+      setBusy("");
+    }
+  }
+
   const deepseek = settings?.deepseek;
   const schedulerState = integrationStatus.scheduler?.item ?? integrationStatus.scheduler ?? null;
   const schedulerRuns = Array.isArray(integrationStatus.scheduler?.runs)
@@ -499,6 +655,12 @@ export function SystemSettingsPage({ apiClient, backendStatus, section = "securi
       description: "记账、修改、取消、确认、发票、借款、打印与导出的每一步都会在这里留痕，每 10 秒自动刷新。",
       icon: ScrollText,
     },
+    "bookkeeping-categories": {
+      eyebrow: "记账配置",
+      title: "记账分类",
+      description: "维护小小记账使用的收入与支出分类；停用不会影响历史记账。",
+      icon: Tags,
+    },
   }[section] ?? null;
   const SectionIcon = sectionMeta?.icon ?? ShieldCheck;
 
@@ -507,6 +669,7 @@ export function SystemSettingsPage({ apiClient, backendStatus, section = "securi
   const progressPercent = customerCount > 0
     ? Math.min(100, Math.round((processedCount / customerCount) * 100))
     : 0;
+  const categoryItems = categoryState.items.filter((item) => item.entryType === categoryEntryType);
 
   return (
     <div className="system-settings-page" data-testid="system-settings-page" data-section={section}>
@@ -839,6 +1002,153 @@ export function SystemSettingsPage({ apiClient, backendStatus, section = "securi
               )}
               <p className="settings-inline-note"><Clock3 size={14} aria-hidden="true" />日志来自服务端审计流水，只读展示；每 10 秒自动刷新，可随时对账。</p>
             </Panel>
+          </div>
+        </section>
+      ) : null}
+
+      {!loading && section === "bookkeeping-categories" ? (
+        <section className="settings-focused-section" data-testid="settings-bookkeeping-categories-section">
+          <div className="settings-grid settings-grid-focused settings-categories-grid">
+            <Panel
+              title="分类清单"
+              meta={categoryState.loading ? "读取中" : `${categoryItems.length} 项 · ${formatDate(categoryState.updatedAt)}`}
+              className="settings-card settings-category-manager"
+            >
+              <div className="settings-category-toolbar">
+                <div className="settings-segmented-control" role="tablist" aria-label="记账类型">
+                  {[["expense", "支出"], ["income", "收入"]].map(([value, label]) => (
+                    <button
+                      key={value}
+                      className={categoryEntryType === value ? "active" : ""}
+                      type="button"
+                      role="tab"
+                      aria-selected={categoryEntryType === value}
+                      onClick={() => {
+                        setCategoryEntryType(value);
+                        setCategoryEditor(null);
+                      }}
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
+                <label className="settings-checkbox-control">
+                  <input
+                    type="checkbox"
+                    checked={categoryShowArchived}
+                    onChange={(event) => setCategoryShowArchived(event.target.checked)}
+                  />
+                  <span>显示已停用</span>
+                </label>
+                <button
+                  className="primary-button"
+                  type="button"
+                  onClick={beginCreateCategory}
+                  disabled={busy !== "" || backendStatus !== "connected"}
+                >
+                  <Plus size={16} /> 新增分类
+                </button>
+              </div>
+              {categoryState.error ? <p className="settings-feedback error" role="alert">{categoryState.error}</p> : null}
+              {categoryItems.length ? (
+                <div className="settings-category-list" data-testid="bookkeeping-category-list">
+                  {categoryItems.map((item) => (
+                    <div className={`settings-category-item ${item.status === "archived" ? "archived" : ""}`} key={item.id}>
+                      <div className="settings-category-copy">
+                        <div className="settings-category-title-row">
+                          <strong>{item.name}</strong>
+                          <span className={`settings-category-badge ${item.isSystem ? "system" : "custom"}`}>
+                            {item.isSystem ? "系统默认" : "自定义"}
+                          </span>
+                          {item.status === "archived" ? <span className="settings-category-badge archived">已停用</span> : null}
+                        </div>
+                        <span>小类：{categorySubcategoryLabel(item)}</span>
+                      </div>
+                      <div className="settings-category-actions">
+                        <button
+                          className="ghost-button"
+                          type="button"
+                          onClick={() => beginEditCategory(item)}
+                          disabled={busy !== ""}
+                        >
+                          <Pencil size={15} /> 编辑
+                        </button>
+                        {item.status === "archived" ? (
+                          <button
+                            className="ghost-button"
+                            type="button"
+                            onClick={() => { void restoreCategory(item); }}
+                            disabled={busy !== ""}
+                          >
+                            <RotateCcw size={15} /> 恢复
+                          </button>
+                        ) : (
+                          <button
+                            className="danger-button"
+                            type="button"
+                            onClick={() => { void archiveCategory(item); }}
+                            disabled={item.isSystem || busy !== ""}
+                            title={item.isSystem ? "系统默认分类不能停用" : undefined}
+                          >
+                            <Trash2 size={15} /> 停用
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              ) : !categoryState.loading ? (
+                <p className="settings-empty-state">当前类型还没有分类。</p>
+              ) : (
+                <p className="settings-empty-state">正在读取记账分类…</p>
+              )}
+              <p className="settings-inline-note"><Tags size={14} aria-hidden="true" />系统默认分类用于保持已有记账识别稳定；自定义分类可随时编辑、停用和恢复。</p>
+            </Panel>
+
+            {categoryEditor ? (
+              <Panel
+                title={categoryEditor.id ? `编辑${categoryEditor.name}` : `新增${categoryEntryTypeLabel(categoryEditor.entryType)}分类`}
+                meta={categoryEditor.isSystem ? "系统默认" : "自定义分类"}
+                className="settings-card settings-category-editor"
+                data-testid="bookkeeping-category-editor"
+              >
+                <form className="settings-key-form" onSubmit={saveCategory}>
+                  <label>
+                    <span>分类名称</span>
+                    <input
+                      value={categoryEditor.name}
+                      onChange={(event) => setCategoryEditor((current) => ({ ...current, name: event.target.value }))}
+                      disabled={categoryEditor.isSystem}
+                      autoFocus
+                      aria-label="分类名称"
+                    />
+                  </label>
+                  <label>
+                    <span>小类（用逗号分隔，可留空）</span>
+                    <input
+                      value={categoryEditor.subcategoriesText}
+                      onChange={(event) => setCategoryEditor((current) => ({ ...current, subcategoriesText: event.target.value }))}
+                      placeholder="例如：早餐、午餐、晚餐"
+                      aria-label="分类小类"
+                    />
+                  </label>
+                  <div className="settings-button-row">
+                    <button className="primary-button" type="submit" disabled={busy !== ""}>
+                      <Save size={16} /> {busy === "category-save" ? "保存中…" : "保存分类"}
+                    </button>
+                    <button className="ghost-button" type="button" onClick={() => setCategoryEditor(null)} disabled={busy !== ""}>
+                      <X size={16} /> 取消
+                    </button>
+                  </div>
+                </form>
+                <p className="settings-inline-note">分类名称用于小小记账复核与历史修订；小类用于进一步细分费用。</p>
+              </Panel>
+            ) : (
+              <Panel title="编辑分类" meta="未选择" className="settings-card settings-category-editor settings-category-editor-empty">
+                <Tags size={26} aria-hidden="true" />
+                <p className="settings-empty-state">选择“编辑”或“新增分类”后，在这里维护分类名称与小类。</p>
+              </Panel>
+            )}
           </div>
         </section>
       ) : null}
