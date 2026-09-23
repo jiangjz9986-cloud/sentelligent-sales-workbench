@@ -550,6 +550,7 @@ export function createShortcutBookkeepingAssistantRuntime({
   db,
   config,
   shortcutBookkeepingRepository,
+  categoryRepository = null,
   travelExpenseRepository = null,
   travelExpenseRegionRepository = null,
   travelExpenseDocumentInboxRepository = null,
@@ -567,6 +568,9 @@ export function createShortcutBookkeepingAssistantRuntime({
   if (!db || !shortcutBookkeepingRepository || !pendingActionRepository || !sessionRepository || !outboxRepository) {
     throw new TypeError("Shortcut WeChat assistant runtime dependencies are required");
   }
+  if (categoryRepository !== null && typeof categoryRepository.resolve !== "function") {
+    throw new TypeError("categoryRepository.resolve must be a function");
+  }
   if (!bindingsRepository || typeof bindingsRepository.activeByAccount !== "function") {
     throw new TypeError("bindingsRepository is required for the shortcut WeChat assistant runtime");
   }
@@ -576,6 +580,9 @@ export function createShortcutBookkeepingAssistantRuntime({
   if (typeof batchIdFactory !== "function") throw new TypeError("batchIdFactory must be a function");
   const secret = secretBuffer(confirmationSecret);
   const enabled = config?.weixinBookkeepingConfirmationEnabled === true;
+  const resolveCategory = categoryRepository?.resolve
+    ? (input) => categoryRepository.resolve(input)
+    : resolveBookkeepingCategory;
 
   // v0.9.3：owner/senderId 闭包常量退役——绑定表是唯一事实源，每次调用现查。
   function isReady() {
@@ -2269,11 +2276,13 @@ export function createShortcutBookkeepingAssistantRuntime({
     });
     analysis = synchronizeMealRegion(entry, analysis).analysis;
     try {
-      resolveBookkeepingCategory({
+      resolveCategory({
+        owner: account,
         ledgerName: entry.ledgerName,
         entryType: entry.entryType,
         category: analysis.category,
         subcategory: analysis.subcategory,
+        includeArchived: analysis.category === entry.category,
       });
     } catch {
       return {

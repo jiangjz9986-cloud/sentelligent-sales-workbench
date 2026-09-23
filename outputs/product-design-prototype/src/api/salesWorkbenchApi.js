@@ -199,6 +199,13 @@ function assertRecentLedgerReceipt(value, path = "recentLedgerReceipt") {
   return receipt;
 }
 
+function assertBookkeepingCategory(value, path = "bookkeepingCategory") {
+  const item = assertApiEntity("bookkeepingCategory", value, path);
+  if (!Array.isArray(item.subcategories)) throw new TypeError(`${path}.subcategories: expected array`);
+  item.subcategories.forEach((valueItem, index) => requiredApiString(valueItem, `${path}.subcategories[${index}]`));
+  return item;
+}
+
 function apiItems(values, path, assertItem) {
   if (!Array.isArray(values)) throw new TypeError(`${path}: expected array`);
   return values.map((value, index) => assertItem(value, `${path}[${index}]`));
@@ -1976,6 +1983,53 @@ export function createSalesWorkbenchApi({ baseUrl, fetchImpl = fetch, onUnauthor
         throw new TypeError("auditLogs.items: expected array");
       }
       return response.items;
+    },
+
+    async listBookkeepingCategories({ entryType, includeArchived = false, signal } = {}) {
+      const response = await requestApi(
+        queryPath("/api/bookkeeping/categories", {
+          entryType,
+          includeArchived,
+        }),
+        { signal },
+      );
+      return apiItems(response?.items, "bookkeepingCategories.items", assertBookkeepingCategory);
+    },
+
+    async getBookkeepingCategory(categoryId, { signal } = {}) {
+      const response = await requestApi(`/api/bookkeeping/categories/${encodeURIComponent(categoryId)}`, { signal });
+      return assertBookkeepingCategory(response?.item, "bookkeepingCategory.item");
+    },
+
+    async createBookkeepingCategory(payload = {}) {
+      const response = await requestApi("/api/bookkeeping/categories", {
+        method: "POST",
+        body: JSON.stringify({
+          ledgerName: "出差报销",
+          entryType: payload.entryType,
+          name: payload.name,
+          subcategories: Array.isArray(payload.subcategories) ? payload.subcategories : [],
+        }),
+      });
+      return assertBookkeepingCategory(response?.item, "bookkeepingCategory.item");
+    },
+
+    async updateBookkeepingCategory(categoryId, payload = {}, version) {
+      const response = await requestApi(`/api/bookkeeping/categories/${encodeURIComponent(categoryId)}`, {
+        method: "PATCH",
+        headers: versionHeaders(version),
+        body: JSON.stringify(pickOwnFields(payload, ["name", "subcategories", "status"])),
+      });
+      return assertBookkeepingCategory(response?.item, "bookkeepingCategory.item");
+    },
+
+    async deleteBookkeepingCategory(categoryId, version) {
+      const response = await requestApi(`/api/bookkeeping/categories/${encodeURIComponent(categoryId)}`, {
+        method: "DELETE",
+        headers: versionHeaders(version),
+        body: "{}",
+      });
+      return assertBookkeepingCategory(response?.item, "bookkeepingCategory.item");
     },
 
     async recordBookkeepingClientEvent(event, detail = {}) {

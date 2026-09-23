@@ -231,6 +231,11 @@ const routeCases = [
     "/settings/bookkeeping-log",
   ],
   [
+    "/settings/bookkeeping-categories",
+    expectedRoute({ page: "settings/bookkeeping-categories", active: "settings" }),
+    "/settings/bookkeeping-categories",
+  ],
+  [
     "/solutions",
     expectedRoute({ page: "solutions", active: "solution", mode: "list", readOnly: true }),
     "/solutions",
@@ -995,5 +1000,6 @@ describe("sidebar navigation wiring (navRoutes.js)", () => {
     assert.equal(nav.SETTINGS_SECTION_BY_ACTIVE["settings-bookkeeping-log"], "bookkeeping-log");
     assert.equal(nav.SETTINGS_SECTION_BY_ACTIVE["settings-tender-schedule"], "tender-schedule");
     assert.equal(nav.SETTINGS_SECTION_BY_ACTIVE["settings-notifications"], "notifications");
+    assert.equal(nav.SETTINGS_SECTION_BY_ACTIVE["settings-bookkeeping-categories"], "bookkeeping-categories");
   });
 });

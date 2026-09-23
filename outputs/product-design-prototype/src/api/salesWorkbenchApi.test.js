@@ -521,6 +521,23 @@ function sampleShortcutBookkeepingLedgerReceipt(overrides = {}) {
   };
 }
 
+function sampleBookkeepingCategory(overrides = {}) {
+  return {
+    id: "category-1",
+    owner: "jiangjz",
+    ledgerName: "出差报销",
+    entryType: "expense",
+    name: "通讯费",
+    subcategories: ["电话"],
+    isSystem: false,
+    status: "active",
+    version: 1,
+    createdAt: "2026-09-24T08:00:00.000Z",
+    updatedAt: "2026-09-24T08:00:00.000Z",
+    ...overrides,
+  };
+}
+
 function sampleShortcutBookkeepingReview(overrides = {}) {
   const status = overrides.status ?? "review_required";
   return {
@@ -1132,6 +1149,50 @@ function bootstrapResponse(url) {
 }
 
 describe("sales workbench API client", () => {
+  it("covers the bookkeeping category CRUD client contract with CSRF and versions", async () => {
+    const calls = [];
+    const api = createSalesWorkbenchApi({
+      baseUrl: "https://example.test",
+      fetchImpl: async (url, options = {}) => {
+        calls.push({ url, options });
+        if (options.method === "POST") return jsonResponse({ item: sampleBookkeepingCategory() }, 201);
+        if (options.method === "PATCH") return jsonResponse({ item: sampleBookkeepingCategory({ name: "通信费", version: 2 }) });
+        if (options.method === "DELETE") return jsonResponse({ item: sampleBookkeepingCategory({ version: 3, status: "archived" }) });
+        return url.endsWith("/category-1")
+          ? jsonResponse({ item: sampleBookkeepingCategory() }, 200, { ETag: '"1"' })
+          : jsonResponse({ items: [sampleBookkeepingCategory()] });
+      },
+    });
+    api.setSession({ csrfToken: "fixture-csrf-token" });
+
+    const listed = await api.listBookkeepingCategories({ entryType: "expense", includeArchived: false });
+    const fetched = await api.getBookkeepingCategory("category-1");
+    const created = await api.createBookkeepingCategory({ entryType: "expense", name: "通讯费", subcategories: ["电话"] });
+    const updated = await api.updateBookkeepingCategory("category-1", { name: "通信费", subcategories: ["电话", "流量"] }, 1);
+    const archived = await api.deleteBookkeepingCategory("category-1", 2);
+
+    assert.equal(listed[0].name, "通讯费");
+    assert.equal(fetched.id, "category-1");
+    assert.equal(created.id, "category-1");
+    assert.equal(updated.name, "通信费");
+    assert.equal(archived.status, "archived");
+    assert.equal(calls[0].url, "https://example.test/api/bookkeeping/categories?entryType=expense&includeArchived=false");
+    assert.equal(calls[1].url, "https://example.test/api/bookkeeping/categories/category-1");
+    assert.equal(headerValue(calls[2].options, "X-CSRF-Token"), "fixture-csrf-token");
+    assert.deepEqual(JSON.parse(calls[2].options.body), {
+      ledgerName: "出差报销",
+      entryType: "expense",
+      name: "通讯费",
+      subcategories: ["电话"],
+    });
+    assert.equal(headerValue(calls[3].options, "If-Match"), '"1"');
+    assert.deepEqual(JSON.parse(calls[3].options.body), {
+      name: "通信费",
+      subcategories: ["电话", "流量"],
+    });
+    assert.equal(headerValue(calls[4].options, "If-Match"), '"2"');
+  });
+
   it("creates cryptographically strong UUIDs with a getRandomValues fallback", () => {
     assert.equal(createStrongUuid({ randomUUID: () => "native-uuid" }), "native-uuid");
 

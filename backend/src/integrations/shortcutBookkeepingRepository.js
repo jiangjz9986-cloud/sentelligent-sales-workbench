@@ -278,7 +278,7 @@ function normalizeExpense(value, { required = false } = {}) {
   return normalized;
 }
 
-function normalizeAnalysis(value, row) {
+function normalizeAnalysis(value, row, { resolveCategory = resolveBookkeepingCategory } = {}) {
   if (!isPlainObject(value)) throw new TypeError("analysis must be an object");
   const status = value.status === "ready" || value.status === "review_required"
     ? value.status
@@ -287,11 +287,13 @@ function normalizeAnalysis(value, row) {
   const expense = normalizeExpense(value.expense, { required: status === "ready" });
   const category = requiredText(value.category ?? row.category, "analysis.category", 100);
   const subcategory = optionalText(value.subcategory ?? row.subcategory, "analysis.subcategory", 100);
-  const resolvedSelection = resolveBookkeepingCategory({
+  const resolvedSelection = resolveCategory({
+    owner: row.owner,
     ledgerName: row.ledger_name,
     entryType: row.entry_type,
     category,
     subcategory,
+    includeArchived: category === row.category,
   });
   const note = optionalText(value.note ?? row.note, "analysis.note", 1_000);
   if (status === "ready" && !expense.purpose) {
@@ -311,7 +313,7 @@ function normalizeAnalysis(value, row) {
   };
 }
 
-function normalizeReviewPatch(value, row) {
+function normalizeReviewPatch(value, row, { resolveCategory = resolveBookkeepingCategory } = {}) {
   if (value === undefined) return null;
   if (!isPlainObject(value)) throw new TypeError("reviewPatch must be an object");
   const allowed = new Set(["category", "subcategory", "note"]);
@@ -326,11 +328,13 @@ function normalizeReviewPatch(value, row) {
   const note = Object.hasOwn(value, "note")
     ? optionalText(value.note, "reviewPatch.note", 1_000)
     : optionalText(row.note, "stored note", 1_000);
-  const resolved = resolveBookkeepingCategory({
+  const resolved = resolveCategory({
+    owner: row.owner,
     ledgerName: row.ledger_name,
     entryType: row.entry_type,
     category,
     subcategory,
+    includeArchived: category === row.category,
   });
   return {
     category: resolved.category,
@@ -411,12 +415,19 @@ export function createShortcutBookkeepingRepository(db, {
   idFactory = randomUUID,
   clock = () => new Date(),
   invoiceRepository = null,
+  categoryRepository = null,
 } = {}) {
   if (!db || typeof db.prepare !== "function") {
     throw new TypeError("A synchronous SQLite connection is required");
   }
   if (typeof idFactory !== "function") throw new TypeError("idFactory must be a function");
   if (typeof clock !== "function") throw new TypeError("clock must be a function");
+  if (categoryRepository !== null && typeof categoryRepository.resolve !== "function") {
+    throw new TypeError("categoryRepository.resolve must be a function");
+  }
+  const resolveCategory = categoryRepository?.resolve
+    ? (input) => categoryRepository.resolve(input)
+    : resolveBookkeepingCategory;
 
   const selectById = db.prepare(`
     SELECT entry.*, expense.reference_code AS expense_reference_code
@@ -604,7 +615,7 @@ export function createShortcutBookkeepingRepository(db, {
     const entryType = requiredText(input.entryType, "entryType", 20);
     const category = requiredText(input.category, "category", 100);
     const subcategory = optionalText(input.subcategory, "subcategory", 100);
-    const resolved = resolveBookkeepingCategory({ ledgerName, entryType, category, subcategory });
+    const resolved = resolveCategory({ owner, ledgerName, entryType, category, subcategory });
     const idempotencyKeyHash = hashValue(requiredText(input.idempotencyKey, "idempotencyKey", 200));
     const normalizedRequestHash = sha256Value(input.requestHash, "requestHash");
     const rawText = requiredText(input.rawText, "rawText", 12_000);
@@ -990,7 +1001,7 @@ export function createShortcutBookkeepingRepository(db, {
         || !["income", "expense"].includes(current.entry_type)) {
         throw new TypeError("Sentelligent Shortcut bookkeeping entry type is invalid");
       }
-      const normalizedReviewPatch = normalizeReviewPatch(reviewPatch, current);
+      const normalizedReviewPatch = normalizeReviewPatch(reviewPatch, current, { resolveCategory });
       const effectiveCurrent = normalizedReviewPatch
         ? { ...current, ...normalizedReviewPatch }
         : current;
@@ -1006,7 +1017,7 @@ export function createShortcutBookkeepingRepository(db, {
           $note: normalizedReviewPatch.note,
         });
       }
-      let analysis = normalizeAnalysis(analysisValue, effectiveCurrent);
+      let analysis = normalizeAnalysis(analysisValue, effectiveCurrent, { resolveCategory });
       // Shortcut expense captures use the consumption amount as the
       // reimbursable amount by product rule. Keep the invariant at the
       // repository boundary too, so a legacy analyzer or a Web correction

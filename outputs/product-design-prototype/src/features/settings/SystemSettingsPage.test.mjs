@@ -34,7 +34,7 @@ test("notification settings expose read-only WeChat Clawbot runtime status", asy
   )?.[0] ?? "";
 
   assert.notEqual(notificationSection, "");
-  assert.match(source, /\["notifications", "tender-schedule", "bookkeeping-log"\]\.includes\(section\)/);
+  assert.match(source, /\["notifications", "tender-schedule", "bookkeeping-log", "bookkeeping-categories"\]\.includes\(section\)/);
   assert.match(source, /readsNotifications \? read\("getWeixinBindingStatus"/);
   assert.match(notificationSection, /data-notification-mode="read-only"/);
   assert.match(notificationSection, /微信 Clawbot 通知状态/);
@@ -64,6 +64,20 @@ test("bookkeeping realtime log polls the scoped audit feed read-only", async () 
   assert.match(source, /toLocaleTimeString\("zh-CN", \{ hour12: false \}\)/);
   assert.match(source, /entityId \? entityId\.slice\(0, 8\) : ""/);
   assert.doesNotMatch(source, /confirmWeixinBookkeepingReview/);
+});
+
+test("bookkeeping categories expose owner-scoped CRUD controls and archived recovery", async () => {
+  const source = await readFile(pagePath, "utf8");
+
+  assert.match(source, /data-testid="settings-bookkeeping-categories-section"/);
+  assert.match(source, /listBookkeepingCategories/);
+  assert.match(source, /createBookkeepingCategory/);
+  assert.match(source, /updateBookkeepingCategory/);
+  assert.match(source, /deleteBookkeepingCategory/);
+  assert.match(source, /新增分类/);
+  assert.match(source, /显示已停用/);
+  assert.match(source, /恢复/);
+  assert.match(source, /历史记账仍会保留该分类/);
 });
 
 test("tender schedule settings expose the existing scheduler controls without showing secrets", async () => {

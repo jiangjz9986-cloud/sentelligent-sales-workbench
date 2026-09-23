@@ -1,6 +1,6 @@
 import { HttpError } from "../http/errors.js";
 
-const BOOKKEEPING_CATALOG = Object.freeze({
+export const DEFAULT_BOOKKEEPING_CATALOG = Object.freeze({
   "出差报销": Object.freeze({
     targetSystem: "sentelligent",
     income: Object.freeze({
@@ -30,12 +30,23 @@ function validationError(fields) {
   throw new HttpError(422, "VALIDATION_ERROR", "Request validation failed", fields);
 }
 
-export function resolveBookkeepingCategory({ ledgerName, entryType, category, subcategory = null } = {}) {
-  const ledger = BOOKKEEPING_CATALOG[ledgerName];
+export function normalizeBookkeepingEntryType(entryType) {
+  return ENTRY_TYPE_ALIASES.get(entryType) ?? null;
+}
+
+export function resolveBookkeepingCategoryAgainstCatalog({
+  catalog = DEFAULT_BOOKKEEPING_CATALOG,
+  ledgerName,
+  entryType,
+  category,
+  subcategory = null,
+} = {}) {
+  const ledger = catalog?.[ledgerName];
   if (!ledger) validationError({ ledger_name: "notAllowed" });
-  const normalizedEntryType = ENTRY_TYPE_ALIASES.get(entryType);
+  const normalizedEntryType = normalizeBookkeepingEntryType(entryType);
   if (!normalizedEntryType) validationError({ entry_type: "enum" });
   const categories = ledger[normalizedEntryType];
+  if (!categories || typeof categories !== "object") validationError({ entry_type: "enum" });
 
   // Income descriptions are AI-derived and can be broader than the legacy
   // expense taxonomy. Keep a normalized catch-all without exposing a catalog
@@ -70,4 +81,8 @@ export function resolveBookkeepingCategory({ ledgerName, entryType, category, su
     subcategory: normalizedSubcategory,
     targetSystem: ledger.targetSystem,
   };
+}
+
+export function resolveBookkeepingCategory(input = {}) {
+  return resolveBookkeepingCategoryAgainstCatalog(input);
 }

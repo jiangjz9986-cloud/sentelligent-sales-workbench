@@ -49,6 +49,7 @@ import { apply as applyCustomerImportBatches } from "./migrations/0045_customer_
 import { apply as applySecureSettingSync } from "./migrations/0046_secure_setting_sync.mjs";
 import { apply as applyTravelExpenseInvoiceType } from "./migrations/0047_travel_expense_invoice_type.mjs";
 import { apply as applyWeixinBookkeepingBatches } from "./migrations/0048_weixin_bookkeeping_batches.mjs";
+import { apply as applyBookkeepingCategories } from "./migrations/0049_bookkeeping_categories.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const migrations = [
@@ -332,6 +333,12 @@ const migrations = [
     path: resolve(here, "migrations", "0048_weixin_bookkeeping_batches.mjs"),
     type: "module",
     apply: applyWeixinBookkeepingBatches,
+  },
+  {
+    version: "0049",
+    path: resolve(here, "migrations", "0049_bookkeeping_categories.mjs"),
+    type: "module",
+    apply: applyBookkeepingCategories,
   },
 ];
 

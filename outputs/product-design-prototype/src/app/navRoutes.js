@@ -22,6 +22,7 @@ export const ROUTE_BY_ACTIVE = Object.freeze({
   "settings-notifications": Object.freeze({ page: "settings/notifications", mode: "index" }),
   "settings-tender-schedule": Object.freeze({ page: "settings/tender-schedule", mode: "index" }),
   "settings-bookkeeping-log": Object.freeze({ page: "settings/bookkeeping-log", mode: "index" }),
+  "settings-bookkeeping-categories": Object.freeze({ page: "settings/bookkeeping-categories", mode: "index" }),
   solution: Object.freeze({ page: "solutions", mode: "list" }),
 });
 
@@ -44,6 +45,7 @@ export const ACTIVE_BY_ROUTE_PAGE = Object.freeze({
   "settings/notifications": "settings-notifications",
   "settings/tender-schedule": "settings-tender-schedule",
   "settings/bookkeeping-log": "settings-bookkeeping-log",
+  "settings/bookkeeping-categories": "settings-bookkeeping-categories",
   solutions: "solution",
 });
 
@@ -57,6 +59,7 @@ export const PARENT_NAV_BY_ACTIVE = Object.freeze({
   "settings-notifications": "settings",
   "settings-tender-schedule": "settings",
   "settings-bookkeeping-log": "settings",
+  "settings-bookkeeping-categories": "settings",
 });
 
 export const SETTINGS_SECTION_BY_ACTIVE = Object.freeze({
@@ -64,4 +67,5 @@ export const SETTINGS_SECTION_BY_ACTIVE = Object.freeze({
   "settings-notifications": "notifications",
   "settings-tender-schedule": "tender-schedule",
   "settings-bookkeeping-log": "bookkeeping-log",
+  "settings-bookkeeping-categories": "bookkeeping-categories",
 });

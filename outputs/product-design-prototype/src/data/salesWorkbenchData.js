@@ -13,6 +13,7 @@ import {
   ScrollText,
   Settings,
   ShieldAlert,
+  Tags,
   Users,
   UsersRound,
 } from "lucide-react";
@@ -56,6 +57,7 @@ export const moduleSubnavItems = {
     { id: "settings-notifications", label: "通知服务", icon: BellRing },
     { id: "settings-tender-schedule", label: "招标调度", icon: CalendarClock },
     { id: "settings-bookkeeping-log", label: "记账日志", icon: ScrollText },
+    { id: "settings-bookkeeping-categories", label: "记账分类", icon: Tags },
   ],
 };
 
