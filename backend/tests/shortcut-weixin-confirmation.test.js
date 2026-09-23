@@ -8,6 +8,7 @@ import { afterEach, beforeEach, describe, it } from "node:test";
 import { createServer } from "../src/server.js";
 import { resolveItineraryTripRegion } from "../src/assistant/bookkeepingTripRegion.js";
 import { openDatabase } from "../src/db.js";
+import { createInvoiceRepository } from "../src/travelExpense/invoiceRepository.js";
 import { shortcutBookkeepingConversationId } from "../src/weixin/bookkeepingDeliveryScope.js";
 import { createRemoteClawbotAgent } from "../src/weixin/remoteAgent.js";
 import { minimalPdf, VALID_JPEG, VALID_PNG } from "./helpers/image-fixtures.js";
@@ -2650,6 +2651,86 @@ describe("小小微信图片记账与自然语言确认闭环", () => {
     assert.equal(invoiceAttachment.kind, "invoice");
     assert.match(invoiceAttachment.notes, /^微信发票自动关联:/u);
     reconciled.close();
+  });
+
+  it("reverse-matches a stored invoice after WeChat bookkeeping confirmation and keeps the receipt short", async () => {
+    const invoiceDb = openDatabase({ databaseUrl: join(tempDir, "assistant.sqlite") });
+    const invoiceRepository = createInvoiceRepository(invoiceDb, {
+      idFactory: () => "invoice-before-weixin-bookkeeping",
+      clock: () => new Date("2026-08-25T06:24:00.000Z"),
+    });
+    invoiceRepository.createInvoice({
+      owner,
+      actor: owner,
+      source: "manual",
+      fileName: "stored-before-bookkeeping.pdf",
+      mediaType: "application/pdf",
+      content: minimalPdf("stored-before-bookkeeping"),
+      recognition: {
+        status: "unmatched",
+        extractedText: "电子发票",
+        ocr: null,
+        model: null,
+        conflicts: [],
+        fields: {
+          invoiceNumber: "PRE-21900",
+          issuedOn: "2026-08-18",
+          sellerName: "合成商户",
+          amountExTaxCents: 20467,
+          taxCents: 1433,
+          totalCents: 21900,
+          suggestedCategory: "other",
+        },
+        warnings: [],
+      },
+    });
+    invoiceDb.close();
+
+    const captured = await request("/api/integrations/weixin-agent/events", {
+      method: "POST",
+      headers: eventHeaders("reverse-invoice-bookkeeping-capture"),
+      body: JSON.stringify({
+        conversationId: "reverse-invoice-bookkeeping-conversation",
+        text: "",
+        sourceMessageId: "reverse-invoice-bookkeeping-capture",
+        senderId: sender,
+        chatType: "direct",
+        media: {
+          type: "image",
+          fileName: "reverse-bookkeeping.png",
+          mimeType: "image/png",
+          contentBase64: VALID_PNG.toString("base64"),
+        },
+      }),
+    });
+    assert.equal(captured.response.status, 200, JSON.stringify(captured.body));
+    const draft = await leaseOutbox();
+    await ackOutbox(draft, true, "reverse-invoice-bookkeeping-draft");
+
+    const confirmed = await request("/api/integrations/weixin-agent/events", {
+      method: "POST",
+      headers: eventHeaders("reverse-invoice-bookkeeping-confirm"),
+      body: JSON.stringify({
+        conversationId: "reverse-invoice-bookkeeping-conversation",
+        text: "确认",
+        sourceMessageId: "reverse-invoice-bookkeeping-confirm",
+        senderId: sender,
+        chatType: "direct",
+        quotedMessageId: "reverse-invoice-bookkeeping-draft",
+      }),
+    });
+    assert.equal(confirmed.response.status, 200, JSON.stringify(confirmed.body));
+    assert.equal(
+      confirmed.body.text,
+      "已确认并录入小小记账：2026年8月18日出差消费，金额 219.00 元，已自动关联发票。",
+    );
+
+    const acceptedReceipt = await leaseOutbox();
+    assert.equal(acceptedReceipt.item.message, confirmed.body.text);
+    const db = openDatabase({ databaseUrl: join(tempDir, "assistant.sqlite") });
+    assert.equal(db.prepare("SELECT COUNT(*) AS count FROM invoice_matches WHERE state = 'confirmed'").get().count, 1);
+    assert.equal(db.prepare("SELECT invoice_status FROM travel_expenses").get().invoice_status, "covered");
+    db.close();
   });
 
 });

@@ -1484,6 +1484,221 @@ export function createInvoiceRepository(db, {
     });
   }
 
+  /**
+   * Match an expense created after its invoice was already stored.
+   *
+   * The invoice-ingestion path already calls autoMatchInvoice, but that path
+   * cannot see a future expense. Keep the reverse trigger on the same rule
+   * boundary: only a unique exact amount, valid issue/payment date order, and
+   * bounded date window may be confirmed automatically.
+   */
+  function autoMatchExpense(input = {}) {
+    const { owner, actor } = ownerAndActor(input);
+    const expenseId = requiredText(input.expenseId, "expenseId", 200);
+    const priorityWeekStart = optionalMondayDate(input.priorityWeekStart, "priorityWeekStart");
+    const timestamp = nowIso(clock);
+    return runTransaction(db, () => {
+      const expense = activeExpenseById(expenseId, owner);
+      if (!expense) throw new InvoiceNotFoundError("Expense was not found");
+      if (expense.invoice_type === "substitute") {
+        return {
+          status: "review_required",
+          expenseId,
+          candidates: [],
+          reason: "substitute_expense_requires_manual_selection",
+        };
+      }
+
+      const payments = db.prepare(`
+        SELECT payment.*,
+               COALESCE((
+                 SELECT SUM(match.allocated_cents)
+                 FROM invoice_matches match
+                 WHERE match.payment_id = payment.id AND match.state = 'confirmed'
+               ), 0) AS confirmed_payment_cents
+        FROM travel_expense_payments payment
+        WHERE payment.expense_id = $expenseId
+          AND payment.reimbursement_cents > COALESCE((
+            SELECT SUM(match.allocated_cents)
+            FROM invoice_matches match
+            WHERE match.payment_id = payment.id AND match.state = 'confirmed'
+          ), 0)
+        ORDER BY payment.sequence, payment.id
+      `).all({ $expenseId: expenseId });
+      const expenseRemainingCents = Math.max(
+        0,
+        expenseReimbursementCents(expenseId) - confirmedExpenseCoverageCents(expenseId),
+      );
+      if (expenseRemainingCents <= 0 || payments.length === 0) {
+        const matches = listMatches({ owner, expenseId, state: "confirmed" });
+        return {
+          status: "matched",
+          expenseId,
+          candidates: [],
+          matches,
+          match: matches[0] ?? null,
+        };
+      }
+
+      const invoices = db.prepare(`
+        SELECT invoice.*,
+               COALESCE((
+                 SELECT SUM(match.allocated_cents)
+                 FROM invoice_matches match
+                 WHERE match.owner = invoice.owner
+                   AND match.invoice_id = invoice.id
+                   AND match.state = 'confirmed'
+               ), 0) AS confirmed_coverage_cents
+        FROM invoice_documents invoice
+        WHERE invoice.owner = $owner
+          AND invoice.deleted_at IS NULL
+          AND invoice.status IN ('unmatched', 'matched')
+          AND invoice.total_cents > 0
+          AND invoice.total_cents > COALESCE((
+            SELECT SUM(match.allocated_cents)
+            FROM invoice_matches match
+            WHERE match.owner = invoice.owner
+              AND match.invoice_id = invoice.id
+              AND match.state = 'confirmed'
+          ), 0)
+          AND NOT EXISTS (
+            SELECT 1
+            FROM invoice_matches active_match
+            WHERE active_match.owner = invoice.owner
+              AND active_match.invoice_id = invoice.id
+              AND active_match.expense_id = $expenseId
+              AND active_match.state IN ('suggested', 'confirmed')
+          )
+        ORDER BY invoice.issued_on, invoice.created_at, invoice.id
+      `).all({ $owner: owner, $expenseId: expenseId });
+      const priorityEnd = priorityWeekStart
+        ? (() => {
+            const end = new Date(`${priorityWeekStart}T00:00:00.000Z`);
+            end.setUTCDate(end.getUTCDate() + 6);
+            return end.toISOString().slice(0, 10);
+          })()
+        : null;
+      const candidates = [];
+      for (const invoice of invoices) {
+        const invoiceRemainingCents = Number(invoice.total_cents) - Number(invoice.confirmed_coverage_cents);
+        if (invoiceRemainingCents <= 0) continue;
+        for (const payment of payments) {
+          const paymentRemainingCents = Math.max(
+            0,
+            Number(payment.reimbursement_cents) - Number(payment.confirmed_payment_cents),
+          );
+          if (paymentRemainingCents <= 0) continue;
+          const exactAmount = invoiceRemainingCents === paymentRemainingCents
+            || (payments.length === 1 && invoiceRemainingCents === expenseRemainingCents);
+          const weekPriority = Boolean(
+            priorityWeekStart
+              && expense.occurred_on >= priorityWeekStart
+              && expense.occurred_on <= priorityEnd,
+          );
+          const dayDistance = calendarDayDistance(invoice.issued_on, expense.occurred_on);
+          const dateWindowEligible = dayDistance <= AUTO_MATCH_MAX_DATE_DISTANCE_DAYS;
+          const dateOrderEligible = invoiceIssuedOnOrAfterPaymentDate(
+            invoice.issued_on,
+            payment.paid_at,
+            expense.occurred_on,
+          );
+          candidates.push({
+            invoice,
+            invoiceRemainingCents,
+            expenseId,
+            paymentId: payment.id,
+            paymentRemainingCents,
+            exactAmount,
+            weekPriority,
+            dayDistance,
+            dateWindowEligible,
+            dateOrderEligible,
+            rationale: [
+              exactAmount ? "amount_exact" : "amount_partial_or_different",
+              weekPriority ? "priority_week" : "outside_priority_week",
+              `issued_date_distance_${dayDistance}_days`,
+              dateOrderEligible
+                ? "invoice_on_or_after_payment_date"
+                : "invoice_before_payment_date",
+              dateWindowEligible
+                ? `date_within_${AUTO_MATCH_MAX_DATE_DISTANCE_DAYS}_day_window`
+                : `date_outside_${AUTO_MATCH_MAX_DATE_DISTANCE_DAYS}_day_window`,
+            ],
+          });
+        }
+      }
+      candidates.sort((left, right) => Number(right.exactAmount) - Number(left.exactAmount)
+        || Number(right.weekPriority) - Number(left.weekPriority)
+        || left.dayDistance - right.dayDistance
+        || String(left.invoice.issued_on).localeCompare(String(right.invoice.issued_on))
+        || String(left.invoice.id).localeCompare(String(right.invoice.id))
+        || String(left.paymentId).localeCompare(String(right.paymentId)));
+
+      const exact = candidates.filter((candidate) => candidate.exactAmount);
+      const exactPriority = exact.filter((candidate) => candidate.weekPriority && candidate.dateOrderEligible);
+      const exactCrossWeekWithinWindow = exact.filter(
+        (candidate) => !candidate.weekPriority
+          && candidate.dateWindowEligible
+          && candidate.dateOrderEligible,
+      );
+      const exactPool = exactPriority.length ? exactPriority : exactCrossWeekWithinWindow;
+      if (exactPool.length === 1) {
+        const selected = exactPool[0];
+        const allocatedCents = Math.min(
+          selected.invoiceRemainingCents,
+          selected.paymentRemainingCents,
+          expenseRemainingCents,
+        );
+        const match = createConfirmedMatch({
+          owner,
+          actor,
+          invoiceId: selected.invoice.id,
+          expenseReferenceCode: expense.reference_code,
+          paymentId: selected.paymentId,
+          allocatedCents,
+          matchMethod: "rule_candidate",
+          expectedInvoiceVersion: Number(selected.invoice.version),
+        });
+        return {
+          status: "matched",
+          expenseId,
+          invoice: fromRow(activeInvoice.get({ $id: selected.invoice.id, $owner: owner })),
+          match,
+          selected: {
+            ...selected,
+            expenseReferenceCode: expense.reference_code,
+            occurredOn: expense.occurred_on,
+            category: expense.category,
+          },
+          candidates: candidates.slice(0, 5),
+        };
+      }
+      return {
+        status: "review_required",
+        expenseId,
+        candidates: candidates.slice(0, 5).map((candidate) => ({
+          invoiceId: candidate.invoice.id,
+          paymentId: candidate.paymentId,
+          proposedCents: Math.min(candidate.invoiceRemainingCents, candidate.paymentRemainingCents),
+          exactAmount: candidate.exactAmount,
+          weekPriority: candidate.weekPriority,
+          dayDistance: candidate.dayDistance,
+          dateWindowEligible: candidate.dateWindowEligible,
+          dateOrderEligible: candidate.dateOrderEligible,
+          rationale: candidate.rationale,
+        })),
+        reason: exactPool.length > 1
+          ? "multiple_exact_amounts"
+          : exact.length > 0 && exact.every((candidate) => !candidate.dateOrderEligible)
+            ? "invoice_before_payment_date"
+            : exact.length > 0 && exact.every((candidate) => !candidate.weekPriority && !candidate.dateWindowEligible)
+              ? "exact_amount_outside_date_window"
+              : "no_unique_exact_amount",
+        generatedAt: timestamp,
+      };
+    });
+  }
+
   function candidateCurrentOrFailure(id, owner, expectedVersion) {
     const current = db.prepare(`
       SELECT * FROM invoice_match_candidates WHERE id = $id AND owner = $owner
@@ -1718,6 +1933,7 @@ export function createInvoiceRepository(db, {
     createInvoice,
     finalizeReview,
     autoMatchInvoice,
+    autoMatchExpense,
     generateMatchCandidates,
     getInvoice,
     getInvoiceContent,

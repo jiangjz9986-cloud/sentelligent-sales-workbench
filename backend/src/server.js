@@ -3842,9 +3842,50 @@ export function createServer(options = {}) {
     });
   });
   const shortcutBookkeepingRepository = createShortcutBookkeepingRepository(db, {
+    invoiceRepository,
     ...(options.shortcutBookkeepingIdFactory ? { idFactory: options.shortcutBookkeepingIdFactory } : {}),
     ...(options.shortcutBookkeepingClock ? { clock: options.shortcutBookkeepingClock } : {}),
   });
+  const autoMatchExpenseAfterWrite = (expense) => {
+    if (!expense || typeof invoiceRepository.autoMatchExpense !== "function") {
+      return { item: expense, match: null };
+    }
+    let match = null;
+    try {
+      match = invoiceRepository.autoMatchExpense({
+        owner: expense.owner,
+        actor: expense.updatedBy ?? expense.createdBy ?? expense.owner,
+        expenseId: expense.id,
+        priorityWeekStart: weekStartOf(expense.occurredOn),
+      });
+    } catch {
+      return {
+        item: expense,
+        match: { status: "review_required", reason: "automatic_match_failed", candidates: [] },
+      };
+    }
+    if (match?.status !== "matched" || !match.match?.invoiceId) {
+      return { item: expense, match };
+    }
+    try {
+      reconcileWeixinInvoiceAttachments({
+        db,
+        invoiceRepository,
+        travelExpenseRepository,
+        owner: expense.owner,
+        actor: expense.updatedBy ?? expense.createdBy ?? expense.owner,
+        invoiceId: match.match.invoiceId,
+        requestIdPrefix: "expense-write-invoice-reconcile",
+      });
+    } catch {
+      // The confirmed match is durable; the existing worker reconciliation
+      // path will retry a missing WeChat invoice attachment.
+    }
+    return {
+      item: travelExpenseRepository.getExpense(expense.id, { owner: expense.owner }) ?? expense,
+      match,
+    };
+  };
   const shortcutAdvanceAllocationRepository = options.shortcutAdvanceAllocationRepository
     ?? createShortcutAdvanceAllocationRepository(db, {
       ...(options.shortcutAdvanceAllocationIdFactory ? { idFactory: options.shortcutAdvanceAllocationIdFactory } : {}),
@@ -8868,7 +8909,7 @@ export function createServer(options = {}) {
 
       if (request.method === "POST" && url.pathname === "/api/travel-expenses") {
         const body = validateTravelExpensePayload(await readJson(request));
-        const item = withImmediateTransaction(db, () => {
+        const created = withImmediateTransaction(db, () => {
           const created = travelExpenseRepository.createExpense({
             ...body,
             owner: request.authContext.account,
@@ -8892,7 +8933,8 @@ export function createServer(options = {}) {
           });
           return created;
         });
-        sendJson(response, 201, { item });
+        const matched = autoMatchExpenseAfterWrite(created);
+        sendJson(response, 201, { item: matched.item });
         return;
       }
 
@@ -8920,7 +8962,7 @@ export function createServer(options = {}) {
       ) {
         const expectedVersion = parseExpectedVersion(request);
         const body = validateTravelExpensePayload(await readJson(request));
-        const item = withImmediateTransaction(db, () => {
+        const updated = withImmediateTransaction(db, () => {
           const before = travelExpenseRepository.getExpense(parts[2], {
             owner: request.authContext.account,
           });
@@ -8954,7 +8996,8 @@ export function createServer(options = {}) {
           });
           return updated;
         });
-        sendJson(response, 200, { item });
+        const matched = autoMatchExpenseAfterWrite(updated);
+        sendJson(response, 200, { item: matched.item });
         return;
       }
 

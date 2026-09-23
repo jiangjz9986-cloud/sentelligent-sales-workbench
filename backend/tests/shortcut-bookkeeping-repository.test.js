@@ -5,6 +5,8 @@ import { describe, it } from "node:test";
 import { openDatabase } from "../src/db.js";
 import { withImmediateTransaction } from "../src/db/transaction.js";
 import { createShortcutBookkeepingRepository } from "../src/integrations/shortcutBookkeepingRepository.js";
+import { createInvoiceRepository } from "../src/travelExpense/invoiceRepository.js";
+import { minimalPdf } from "./helpers/image-fixtures.js";
 
 const REQUEST_HASH = "a".repeat(64);
 
@@ -375,6 +377,86 @@ describe("Shortcut bookkeeping repository invariants", () => {
         repository.listRecentLedgerReceipts({ owner: "owner-a" })[0].attachmentStatus,
         "matched",
       );
+    } finally {
+      db.close();
+    }
+  });
+
+  it("reverse-matches an invoice that was stored before WeChat bookkeeping confirmation", () => {
+    const db = openDatabase({ databaseUrl: ":memory:" });
+    try {
+      const invoiceRepository = createInvoiceRepository(db, {
+        idFactory: () => "invoice-before-bookkeeping",
+        clock: () => new Date("2026-08-06T08:00:00.000Z"),
+      });
+      const repository = createShortcutBookkeepingRepository(db, {
+        idFactory: (() => {
+          let sequence = 0;
+          return () => `reverse-match-${++sequence}`;
+        })(),
+        clock: () => new Date("2026-08-06T08:00:00.000Z"),
+        invoiceRepository,
+      });
+      invoiceRepository.createInvoice({
+        owner: "owner-a",
+        actor: "owner-a",
+        source: "manual",
+        fileName: "stored-first.pdf",
+        mediaType: "application/pdf",
+        content: minimalPdf("stored-first"),
+        recognition: {
+          status: "unmatched",
+          extractedText: "电子发票",
+          ocr: null,
+          model: null,
+          conflicts: [],
+          fields: {
+            issuedOn: "2026-08-05",
+            sellerName: "示例酒店",
+            amountExTaxCents: 9434,
+            taxCents: 566,
+            totalCents: 10000,
+            suggestedCategory: "lodging",
+          },
+          warnings: [],
+        },
+      });
+      const received = repository.receive({
+        owner: "owner-a",
+        actor: "owner-a",
+        ledgerName: "出差报销",
+        entryType: "expense",
+        category: "交通",
+        subcategory: "打车",
+        idempotencyKey: "reverse-match-bookkeeping",
+        requestHash: REQUEST_HASH,
+        rawText: "济宁出差住宿 100 元",
+      });
+      const claimed = repository.claim(received.item.id);
+      const completed = repository.completeLocal(received.item.id, {
+        leaseToken: claimed.leaseToken,
+        analysis: {
+          status: "ready",
+          confidence: 1,
+          expense: {
+            occurredOn: "2026-08-05",
+            amountCents: 10000,
+            reimbursementCents: 10000,
+            purpose: "济宁出差住宿",
+            merchant: "示例酒店",
+            paidAt: "2026-08-05T18:00:00+08:00",
+            fundingSource: "personal",
+            paymentMethod: "wechat",
+          },
+          warnings: [],
+          source: { provider: "test" },
+        },
+      });
+      assert.equal(completed.item.status, "accepted");
+      assert.equal(completed.invoiceMatch.status, "matched");
+      assert.equal(completed.invoiceMatch.match.matchMethod, "rule_candidate");
+      assert.equal(db.prepare("SELECT COUNT(*) AS count FROM invoice_matches WHERE state = 'confirmed'").get().count, 1);
+      assert.equal(db.prepare("SELECT invoice_status FROM travel_expenses").get().invoice_status, "covered");
     } finally {
       db.close();
     }
