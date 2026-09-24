@@ -30,10 +30,12 @@ describe("bookkeeping category dictionary", () => {
         entryType: "expense",
         name: "通讯费",
         subcategories: ["电话", "流量"],
+        aliases: ["手机费", "通信服务"],
       });
       assert.equal(created.isSystem, false);
       assert.equal(created.version, 1);
       assert.deepEqual(created.subcategories, ["电话", "流量"]);
+      assert.deepEqual(created.aliases, ["手机费", "通信服务"]);
       assert.equal(repository.list({ owner: "owner-b", includeArchived: true }).some((item) => item.name === "通讯费"), false);
 
       const updated = repository.update(created.id, {
@@ -41,8 +43,10 @@ describe("bookkeeping category dictionary", () => {
         expectedVersion: created.version,
         name: "通信费",
         subcategories: ["电话"],
+        aliases: ["通信服务"],
       });
       assert.equal(updated.name, "通信费");
+      assert.deepEqual(updated.aliases, ["通信服务"]);
       assert.equal(updated.version, 2);
 
       const archived = repository.remove(updated.id, { owner: "owner-a", expectedVersion: updated.version });

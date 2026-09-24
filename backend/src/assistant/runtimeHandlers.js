@@ -548,6 +548,7 @@ export function createAssistantToolHandlers({
   travelExpenseRepository = null,
   travelExpenseRegionRepository = null,
   travelExpenseAnalyzer = null,
+  bookkeepingCategoryRepository = null,
   invoiceRepository,
   paymentProofRecognizer,
   invoiceRecognizer,
@@ -788,6 +789,10 @@ export function createAssistantToolHandlers({
           text: combinedText,
           entryType,
           now: receivedAt,
+          customCategories: bookkeepingCategoryRepository?.list?.({
+            owner: context.owner,
+            entryType,
+          }) ?? [],
           tripRegionResolver: ({ occurredOn }) => (
             travelExpenseRegionRepository?.resolveRegion({
               owner: context.owner,

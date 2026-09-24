@@ -1220,6 +1220,45 @@ describe("invoice matching and weekly coverage", () => {
     assert.equal(invoiceRepository.getInvoice(suitableSmall.id, { owner: "owner-a" }).status, "unmatched");
   });
 
+  it("allocates one invoice across several substitute expenses without exceeding its balance", () => {
+    const expenses = [0, 1, 2].map((index) => createSubstituteExpense({
+      occurredOn: `2026-08-0${4 + index}`,
+      purpose: `分摊替票住宿${index + 1}`,
+      payments: [payment({
+        paidAt: `2026-08-0${4 + index}T18:00:00+08:00`,
+        amountCents: 10000,
+        reimbursementCents: 10000,
+      })],
+    }));
+    const invoice = createInvoice("one-invoice-three-targets", {
+      issuedOn: "2026-08-07",
+      amountExTaxCents: 28302,
+      taxCents: 1698,
+      totalCents: 30000,
+    });
+
+    const candidates = invoiceRepository.generateMatchCandidates({
+      owner: "owner-a",
+      actor: "owner-a",
+      weekStart: "2026-08-03",
+    });
+    assert.equal(candidates.length, 3);
+    assert.ok(candidates.every((candidate) => candidate.invoiceId === invoice.id));
+    assert.deepEqual(new Set(candidates.map((candidate) => candidate.expenseId)), new Set(expenses.map((item) => item.id)));
+    assert.equal(candidates.reduce((total, candidate) => total + candidate.proposedCents, 0), 30000);
+
+    const accepted = invoiceRepository.acceptMatchCandidatesForWeek({
+      owner: "owner-a",
+      actor: "owner-a",
+      weekStart: "2026-08-03",
+      candidates: candidates.map(({ id, version }) => ({ id, version })),
+    });
+    assert.equal(accepted.length, 3);
+    assert.equal(accepted.reduce((total, item) => total + item.match.allocatedCents, 0), 30000);
+    assert.equal(invoiceRepository.getInvoice(invoice.id, { owner: "owner-a" }).status, "matched");
+    assert.equal(invoiceRepository.listMatches({ owner: "owner-a", invoiceId: invoice.id, state: "confirmed" }).length, 3);
+  });
+
   it("accepts a complete weekly invoice set atomically", () => {
     const firstExpense = createSubstituteExpense({ purpose: "本周第一笔替票住宿" });
     const secondExpense = createSubstituteExpense({

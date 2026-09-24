@@ -1902,8 +1902,8 @@ function validateBookkeepingCategoryPayload(value, { partial = false } = {}) {
   allowedPayloadKeys(
     body,
     partial
-      ? new Set(["name", "subcategories", "status"])
-      : new Set(["ledgerName", "entryType", "name", "subcategories"]),
+      ? new Set(["name", "subcategories", "aliases", "status"])
+      : new Set(["ledgerName", "entryType", "name", "subcategories", "aliases"]),
   );
   if (!partial && body.ledgerName !== undefined && body.ledgerName !== "出差报销") {
     validationFailure("ledgerName", "notAllowed");
@@ -1921,6 +1921,12 @@ function validateBookkeepingCategoryPayload(value, { partial = false } = {}) {
     body.subcategories.forEach((valueItem, index) => {
       payloadText(valueItem, `subcategories[${index}]`, { max: 100 });
     });
+  }
+  if (Object.hasOwn(body, "aliases")) {
+    if (!Array.isArray(body.aliases) || body.aliases.length > 20) {
+      validationFailure("aliases", "array_of_at_most_20_strings");
+    }
+    body.aliases.forEach((valueItem, index) => payloadText(valueItem, `aliases[${index}]`, { max: 100 }));
   }
   if (Object.hasOwn(body, "status") && !new Set(["active", "archived"]).has(body.status)) {
     validationFailure("status", "enum");
@@ -3925,6 +3931,41 @@ export function createServer(options = {}) {
       match,
     };
   };
+  const autoMatchInvoiceAfterWrite = (invoice) => {
+    if (!invoice || typeof invoiceRepository.autoMatchInvoice !== "function") {
+      return { item: invoice, match: null };
+    }
+    let match;
+    try {
+      match = invoiceRepository.autoMatchInvoice({
+        owner: invoice.owner,
+        actor: invoice.owner,
+        invoiceId: invoice.id,
+        priorityWeekStart: weekStartOf(invoice.issuedOn),
+      });
+    } catch {
+      match = { status: "review_required", reason: "automatic_match_failed", candidates: [] };
+    }
+    if (match?.status === "matched" && match.match?.invoiceId) {
+      try {
+        reconcileWeixinInvoiceAttachments({
+          db,
+          invoiceRepository,
+          travelExpenseRepository,
+          owner: invoice.owner,
+          actor: invoice.owner,
+          invoiceId: match.match.invoiceId,
+          requestIdPrefix: "invoice-write-expense-reconcile",
+        });
+      } catch {
+        // The match is durable; attachment reconciliation can be retried later.
+      }
+    }
+    return {
+      item: invoiceRepository.getInvoice(invoice.id, { owner: invoice.owner }) ?? match?.invoice ?? invoice,
+      match,
+    };
+  };
   const shortcutAdvanceAllocationRepository = options.shortcutAdvanceAllocationRepository
     ?? createShortcutAdvanceAllocationRepository(db, {
       ...(options.shortcutAdvanceAllocationIdFactory ? { idFactory: options.shortcutAdvanceAllocationIdFactory } : {}),
@@ -4657,6 +4698,7 @@ export function createServer(options = {}) {
       travelExpenseRepository,
       travelExpenseRegionRepository,
       travelExpenseAnalyzer: travelExpenseAnalyzer,
+      bookkeepingCategoryRepository,
       invoiceRepository,
       paymentProofRecognizer,
       invoiceRecognizer,
@@ -7853,6 +7895,7 @@ export function createServer(options = {}) {
               entryType: body.entryType,
               name: body.name,
               subcategories: body.subcategories,
+              aliases: body.aliases,
             });
             insertAudit(db, {
               action: "bookkeeping_category.create",
@@ -7891,6 +7934,7 @@ export function createServer(options = {}) {
               expectedVersion,
               name: patchBody.name,
               subcategories: patchBody.subcategories,
+              aliases: patchBody.aliases,
               status: patchBody.status,
             });
             insertAudit(db, {
@@ -8471,7 +8515,7 @@ export function createServer(options = {}) {
         }
 
         try {
-          const responseBody = await withDocumentBlobWritePreflight(db, {
+          const createdBody = await withDocumentBlobWritePreflight(db, {
             owner: request.authContext.account,
             content: body.content,
           }, (encodedDocumentBlob) => withImmediateTransaction(db, () => {
@@ -8509,14 +8553,15 @@ export function createServer(options = {}) {
               entityVersion: created.version,
               metadata: { source: created.source, mediaType: created.mediaType },
             });
-            const result = { item: created };
-            completeIdempotency(db, {
-              ...idempotencyScope,
-              claimToken: claim.claimToken,
-              status: 201,
-              body: result,
-            });
-            return result;
+            return { item: created };
+          }));
+          const matched = autoMatchInvoiceAfterWrite(createdBody.item);
+          const responseBody = { item: matched.item, invoiceMatch: matched.match };
+          withImmediateTransaction(db, () => completeIdempotency(db, {
+            ...idempotencyScope,
+            claimToken: claim.claimToken,
+            status: 201,
+            body: responseBody,
           }));
           sendJson(response, 201, responseBody);
         } catch (error) {
@@ -8610,7 +8655,7 @@ export function createServer(options = {}) {
       ) {
         const expectedVersion = parseExpectedVersion(request);
         const fields = validateInvoiceReviewPayload(await readJson(request));
-        const item = withImmediateTransaction(db, () => {
+        const reviewedItem = withImmediateTransaction(db, () => {
           const before = invoiceRepository.getInvoice(parts[2], { owner: request.authContext.account });
           if (!before) notFound();
           let updated;
@@ -8637,7 +8682,8 @@ export function createServer(options = {}) {
           });
           return updated;
         });
-        sendJson(response, 200, { item });
+        const matched = autoMatchInvoiceAfterWrite(reviewedItem);
+        sendJson(response, 200, { item: matched.item, invoiceMatch: matched.match });
         return;
       }
 

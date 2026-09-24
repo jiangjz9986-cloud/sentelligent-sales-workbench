@@ -203,6 +203,10 @@ function assertBookkeepingCategory(value, path = "bookkeepingCategory") {
   const item = assertApiEntity("bookkeepingCategory", value, path);
   if (!Array.isArray(item.subcategories)) throw new TypeError(`${path}.subcategories: expected array`);
   item.subcategories.forEach((valueItem, index) => requiredApiString(valueItem, `${path}.subcategories[${index}]`));
+  if (item.aliases !== undefined) {
+    if (!Array.isArray(item.aliases)) throw new TypeError(`${path}.aliases: expected array`);
+    item.aliases.forEach((valueItem, index) => requiredApiString(valueItem, `${path}.aliases[${index}]`));
+  }
   return item;
 }
 
@@ -2009,6 +2013,7 @@ export function createSalesWorkbenchApi({ baseUrl, fetchImpl = fetch, onUnauthor
           entryType: payload.entryType,
           name: payload.name,
           subcategories: Array.isArray(payload.subcategories) ? payload.subcategories : [],
+          aliases: Array.isArray(payload.aliases) ? payload.aliases : [],
         }),
       });
       return assertBookkeepingCategory(response?.item, "bookkeepingCategory.item");
@@ -2018,7 +2023,7 @@ export function createSalesWorkbenchApi({ baseUrl, fetchImpl = fetch, onUnauthor
       const response = await requestApi(`/api/bookkeeping/categories/${encodeURIComponent(categoryId)}`, {
         method: "PATCH",
         headers: versionHeaders(version),
-        body: JSON.stringify(pickOwnFields(payload, ["name", "subcategories", "status"])),
+        body: JSON.stringify(pickOwnFields(payload, ["name", "subcategories", "aliases", "status"])),
       });
       return assertBookkeepingCategory(response?.item, "bookkeepingCategory.item");
     },

@@ -78,11 +78,12 @@ describe("bookkeeping category HTTP API", () => {
     const created = await request("/api/bookkeeping/categories", {
       method: "POST",
       headers: auth,
-      body: JSON.stringify({ entryType: "expense", name: "通讯费", subcategories: ["电话"] }),
+      body: JSON.stringify({ entryType: "expense", name: "通讯费", subcategories: ["电话"], aliases: ["手机费"] }),
     });
     assert.equal(created.response.status, 201);
     assert.equal(created.body.item.name, "通讯费");
     assert.equal(created.body.item.version, 1);
+    assert.deepEqual(created.body.item.aliases, ["手机费"]);
 
     const fetched = await request(`/api/bookkeeping/categories/${created.body.item.id}`, { headers: auth });
     assert.equal(fetched.response.status, 200);
@@ -92,11 +93,12 @@ describe("bookkeeping category HTTP API", () => {
     const patched = await request(`/api/bookkeeping/categories/${created.body.item.id}`, {
       method: "PATCH",
       headers: { ...auth, "If-Match": `"${created.body.item.version}"` },
-      body: JSON.stringify({ name: "通信费", subcategories: ["电话", "流量"] }),
+      body: JSON.stringify({ name: "通信费", subcategories: ["电话", "流量"], aliases: ["通信服务"] }),
     });
     assert.equal(patched.response.status, 200);
     assert.equal(patched.body.item.name, "通信费");
     assert.equal(patched.body.item.version, 2);
+    assert.deepEqual(patched.body.item.aliases, ["通信服务"]);
 
     const archived = await request(`/api/bookkeeping/categories/${patched.body.item.id}`, {
       method: "DELETE",

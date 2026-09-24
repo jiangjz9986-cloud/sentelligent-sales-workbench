@@ -1,5 +1,5 @@
-export const SALES_WORKBENCH_API_CONTRACT_VERSION = "2026-09-06";
-export const SALES_WORKBENCH_API_CONTRACT_RELEASE = "v0.12.0";
+export const SALES_WORKBENCH_API_CONTRACT_VERSION = "2026-09-25";
+export const SALES_WORKBENCH_API_CONTRACT_RELEASE = "v0.13.15";
 
 export const SALES_WORKBENCH_API_SCHEMAS = {
   customer: {
@@ -449,6 +449,7 @@ export const SALES_WORKBENCH_API_SCHEMAS = {
     entryType: "string",
     name: "string",
     subcategories: "array",
+    aliases: "optional:stringArray",
     isSystem: "boolean",
     status: "string",
     version: "positiveInteger",

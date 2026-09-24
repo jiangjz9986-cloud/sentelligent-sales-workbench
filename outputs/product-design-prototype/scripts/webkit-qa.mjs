@@ -84,7 +84,7 @@ async function shellMetrics(page) {
   return page.evaluate(() => {
     const sidebar = document.querySelector(".sidebar")?.getBoundingClientRect();
     const interactive = [...document.querySelectorAll(
-      "button, [role='button'], a[href], input:not([type='hidden']), select, textarea",
+      "button, [role='button'], a[href], input:not([type='hidden']):not([type='file']), select, textarea, label.invoice-upload-button",
     )].filter((element) => {
       const rect = element.closest(".search-box, .itinerary-filter")
         ?.getBoundingClientRect() ?? element.getBoundingClientRect();
@@ -410,6 +410,19 @@ async function main() {
     const desktopExpenseScreenshotPath = resolve(evidenceDirectory, "webkit-expense-1440x900.png");
     await page.screenshot({ path: desktopExpenseScreenshotPath, fullPage: false });
 
+    await page.getByTestId("expense-tab-invoices").click();
+    await page.locator(".invoice-manager").waitFor();
+    await page.locator(".invoice-manager-intro").getByText("发票管理", { exact: true }).waitFor();
+    await page.getByText("发票仓库", { exact: true }).waitFor();
+    await page.getByText("本周替票组合", { exact: true }).waitFor();
+    const desktopInvoiceMetrics = await shellMetrics(page);
+    assert.equal(desktopInvoiceMetrics.overflowX, 0);
+    assert.deepEqual(desktopInvoiceMetrics.undersized, []);
+    const desktopInvoiceScreenshotPath = resolve(evidenceDirectory, "webkit-invoices-1440x900.png");
+    await page.screenshot({ path: desktopInvoiceScreenshotPath, fullPage: false });
+    await page.getByTestId("expense-tab-ledger").click();
+    await page.getByTestId("ledger-reimbursement-actions").waitFor();
+
     assert.equal(await page.getByTestId("expense-tab-export").count(), 0);
     const reimbursementActions = page.getByTestId("ledger-reimbursement-actions");
     await reimbursementActions.waitFor();
@@ -432,6 +445,15 @@ async function main() {
     assert.deepEqual(mobileExpenseMetrics.undersized, []);
     const mobileExpenseScreenshotPath = resolve(evidenceDirectory, "webkit-expense-390x844.png");
     await page.screenshot({ path: mobileExpenseScreenshotPath, fullPage: false });
+    await page.getByTestId("expense-tab-invoices").click();
+    await page.locator(".invoice-manager").waitFor();
+    const mobileInvoiceMetrics = await shellMetrics(page);
+    assert.equal(mobileInvoiceMetrics.overflowX, 0);
+    assert.deepEqual(mobileInvoiceMetrics.undersized, []);
+    const mobileInvoiceScreenshotPath = resolve(evidenceDirectory, "webkit-invoices-390x844.png");
+    await page.screenshot({ path: mobileInvoiceScreenshotPath, fullPage: false });
+    await page.getByTestId("expense-tab-ledger").click();
+    await page.getByTestId("ledger-reimbursement-actions").waitFor();
     await page.getByRole("button", { name: "编辑我的负责区域" }).click();
     await page.getByTestId("trip-region-settings-layer").waitFor();
     const mobileRegionScreenshotPath = resolve(evidenceDirectory, "webkit-expense-region-390x844.png");
@@ -705,8 +727,10 @@ async function main() {
       screenshots: {
         desktopItinerary: desktopScreenshotPath,
         desktopExpense: desktopExpenseScreenshotPath,
+        desktopInvoices: desktopInvoiceScreenshotPath,
         desktopExpenseRegion: desktopRegionScreenshotPath,
         mobileExpense: mobileExpenseScreenshotPath,
+        mobileInvoices: mobileInvoiceScreenshotPath,
         mobileExpenseRegion: mobileRegionScreenshotPath,
         mobileQuickConfirmation: mobileQuickPreviewScreenshotPath,
         mobileTemperatureAiCard: mobileTemperatureScreenshotPath,

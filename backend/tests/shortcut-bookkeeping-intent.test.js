@@ -28,3 +28,26 @@ test("parses loan assignment without resolving identity", () => {
   assert.deepEqual(parseShortcutBookkeepingIntent("用于这笔").assignment, { scope: "expense", reference: null, owner: "self" });
   assert.equal(parseShortcutBookkeepingIntent("这笔借款用于 2026-02-30 至 2026-03-08").status, "review_required");
 });
+
+test("parses explicit owner-scoped bookkeeping category commands", () => {
+  assert.deepEqual(parseShortcutBookkeepingIntent("查看支出费用分类").command, { action: "list", entryType: "expense" });
+  assert.deepEqual(parseShortcutBookkeepingIntent("新增费用分类：办公费，关键词：办公用品、文具采购").command, {
+    action: "create",
+    entryType: "expense",
+    name: "办公费",
+    aliases: ["办公用品", "文具采购"],
+  });
+  assert.deepEqual(parseShortcutBookkeepingIntent("修改分类办公费改名为通信费").command, {
+    action: "rename",
+    name: "办公费",
+    nextName: "通信费",
+  });
+  assert.deepEqual(parseShortcutBookkeepingIntent("修改分类关键词：办公费，关键词：办公用品").command, {
+    action: "aliases",
+    name: "办公费",
+    aliases: ["办公用品"],
+  });
+  assert.equal(parseShortcutBookkeepingIntent("删除费用分类：办公费").command.action, "archive");
+  assert.equal(parseShortcutBookkeepingIntent("新增费用分类").intent, "category_management");
+  assert.equal(parseShortcutBookkeepingIntent("新增费用分类").status, "review_required");
+});

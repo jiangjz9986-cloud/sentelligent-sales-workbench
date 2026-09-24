@@ -17,6 +17,7 @@ import { renderActionReminderMessage } from "../actionReminders/reminderMessage.
 import { renderDailyDigestMessage, renderFridayCloseoutMessage } from "../dailyDigest/digestMessage.js";
 import { renderOpsAlertOutboxMessage } from "../ops/opsAlertMessage.js";
 import { buildAutomaticMealNote, buildBookkeepingAnalysis } from "./bookkeepingCapture.js";
+import { buildAutomaticTravelExpenseNote } from "../travelExpense/expenseNote.js";
 import { resolveItineraryTripRegion } from "./bookkeepingTripRegion.js";
 
 export const SHORTCUT_BOOKKEEPING_ACTION = "shortcut-bookkeeping.confirm";
@@ -378,6 +379,7 @@ function isFinalizable(entry, { tripRegionResolver = null } = {}) {
 
 function reviewAnalysis(entry, nextFields, changedFields = {}, {
   tripRegionResolver = null,
+  customCategories = [],
   explicitDateTimeCorrection = false,
 } = {}) {
   const { analysis, expense } = entryAnalysis(entry);
@@ -437,21 +439,29 @@ function reviewAnalysis(entry, nextFields, changedFields = {}, {
       },
       expenseAnalysis: {
         expense: {
-          category: categoryAutomation.sourceCategory,
+          category: categoryAutomation.customCategoryName ?? categoryAutomation.sourceCategory,
           subcategory: categoryAutomation.sourceSubcategory,
-          purpose: nextExpense.purpose ?? null,
+          purpose: analysis.noteAutomation?.purpose ?? nextExpense.purpose ?? null,
           merchant: nextExpense.merchant ?? null,
           paidAt: nextExpense.paidAt ?? null,
           paymentMethod: nextExpense.paymentMethod ?? null,
         },
         warnings: [],
       },
-      text: "",
+      text: categoryAutomation.customCategoryName
+        ? analysis.noteAutomation?.purpose ?? categoryAutomation.customCategoryName
+        : "",
       entryType: entry.entryType,
       now: entry.capturedAt ?? entry.createdAt ?? new Date(),
+      customCategories,
       tripRegionResolver: typeof tripRegionResolver === "function"
         ? ({ occurredOn: resolvedDate }) => tripRegionResolver(resolvedDate)
         : null,
+      tripRegionOverride: EXPLICIT_TRIP_REGION_SOURCES.has(analysis.noteAutomation?.tripRegionSource)
+        ? analysis.noteAutomation.tripRegion
+        : null,
+      tripRegionSourceOverride: analysis.noteAutomation?.tripRegionSource ?? null,
+      contextualMealReclassification: true,
     });
     category = reclassified.category;
     subcategory = reclassified.subcategory;
@@ -464,7 +474,7 @@ function reviewAnalysis(entry, nextFields, changedFields = {}, {
           : null
     : null;
   const manualNote = Object.hasOwn(changedFields, "note");
-  const priorNoteAutomation = analysis.noteAutomation?.kind === "meal"
+  const priorNoteAutomation = ["meal", "lodging", "purpose"].includes(analysis.noteAutomation?.kind)
     ? { ...analysis.noteAutomation }
     : null;
   const preserveManualNote = !priorNoteAutomation
@@ -496,13 +506,29 @@ function reviewAnalysis(entry, nextFields, changedFields = {}, {
         noteAutomation.tripRegion = null;
       }
     }
-    note = mealKey
+    note = noteAutomation.kind === "meal" && mealKey
       ? buildAutomaticMealNote({
           occurredOn,
           tripRegion: noteAutomation.tripRegion,
           mealKey,
         })
-      : null;
+      : noteAutomation.kind === "lodging"
+        ? buildAutomaticTravelExpenseNote({
+            occurredOn,
+            category: "lodging",
+            tripRegion: noteAutomation.tripRegion,
+            lodgingNights: noteAutomation.lodgingNights,
+          })
+        : noteAutomation.kind === "purpose"
+          ? buildAutomaticTravelExpenseNote({
+              occurredOn,
+              category: "other",
+              tripRegion: noteAutomation.tripRegion,
+              purpose: Object.hasOwn(changedFields, "purpose")
+                ? nextExpense.purpose
+                : noteAutomation.purpose ?? nextExpense.purpose,
+            })
+          : null;
     if (!note) noteAutomation = null;
   }
   const warnings = (Array.isArray(analysis.warnings)
@@ -2272,6 +2298,11 @@ export function createShortcutBookkeepingAssistantRuntime({
     }
     let analysis = reviewAnalysis(entry, nextDraft.fields, correction.changes, {
       tripRegionResolver: (occurredOn) => regionForDate(account, occurredOn)?.city ?? null,
+      customCategories: categoryRepository?.list?.({
+        owner: account,
+        entryType: entry.entryType,
+        includeArchived: true,
+      }) ?? [],
       explicitDateTimeCorrection: /(?:\d{4}-\d{2}-\d{2}T)?(?:[01]\d|2[0-3]):[0-5]\d/u.test(text),
     });
     analysis = synchronizeMealRegion(entry, analysis).analysis;
@@ -2841,6 +2872,101 @@ export function createShortcutBookkeepingAssistantRuntime({
     };
   }
 
+  function handleCategoryManagement({ account, intent, requestId = null }) {
+    const command = intent?.command;
+    if (!categoryRepository
+      || typeof categoryRepository.list !== "function"
+      || typeof categoryRepository.create !== "function"
+      || typeof categoryRepository.update !== "function"
+      || typeof categoryRepository.remove !== "function") {
+      return { status: 503, body: { status: "error", text: "费用分类管理暂不可用，请稍后重试。" }, draftText: "费用分类管理不可用。" };
+    }
+    if (intent.status !== "accepted" || !command) {
+      return {
+        status: 200,
+        body: {
+          status: "clarify",
+          text: "请发送“查看费用分类”“新增费用分类：办公费，关键词：办公用品、文具采购”“修改分类办公费改名为通信费”“修改分类关键词：办公费，关键词：办公用品”或“删除费用分类：办公费”。",
+        },
+        draftText: "等待明确的费用分类指令。",
+      };
+    }
+    const categories = categoryRepository.list({ owner: account, entryType: command.entryType ?? null });
+    if (command.action === "list") {
+      const sections = [
+        ["expense", "支出分类"],
+        ["income", "收入分类"],
+      ].map(([type, label]) => {
+        const rows = categories.filter((item) => item.entryType === type);
+        return rows.length ? `${label}：${rows.map((item) => item.name).join("、")}` : null;
+      }).filter(Boolean);
+      return { status: 200, body: { status: "ok", text: sections.join("；") || "当前还没有费用分类。" }, draftText: "已查询费用分类。" };
+    }
+
+    const matches = categories.filter((item) => item.name === command.name);
+    if (["rename", "aliases", "archive"].includes(command.action) && matches.length !== 1) {
+      const text = matches.length > 1
+        ? `“${command.name}”在收入和支出分类中各有一项，请先在网页中区分后修改。`
+        : `未找到启用中的分类“${command.name}”，请先发送“查看费用分类”。`;
+      return { status: 200, body: { status: "clarify", text }, draftText: "费用分类未变更。" };
+    }
+    try {
+      const item = withImmediateTransaction(db, () => {
+        const before = matches[0] ?? null;
+        const changed = command.action === "create"
+          ? categoryRepository.create({
+              owner: account,
+              entryType: command.entryType ?? "expense",
+              name: command.name,
+              aliases: command.aliases ?? [],
+            })
+          : command.action === "rename"
+            ? categoryRepository.update(before.id, {
+                owner: account,
+                expectedVersion: before.version,
+                name: command.nextName,
+              })
+            : command.action === "aliases"
+              ? categoryRepository.update(before.id, {
+                  owner: account,
+                  expectedVersion: before.version,
+                  aliases: command.aliases,
+                })
+              : categoryRepository.remove(before.id, { owner: account, expectedVersion: before.version });
+        insertAudit(db, {
+          action: command.action === "create"
+            ? "bookkeeping_category.create"
+            : command.action === "archive" ? "bookkeeping_category.archive" : "bookkeeping_category.update",
+          entityType: "bookkeeping_category",
+          entityId: changed.id,
+          actor: account,
+          requestId,
+          before,
+          after: changed,
+          entityVersion: changed.version,
+          metadata: { owner: account, ledgerName: changed.ledgerName, entryType: changed.entryType, source: "weixin" },
+        });
+        return changed;
+      });
+      const text = command.action === "create"
+        ? `已新增${item.entryType === "income" ? "收入" : "支出"}分类“${item.name}”${item.aliases.length ? `，识别词：${item.aliases.join("、")}` : ""}。`
+        : command.action === "rename"
+          ? `分类已改名为“${item.name}”。`
+          : command.action === "aliases"
+            ? `“${item.name}”的识别词已更新${item.aliases.length ? `：${item.aliases.join("、")}` : "（已清空）"}。`
+            : `分类“${item.name}”已停用，历史记账保持不变。`;
+      return { status: 200, body: { status: "ok", text, item }, draftText: text };
+    } catch (error) {
+      if (error?.code === "BOOKKEEPING_CATEGORY_EXISTS") {
+        return { status: 409, body: { status: "clarify", text: `分类“${command.name}”已存在，没有重复新增。` }, draftText: "分类名称已存在。" };
+      }
+      if (error?.code === "SYSTEM_CATEGORY_READ_ONLY") {
+        return { status: 409, body: { status: "clarify", text: "系统默认分类不能改名或停用；可以调整它的识别词，或新增自定义分类。" }, draftText: "系统分类保持不变。" };
+      }
+      throw error;
+    }
+  }
+
   async function handlePending({ action, context, text, textClassification, confirmationCode, pendingActionId, serverData }) {
     const account = context.owner;
     const quote = serverData?.quote ?? null;
@@ -2849,8 +2975,9 @@ export function createShortcutBookkeepingAssistantRuntime({
     // Standalone Shortcut intents (loan allocation scope, weekly trip-region
     // assignment) are owned by this runtime regardless of which pending
     // action is active in the main conversation.
-    const standaloneShortcutIntent = intent.status === "accepted"
-      && (intent.intent === "loan_assignment" || intent.intent === "region_assignment");
+    const standaloneShortcutIntent = intent.intent === "category_management"
+      || (intent.status === "accepted"
+        && (intent.intent === "loan_assignment" || intent.intent === "region_assignment"));
     // Yield-path guard 1: when the main conversation owns a non-bookkeeping
     // pending action (for example a customer profile write awaiting its
     // six-digit code) and the message does not quote a bookkeeping draft,
@@ -2859,6 +2986,16 @@ export function createShortcutBookkeepingAssistantRuntime({
     // swallow the code for the unrelated action.
     if (action && action.actionType !== SHORTCUT_BOOKKEEPING_ACTION && !shortcutQuote && !standaloneShortcutIntent) {
       return null;
+    }
+    if (intent.intent === "category_management") {
+      if (!financialEventScopeAllowed(context, serverData)) {
+        return {
+          status: 403,
+          body: { status: "error", text: "费用分类只能在已绑定本人的微信私聊中管理，未执行任何操作。" },
+          draftText: "费用分类访问被拒绝。",
+        };
+      }
+      return handleCategoryManagement({ account, intent, requestId: context.requestId });
     }
     // Yield-path guard 2: without a quote or an explicit pending action id,
     // only bookkeeping language may bind implicitly to an active draft.
