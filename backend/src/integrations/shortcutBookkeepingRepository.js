@@ -189,7 +189,7 @@ function normalizeSource(value) {
 
 function normalizeNoteAutomation(value) {
   if (value === undefined || value === null) return null;
-  if (!isPlainObject(value) || value.kind !== "meal") {
+  if (!isPlainObject(value) || !["meal", "lodging", "purpose"].includes(value.kind)) {
     throw new TypeError("analysis.noteAutomation is invalid");
   }
   const tripRegionSource = value.tripRegionSource === null || value.tripRegionSource === undefined
@@ -206,11 +206,20 @@ function normalizeNoteAutomation(value) {
   if (paidTime !== null && (typeof paidTime !== "string" || !/^(?:[01]\d|2[0-3]):[0-5]\d$/u.test(paidTime))) {
     throw new TypeError("analysis.noteAutomation.paidTime is invalid");
   }
+  const lodgingNights = value.lodgingNights === undefined || value.lodgingNights === null
+    ? null
+    : value.lodgingNights;
+  if (lodgingNights !== null && (!Number.isSafeInteger(lodgingNights) || lodgingNights < 1 || lodgingNights > 60)) {
+    throw new TypeError("analysis.noteAutomation.lodgingNights is invalid");
+  }
+  const purpose = optionalText(value.purpose, "analysis.noteAutomation.purpose", 200);
   return {
-    kind: "meal",
+    kind: value.kind,
     tripRegion: optionalText(value.tripRegion, "analysis.noteAutomation.tripRegion", 100),
     tripRegionSource,
     paidTime,
+    ...(lodgingNights === null ? {} : { lodgingNights }),
+    ...(purpose === null ? {} : { purpose }),
   };
 }
 
@@ -231,6 +240,9 @@ function normalizeCategoryAutomation(value) {
       "analysis.categoryAutomation.sourceSubcategory",
       100,
     ),
+    ...(optionalText(value.customCategoryName, "analysis.categoryAutomation.customCategoryName", 100) === null
+      ? {}
+      : { customCategoryName: value.customCategoryName.trim() }),
   };
 }
 

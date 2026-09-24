@@ -145,6 +145,7 @@ export function InvoiceManager({
   const [detailStatus, setDetailStatus] = useState("idle");
   const [pendingAction, setPendingAction] = useState("");
   const [actionError, setActionError] = useState("");
+  const [actionNotice, setActionNotice] = useState("");
   const [reload, setReload] = useState({ invoices: 0, matches: 0, noInvoice: 0, candidates: 0 });
 
   function setResourceState(name, next) {
@@ -292,6 +293,7 @@ export function InvoiceManager({
     && coverage.invoiceWarehouseAvailableCents > 0;
   const hasSuggestedCandidate = candidates.some((candidate) => candidate.status === "suggested");
   const suggestedCandidates = candidates.filter((candidate) => candidate.status === "suggested");
+  const suggestedInvoiceCount = new Set(suggestedCandidates.map((candidate) => candidate.invoiceId)).size;
   const substituteTargetCents = expenses.reduce((total, expense) => {
     if (expense.invoiceType !== "substitute" || !Array.isArray(expense.payments)) return total;
     const reimbursementCents = expense.payments.reduce((sum, payment) => (
@@ -390,6 +392,10 @@ export function InvoiceManager({
     if (!uploaded) return;
     setInvoices((current) => [uploaded, ...current.filter((item) => item.id !== uploaded.id)]);
     setSelectedInvoiceId(uploaded.id);
+    setActionNotice(uploaded.status === "matched"
+      ? "发票已入库，并已自动关联唯一匹配的费用。"
+      : "发票已入库；金额或日期无法唯一匹配时会保留待复核，不会猜测绑定。");
+    setReload((current) => ({ ...current, matches: current.matches + 1, noInvoice: current.noInvoice + 1, candidates: current.candidates + 1 }));
   }
 
   async function saveReview(event) {
@@ -408,6 +414,10 @@ export function InvoiceManager({
     setSelectedInvoice(reviewed);
     setReviewDraft(emptyReviewDraft(reviewed));
     setInvoices((current) => updateById(current, reviewed));
+    setActionNotice(reviewed.status === "matched"
+      ? "发票信息已保存，并已自动关联唯一匹配的费用。"
+      : "发票信息已保存；未形成唯一匹配，费用保持待复核。");
+    setReload((current) => ({ ...current, matches: current.matches + 1, noInvoice: current.noInvoice + 1, candidates: current.candidates + 1 }));
   }
 
   async function deleteInvoice() {
@@ -576,6 +586,7 @@ export function InvoiceManager({
         </div>
       </header>
 
+      {actionNotice ? <div className="invoice-action-notice" role="status"><FileCheck2 size={17} /><span>{actionNotice}</span><button type="button" aria-label="关闭提示" onClick={() => setActionNotice("")}><X size={16} /></button></div> : null}
       {actionError ? <div className="invoice-action-error" role="alert"><CircleAlert size={18} /><span>{actionError}</span><button type="button" aria-label="关闭错误提示" onClick={() => setActionError("")}><X size={17} /></button></div> : null}
 
       <div className="invoice-manager-grid">
@@ -700,10 +711,10 @@ export function InvoiceManager({
           <p className="invoice-candidate-policy-note">仅为手动标记“替票”的费用生成建议；系统按付款与开票日期、费用类别和可用余额组合发票。逐笔核实后再确认，不会自动把候选记为已匹配。</p>
           {candidateGenerationDisabled ? <p id="invoice-candidate-generation-status" className="invoice-inline-state" role="status">{candidateGenerationTitle}</p> : null}
           {suggestedCandidates.length > 0 ? <div className="invoice-candidate-batch-action">
-            <span>已为 {candidateGroups.length} 笔替票费用组合 {suggestedCandidates.length} 张发票</span>
+            <span>已为 {candidateGroups.length} 笔替票费用配置 {suggestedInvoiceCount} 张发票、{suggestedCandidates.length} 笔分摊</span>
             <button type="button" onClick={acceptWeekCandidates} disabled={pendingAction !== ""} data-testid="invoice-candidates-accept-week">
               {pendingAction === "accept-week-candidates" ? <LoaderCircle className="state-spinner" size={15} /> : <Check size={15} />}
-              一次确认本周 {suggestedCandidates.length} 张候选（{formatCny(suggestedCoverageCents)}）
+              一次确认本周 {suggestedCandidates.length} 笔分摊（{formatCny(suggestedCoverageCents)}）
             </button>
           </div> : null}
           <ResourceState state={resource.candidates} loadingText="正在读取候选发票" empty="暂无待确认的发票组合" isEmpty={suggestedCandidates.length === 0} retryLabel="重新加载候选发票" onRetry={() => setReload((current) => ({ ...current, candidates: current.candidates + 1 }))} />

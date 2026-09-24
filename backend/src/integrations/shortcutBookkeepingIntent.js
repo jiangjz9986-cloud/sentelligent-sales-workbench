@@ -14,6 +14,7 @@ const CORRECTION_PREFIX = /^(?:修改|更改|调整|设置|把|将|备注|说明
 const CORRECTION_FIELD_PREFIX = /^(?:(?:修改|更改|调整|设置|把|将)\s*)?(?:备注|说明|金额|日期|时间|商户|商家|用途|分类|子分类|费用类别)/u;
 const REGION_NON_CITY_LANGUAGE = /(?:帮我|帮忙|请|记账|入账|报销|确认|修改|更改|调整|设置|金额|备注|费用|早餐|午餐|晚餐|支出|收入|借款|拜访|走访|客户|开会|工作|谢谢)/u;
 const REGION_DISCOURSE_SUFFIX = /(?:一下|啊|呀|呢|吧|哦|哈)$/u;
+const CATEGORY_COMMAND_PREFIX = /^(?:(?:帮我|请)\s*)?(?:(?:新增|添加|创建|删除|停用|归档|查看|查询|列出|重命名).{0,12}(?:(?:收入|支出|费用|记账)?分类|类别)|(?:更新|修改|设置)(?:费用|记账)?分类(?:名称|识别词|关键词|别名))/u;
 const WEEKDAY_INDEX = new Map([
   ["一", 0], ["二", 1], ["三", 2], ["四", 3], ["五", 4], ["六", 5], ["日", 6], ["天", 6],
 ]);
@@ -93,6 +94,37 @@ function normalizeRegionCity(value) {
     || REGION_DISCOURSE_SUFFIX.test(city)
     || !/^\p{Script=Han}[\p{Script=Han}\d·新区县市区自治州盟旗]{0,99}$/u.test(city)) return null;
   return city;
+}
+
+function parseCategoryManagementCommand(text) {
+  const list = /^(?:查看|查询|列出)(?:(?<entryType>收入|支出)的?)?(?:费用|记账)?分类(?:列表)?[。！!]*$/u.exec(text);
+  if (list) return { action: "list", entryType: list.groups?.entryType === "收入" ? "income" : list.groups?.entryType === "支出" ? "expense" : null };
+
+  const add = /^(?:(?:帮我|请)\s*)?(?:新增|添加|创建)(?:一个)?(?:(?<entryType>收入|支出)(?:费用)?|费用|记账)?(?:分类|类别)\s*[：:]?\s*(?<name>[^，,；;\s]+)(?:[，,；;]\s*(?:别名|关键词|识别词)\s*[：:]?\s*(?<aliases>[^。！？!?]+))?[。！!]*$/u.exec(text);
+  if (add) {
+    const aliases = (add.groups.aliases ?? "").split(/[、，,；;\s]+/u).map((item) => item.trim()).filter(Boolean);
+    if (aliases.length > 20) return null;
+    return {
+      action: "create",
+      entryType: add.groups.entryType === "收入" ? "income" : "expense",
+      name: add.groups.name,
+      aliases,
+    };
+  }
+
+  const rename = /^(?:(?:把)?\s*)?(?:(?:修改|更改|调整|设置)\s*)?(?:费用|记账)?分类\s*(?<name>[^，,；;\s]+)\s*(?:重命名为|改名为|更名为|改为|改成)\s*(?<nextName>[^，,；;\s]+)[。！!]*$/u.exec(text);
+  if (rename) return { action: "rename", name: rename.groups.name, nextName: rename.groups.nextName };
+
+  const aliases = /^(?:更新|修改|设置)(?:费用|记账)?分类(?:识别词|关键词|别名)\s*[：:]?\s*(?<name>[^，,；;\s]+)\s*[，,；;]\s*(?:识别词|关键词|别名)\s*[：:]?\s*(?<values>[^。！？!?]+)[。！!]*$/u.exec(text);
+  if (aliases) {
+    const values = aliases.groups.values.split(/[、，,；;\s]+/u).map((item) => item.trim()).filter(Boolean);
+    if (values.length > 20) return null;
+    return { action: "aliases", name: aliases.groups.name, aliases: values };
+  }
+
+  const archive = /^(?:删除|停用|归档)(?:费用|记账)?分类\s*[：:]?\s*(?<name>[^，,；;\s]+)[。！!]*$/u.exec(text);
+  if (archive) return { action: "archive", name: archive.groups.name };
+  return null;
 }
 
 function monthDayInWeek(monthText, dayText, weekStart) {
@@ -220,6 +252,11 @@ function parseScope(text, options = {}) {
 export function parseShortcutBookkeepingIntent(input, options = {}) {
   if (typeof input !== "string" || !input.trim() || input.trim().length > 1_000) return review(["invalid_intent"]);
   const text = input.trim().replace(/[\u0000-\u001f\u007f]/gu, "");
+  const categoryCommand = parseCategoryManagementCommand(text);
+  if (categoryCommand) return result("category_management", { command: categoryCommand });
+  if (CATEGORY_COMMAND_PREFIX.test(text)) {
+    return review(["invalid_category_command"], { intent: "category_management", command: null });
+  }
   if (QUESTION.test(text) || WEAK.test(text)) return review(["ambiguous_intent"]);
   if (CANCEL.test(text)) return result("cancel");
   if (CONFIRM.test(text)) return result("confirm");

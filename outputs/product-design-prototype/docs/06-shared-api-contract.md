@@ -7,8 +7,8 @@ The frontend prototype and WSL backend now share a runtime-verifiable API field 
 ## Contract File
 
 - Shared contract: `../../shared/salesWorkbenchApiContract.mjs`
-- Contract version: `2026-09-06`
-- Contract release: `v0.12.0`
+- Contract version: `2026-09-25`
+- Contract release: `v0.13.15`
 - Owner: main control thread
 
 ## Covered Entities
@@ -30,6 +30,7 @@ The frontend prototype and WSL backend now share a runtime-verifiable API field 
 - `hospitalTenderBridge`
 - `customerImportBatch`
 - `customerImportRow`
+- `bookkeepingCategory`
 
 `manualConfirmation.createdAt` is required because the quick-record UI renders a visible sync history after manual confirmation.
 `actionItem.sourceRecordId` links generated next actions back to the confirmed quick record that created them.
@@ -39,6 +40,9 @@ The frontend prototype and WSL backend now share a runtime-verifiable API field 
 `solutionDraft.sourceRefs` is required so generated materials remain traceable to customer, opportunity, action, and knowledge records.
 
 The v0.12.0 additive fields are frozen in `07-v0120-upgrade-freeze.md`.
+The v0.13.15 contract extension adds optional owner-managed bookkeeping
+category `aliases` for natural-language recognition; legacy category responses
+may omit it and the frontend treats omission as an empty list.
 Customer proactive subjects use the server-owned identity
 `customer:<owner>:<customerId>` and a source digest/revision ledger. Hospital
 tender bridge previews bind to canonical notice revision and digest. Action and

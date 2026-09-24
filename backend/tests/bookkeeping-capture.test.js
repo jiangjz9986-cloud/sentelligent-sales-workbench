@@ -106,6 +106,44 @@ describe("微信小小记账识别", () => {
     }), { category: "餐饮", subcategory: "早餐" });
   });
 
+  it("uses owner-managed recognition words and generates lodging and purpose notes", () => {
+    const customCategories = [{
+      id: "category-office",
+      entryType: "expense",
+      name: "办公费",
+      subcategories: [],
+      aliases: ["办公用品", "文具采购"],
+      status: "active",
+    }];
+    const mapped = mapBookkeepingCategory({
+      text: "济宁出差购买办公用品 88 元",
+      entryType: "expense",
+      customCategories,
+    });
+    assert.deepEqual(mapped, { category: "办公费", subcategory: null });
+
+    const lodging = buildBookkeepingAnalysis({
+      text: "2026年9月18日 济宁出差住宿2晚 付款金额 200 元",
+      recognition: { evidence: { occurredOn: "2026-09-18", amountCents: 20000, merchant: "合成酒店", paidTime: "20:00" } },
+      expenseAnalysis: { expense: { category: "lodging", purpose: "济宁出差住宿2晚" }, warnings: [] },
+      tripRegionResolver: () => null,
+    });
+    assert.equal(lodging.category, "住宿费");
+    assert.equal(lodging.note, "济宁出差住宿2晚");
+    assert.equal(lodging.noteAutomation.kind, "lodging");
+
+    const office = buildBookkeepingAnalysis({
+      text: "2026年9月18日 济宁出差购买办公用品 88 元",
+      recognition: { evidence: { occurredOn: "2026-09-18", amountCents: 8800, paidTime: "15:00" } },
+      expenseAnalysis: { expense: { category: "其他", purpose: "购买办公用品" }, warnings: [] },
+      tripRegionResolver: () => null,
+      customCategories,
+    });
+    assert.equal(office.category, "办公费");
+    assert.equal(office.note, "9.18济宁出差购买办公用品");
+    assert.equal(office.noteAutomation.kind, "purpose");
+  });
+
   it("classifies the exact Shanghai meal windows at or below 40 yuan", () => {
     const cases = [
       ["03:59", 3_000, "其他", null, null],
@@ -224,7 +262,7 @@ describe("微信小小记账识别", () => {
       });
       assert.equal(result.category, category, purpose);
       assert.equal(result.subcategory, subcategory, purpose);
-      assert.equal(result.note, null, purpose);
+      assert.equal(result.note, purpose === "酒店房费" ? "济南出差住宿1晚" : null, purpose);
     }
   });
 
@@ -254,7 +292,7 @@ describe("微信小小记账识别", () => {
       });
       assert.equal(result.category, category, text);
       assert.equal(result.subcategory, subcategory, text);
-      assert.equal(result.note, null, text);
+      assert.equal(result.note, subcategory === null && category === "住宿费" ? "济南出差住宿1晚" : null, text);
     }
   });
 

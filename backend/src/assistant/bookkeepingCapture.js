@@ -174,6 +174,42 @@ function maintenanceSubcategory(text) {
   return null;
 }
 
+const CHINESE_SMALL_NUMBERS = Object.freeze({ 一: 1, 二: 2, 两: 2, 三: 3, 四: 4, 五: 5, 六: 6, 七: 7, 八: 8, 九: 9, 十: 10 });
+
+function lodgingNightsFromText(text) {
+  const match = /(?:住宿|酒店|民宿|住).{0,8}?(?<nights>\d{1,2}|一|二|两|三|四|五|六|七|八|九|十)\s*晚|(?<direct>\d{1,2}|一|二|两|三|四|五|六|七|八|九|十)\s*晚/u.exec(clean(text));
+  const value = match?.groups?.nights ?? match?.groups?.direct;
+  const nights = Number.isSafeInteger(Number(value)) ? Number(value) : CHINESE_SMALL_NUMBERS[value];
+  return Number.isSafeInteger(nights) && nights > 0 && nights <= 60 ? nights : 1;
+}
+
+function customCategorySelection({ category, subcategory, text, entryType, customCategories }) {
+  if (!Array.isArray(customCategories) || customCategories.length === 0) return null;
+  const active = customCategories.filter((item) => item?.entryType === entryType
+    && item.isSystem !== true && item.status !== "archived");
+  const modeled = active.find((item) => item.name === clean(category));
+  if (modeled) {
+    const nextSubcategory = clean(subcategory);
+    return {
+      category: modeled.name,
+      subcategory: modeled.subcategories?.includes(nextSubcategory) ? nextSubcategory : null,
+    };
+  }
+  const normalizedText = clean(text).normalize("NFKC").toLocaleLowerCase("zh-CN");
+  const hits = active.flatMap((item) => [item.name, ...(item.aliases ?? []), ...(item.subcategories ?? [])]
+    .filter((term) => typeof term === "string" && term.trim().length >= 2
+      && normalizedText.includes(term.normalize("NFKC").toLocaleLowerCase("zh-CN")))
+    .map((term) => ({ item, term: term.trim(), length: term.trim().length })));
+  if (hits.length === 0) return null;
+  hits.sort((left, right) => right.length - left.length || left.item.name.localeCompare(right.item.name));
+  const best = hits[0];
+  if (hits.some((hit) => hit.length === best.length && hit.item.id !== best.item.id)) return null;
+  return {
+    category: best.item.name,
+    subcategory: best.item.subcategories?.includes(best.term) ? best.term : null,
+  };
+}
+
 export function classifyBookkeepingEntry({ text = "", entryType = null } = {}) {
   const value = clean(text);
   if (entryType === "income" || /收入|借款|借支|预借|到账|预付款/u.test(value)) return "income";
@@ -187,11 +223,15 @@ export function mapBookkeepingCategory({
   entryType = "expense",
   amountCents = null,
   paidTime = null,
+  customCategories = [],
+  contextualMealReclassification = false,
 } = {}) {
   if (entryType === "income") {
     if (/借款|借支|预借|出差借款/u.test(clean(text))) return { category: "出差", subcategory: "借款" };
     if (/奖金|奖励/u.test(clean(text))) return { category: "奖金", subcategory: null };
     if (/工资|薪资|工资到账/u.test(clean(text))) return { category: "工资", subcategory: null };
+    const customIncome = customCategorySelection({ category, subcategory, text, entryType, customCategories });
+    if (customIncome) return customIncome;
     return { category: "其他", subcategory: null };
   }
   const normalizedChinese = clean(category);
@@ -199,6 +239,13 @@ export function mapBookkeepingCategory({
   const allowedSubcategories = NORMALIZED_CATEGORIES.get(normalizedChinese);
   const inferredMeal = inferredMealKey({ text, amountCents, paidTime });
   const textualKey = categoryFromText(text);
+  const custom = customCategorySelection({
+    category: normalizedChinese,
+    subcategory: normalizedSubcategory,
+    text,
+    entryType,
+    customCategories,
+  });
   const textualMeal = ["breakfast", "lunch", "dinner"].includes(textualKey)
     ? textualKey
     : null;
@@ -215,6 +262,13 @@ export function mapBookkeepingCategory({
           ? maintenanceSubcategory(text)
           : mappedSubcategory,
     };
+  }
+  if (custom) return custom;
+  if (contextualMealReclassification && normalizedChinese === "餐饮") {
+    const contextualMeal = textualMeal ?? inferredMeal;
+    return contextualMeal
+      ? { category: "餐饮", subcategory: MEAL_SUBCATEGORY_BY_KEY[contextualMeal] }
+      : { category: CATEGORY_LABELS[textualKey]?.[0] ?? "其他", subcategory: CATEGORY_LABELS[textualKey]?.[1] ?? null };
   }
   if (normalizedChinese === "餐饮" && normalizedSubcategory === null && inferredMeal) {
     return { category: "餐饮", subcategory: MEAL_SUBCATEGORY_BY_KEY[inferredMeal] };
@@ -257,10 +311,14 @@ function normalizedTripRegion(value) {
 export function tripRegionFromText(text) {
   const value = clean(text).normalize("NFKC");
   if (!value) return null;
+  if (/^\s*(?:计划|预计|明天|后天|准备|打算|想去|我去|可能|客户拜访到)/u.test(value)) return null;
   const explicit = /(?:出差区域|出差地点|差旅区域|所在地区|所在城市)\s*[:：]?\s*(?<region>\p{Script=Han}{2,10}?)(?=\s|早餐|午餐|晚餐|用餐|$)/u.exec(value);
   if (explicit?.groups?.region) return normalizedTripRegion(explicit.groups.region);
   const tripPrefix = /(?:^|[\s，,。；;：:])(?:到|赴|前往|去)(?<region>\p{Script=Han}{2,8}?)(?:出差|差旅)(?=\s|早餐|午餐|晚餐|用餐|$)/u.exec(value);
   if (tripPrefix?.groups?.region) return normalizedTripRegion(tripPrefix.groups.region);
+  const withoutDate = value.replace(/^\s*\d{4}[年./-]\d{1,2}[月./-]\d{1,2}日?\s*/u, "");
+  const cityBeforeTrip = /(?:^|[\s，,。；;：:])(?:到|赴|前往|去)?(?<region>\p{Script=Han}{2,8}?)(?:出差|差旅)/u.exec(withoutDate);
+  if (cityBeforeTrip?.groups?.region) return normalizedTripRegion(cityBeforeTrip.groups.region);
   return null;
 }
 
@@ -480,6 +538,10 @@ export function buildBookkeepingAnalysis({
   entryType = "expense",
   now = new Date(),
   tripRegionResolver = null,
+  tripRegionOverride = null,
+  tripRegionSourceOverride = null,
+  customCategories = [],
+  contextualMealReclassification = false,
 } = {}) {
   const evidence = recognition?.evidence && typeof recognition.evidence === "object" ? recognition.evidence : {};
   const analyzedExpense = expenseAnalysis?.expense && typeof expenseAnalysis.expense === "object"
@@ -512,14 +574,20 @@ export function buildBookkeepingAnalysis({
     entryType,
     amountCents,
     paidTime,
+    customCategories,
+    contextualMealReclassification,
   });
   const paidAt = paidAtFor(occurredOn, paidTime)
     ?? (clean(analyzedExpense.paidAt) || null);
   const mealKey = selection.category === "餐饮"
     ? Object.entries(MEAL_SUBCATEGORY_BY_KEY).find(([, value]) => value === selection.subcategory)?.[0] ?? null
     : null;
-  let tripRegion = tripRegionFromText(combinedText);
-  let tripRegionSource = tripRegion ? "text" : null;
+  let tripRegion = normalizedTripRegion(tripRegionOverride) ?? tripRegionFromText(combinedText);
+  let tripRegionSource = tripRegion
+    ? normalizedTripRegion(tripRegionOverride)
+      ? (tripRegionSourceOverride === "user_correction" ? "user_correction" : "text")
+      : "text"
+    : null;
   if (!tripRegion && typeof tripRegionResolver === "function") {
     tripRegionSource = "itinerary";
     try {
@@ -533,9 +601,44 @@ export function buildBookkeepingAnalysis({
       tripRegion = null;
     }
   }
-  const note = entryType === "expense" && mealKey
-    ? buildAutomaticMealNote({ occurredOn, tripRegion, mealKey })
+  const analyzedPurpose = clean(analyzedExpense.purpose);
+  const selectedCustomCategory = customCategories.find((item) => (
+    item?.entryType === entryType && item.isSystem !== true
+      && item.name === selection.category && item.status !== "archived"
+  ));
+  const mentionedCategoryTerm = selectedCustomCategory
+    ? [selectedCustomCategory.name, ...(selectedCustomCategory.aliases ?? [])]
+      .filter((term) => typeof term === "string" && term.length >= 2)
+      .find((term) => combinedText.normalize("NFKC").includes(term.normalize("NFKC")))
     : null;
+  const purposeIsMerchantEcho = Boolean(analyzedPurpose && merchant
+    && analyzedPurpose.normalize("NFKC").trim().toLocaleLowerCase("zh-CN")
+      === merchant.normalize("NFKC").trim().toLocaleLowerCase("zh-CN"));
+  const notePurpose = /^(?:其他|其他费用|出差消费|差旅消费|出差用餐|差旅用餐|出差餐饮|差旅餐饮|餐饮|餐费|餐食|消费|支出|费用|付款|支付)$/u.test(analyzedPurpose)
+    ? mentionedCategoryTerm ?? ""
+    : purposeIsMerchantEcho ? mentionedCategoryTerm ?? ""
+      : analyzedPurpose || mentionedCategoryTerm || "";
+  const lodging = entryType === "expense" && selection.category === "住宿费";
+  const purposeNoteEligible = selection.category === "其他" || Boolean(selectedCustomCategory);
+  const note = entryType !== "expense"
+    ? null
+    : mealKey
+      ? buildAutomaticMealNote({ occurredOn, tripRegion, mealKey })
+      : lodging
+        ? buildAutomaticTravelExpenseNote({
+            occurredOn,
+            category: "lodging",
+            tripRegion,
+            lodgingNights: lodgingNightsFromText(`${combinedText}\n${notePurpose}`),
+          })
+        : purposeNoteEligible ? buildAutomaticTravelExpenseNote({
+            occurredOn,
+            category: "other",
+            tripRegion,
+            purpose: notePurpose,
+          }) : null;
+  const hasAutomaticNoteIntent = entryType === "expense"
+    && (Boolean(mealKey) || lodging || (purposeNoteEligible && Boolean(notePurpose)));
   const warnings = warningsFor({
     amountCents,
     occurredOn,
@@ -559,14 +662,15 @@ export function buildBookkeepingAnalysis({
       : Number.isFinite(expenseAnalysis?.confidence) ? expenseAnalysis.confidence : 0,
     category: selection.category,
     subcategory: selection.subcategory,
-    // Merchant remains a dedicated field. Meal notes are the only automatic
-    // note: month/day + evidence-backed trip region + meal period.
+    // Merchant remains separate; automatic notes only use category or purpose evidence.
     note,
-    noteAutomation: mealKey ? {
-      kind: "meal",
+    noteAutomation: hasAutomaticNoteIntent ? {
+      kind: mealKey ? "meal" : lodging ? "lodging" : "purpose",
       tripRegion: normalizedTripRegion(tripRegion),
       tripRegionSource,
       paidTime: /^(?:[01]\d|2[0-3]):[0-5]\d$/u.test(paidTime) ? paidTime : null,
+      ...(lodging ? { lodgingNights: lodgingNightsFromText(`${combinedText}\n${notePurpose}`) } : {}),
+      ...(notePurpose ? { purpose: notePurpose } : {}),
     } : null,
     // Keep the model's original classification seed so an amount/time
     // correction can deterministically re-run the same contextual rules.
@@ -575,6 +679,7 @@ export function buildBookkeepingAnalysis({
       kind: "contextual",
       sourceCategory: clean(analyzedExpense.category) || null,
       sourceSubcategory: clean(analyzedExpense.subcategory) || null,
+      ...(selectedCustomCategory ? { customCategoryName: selectedCustomCategory.name } : {}),
     } : null,
     expense: {
       occurredOn,

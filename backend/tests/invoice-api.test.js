@@ -280,6 +280,25 @@ describe("authenticated invoice API", () => {
     assert.equal(matches.body.items[0].matchMethod, "rule_candidate");
   });
 
+  it("matches an invoice uploaded after its expense is already recorded", async () => {
+    await startHarness();
+    const expense = await createExpense();
+    const uploaded = await request("/api/invoices", {
+      method: "POST",
+      headers: { "Idempotency-Key": "invoice-arrives-after-expense" },
+      body: JSON.stringify(uploadBody("后到发票")),
+    });
+
+    assert.equal(uploaded.response.status, 201);
+    assert.equal(uploaded.body.invoiceMatch.status, "matched");
+    assert.equal(uploaded.body.invoiceMatch.match.expenseId, expense.id);
+    assert.equal(uploaded.body.item.status, "matched");
+    const matches = await request(`/api/invoice-matches?invoiceId=${encodeURIComponent(uploaded.body.item.id)}`);
+    assert.equal(matches.body.items.length, 1);
+    assert.equal(matches.body.items[0].expenseId, expense.id);
+    assert.equal(matches.body.items[0].matchMethod, "rule_candidate");
+  });
+
   it("preserves the invoice filename and emits an RFC 5987 content disposition", async () => {
     await startHarness();
     const originalFileName = "  invoice's (proof) 甲.pdf  ";
@@ -330,25 +349,15 @@ describe("authenticated invoice API", () => {
       body: JSON.stringify(recognized().fields),
     });
     assert.equal(reviewed.response.status, 200);
-    assert.equal(reviewed.body.item.version, 2);
-    assert.equal(reviewed.body.item.status, "unmatched");
+    assert.equal(reviewed.body.item.version, 3);
+    assert.equal(reviewed.body.item.status, "matched");
     assert.deepEqual(reviewed.body.item.conflicts, []);
-
-    const matched = await request(`/api/invoices/${encodeURIComponent(reviewed.body.item.id)}/matches`, {
-      method: "POST",
-      headers: { "If-Match": '"2"', "Idempotency-Key": "match-1" },
-      body: JSON.stringify({
-        expenseReferenceCode: expense.referenceCode,
-        paymentId: expense.payments[0].id,
-        allocatedCents: 10000,
-        matchMethod: "manual_code",
-      }),
-    });
-    assert.equal(matched.response.status, 201);
-    assert.equal(matched.body.item.state, "confirmed");
+    assert.equal(reviewed.body.invoiceMatch.status, "matched");
+    const matched = await request(`/api/invoice-matches?invoiceId=${encodeURIComponent(reviewed.body.item.id)}`);
+    assert.equal(matched.body.items.length, 1);
     assert.equal((await request(`/api/invoices/${encodeURIComponent(reviewed.body.item.id)}`)).body.item.status, "matched");
 
-    const revoked = await request(`/api/invoice-matches/${encodeURIComponent(matched.body.item.id)}`, {
+    const revoked = await request(`/api/invoice-matches/${encodeURIComponent(matched.body.items[0].id)}`, {
       method: "DELETE",
       headers: { "If-Match": '"1"' },
     });
@@ -475,20 +484,11 @@ describe("authenticated invoice API", () => {
       body: JSON.stringify(uploadBody("expense-evidence")),
     });
     assert.equal(invoice.response.status, 201);
-    const matched = await request(`/api/invoices/${encodeURIComponent(invoice.body.item.id)}/matches`, {
-      method: "POST",
-      headers: { "If-Match": '"1"', "Idempotency-Key": "expense-evidence-match" },
-      body: JSON.stringify({
-        expenseReferenceCode: expense.referenceCode,
-        paymentId: expense.payments[1].id,
-        allocatedCents: 10000,
-        matchMethod: "manual_selection",
-      }),
-    });
-    assert.equal(matched.response.status, 201);
+    assert.equal(invoice.body.invoiceMatch.status, "matched");
+    assert.equal(invoice.body.invoiceMatch.match.paymentId, expense.payments[0].id);
 
     const current = await request(`/api/travel-expenses/${encodeURIComponent(expense.id)}`);
-    const keptPayment = current.body.item.payments[0];
+    const keptPayment = current.body.item.payments[1];
     const rejected = await request(`/api/travel-expenses/${encodeURIComponent(expense.id)}`, {
       method: "PATCH",
       headers: { "If-Match": `"${current.body.item.version}"` },
@@ -522,7 +522,7 @@ describe("authenticated invoice API", () => {
     await startHarness();
     const expense = await createExpense({ invoiceType: "substitute" });
     const otherExpense = await createExpense({
-      occurredOn: "2026-08-12",
+      occurredOn: "2026-09-30",
       purpose: "Another trip expense",
     });
     const confirmation = await request(`/api/travel-expenses/${encodeURIComponent(expense.id)}/no-invoice`, {
@@ -584,17 +584,8 @@ describe("authenticated invoice API", () => {
       headers: { "Idempotency-Key": "refresh-invoice" },
       body: JSON.stringify(uploadBody("刷新状态发票")),
     });
-    const matched = await request(`/api/invoices/${encodeURIComponent(invoice.body.item.id)}/matches`, {
-      method: "POST",
-      headers: { "If-Match": '"1"', "Idempotency-Key": "refresh-match" },
-      body: JSON.stringify({
-        expenseReferenceCode: matchedExpense.referenceCode,
-        paymentId: matchedExpense.payments[0].id,
-        allocatedCents: 10000,
-        matchMethod: "manual_selection",
-      }),
-    });
-    assert.equal(matched.response.status, 201);
+    assert.equal(invoice.body.invoiceMatch.status, "matched");
+    assert.equal(invoice.body.invoiceMatch.match.expenseId, matchedExpense.id);
 
     const noInvoiceExpense = await createExpense({
       occurredOn: "2026-08-05",
@@ -630,7 +621,7 @@ describe("authenticated invoice API", () => {
       `/api/invoice-matches?weekStart=2026-08-03&invoiceId=${encodeURIComponent(invoice.body.item.id)}&expenseId=${encodeURIComponent(matchedExpense.id)}`,
     );
     assertApiCollection("invoiceMatch", matches.body.items);
-    assert.deepEqual(matches.body.items.map((item) => item.id), [matched.body.item.id]);
+    assert.deepEqual(matches.body.items.map((item) => item.id), [invoice.body.invoiceMatch.match.id]);
 
     const confirmations = await request(
       `/api/travel-expense-no-invoice-confirmations?weekStart=2026-08-03&expenseId=${encodeURIComponent(noInvoiceExpense.id)}&active=true`,

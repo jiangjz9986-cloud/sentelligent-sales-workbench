@@ -4370,6 +4370,33 @@
   background: transparent;
 }
 
+.invoice-action-notice {
+  min-height: 42px;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 7px 8px 7px 13px;
+  border: 1px solid rgba(22, 120, 82, 0.18);
+  border-radius: 8px;
+  color: #176b4b;
+  background: #f0faf5;
+  font-size: 11px;
+}
+
+.invoice-action-notice span {
+  flex: 1 1 auto;
+}
+
+.invoice-action-notice button {
+  width: 40px;
+  height: 40px;
+  display: grid;
+  place-items: center;
+  border: 0;
+  color: inherit;
+  background: transparent;
+}
+
 .invoice-manager-grid {
   min-width: 0;
   display: grid;

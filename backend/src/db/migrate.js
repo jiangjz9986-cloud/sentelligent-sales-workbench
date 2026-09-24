@@ -50,6 +50,7 @@ import { apply as applySecureSettingSync } from "./migrations/0046_secure_settin
 import { apply as applyTravelExpenseInvoiceType } from "./migrations/0047_travel_expense_invoice_type.mjs";
 import { apply as applyWeixinBookkeepingBatches } from "./migrations/0048_weixin_bookkeeping_batches.mjs";
 import { apply as applyBookkeepingCategories } from "./migrations/0049_bookkeeping_categories.mjs";
+import { apply as applyBookkeepingCategoryAliases } from "./migrations/0050_bookkeeping_category_aliases.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const migrations = [
@@ -339,6 +340,12 @@ const migrations = [
     path: resolve(here, "migrations", "0049_bookkeeping_categories.mjs"),
     type: "module",
     apply: applyBookkeepingCategories,
+  },
+  {
+    version: "0050",
+    path: resolve(here, "migrations", "0050_bookkeeping_category_aliases.mjs"),
+    type: "module",
+    apply: applyBookkeepingCategoryAliases,
   },
 ];
 

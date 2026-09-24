@@ -3,6 +3,7 @@ import { describe, it } from "node:test";
 
 import {
   SALES_WORKBENCH_API_CONTRACT_VERSION,
+  SALES_WORKBENCH_API_CONTRACT_RELEASE,
   assertApiCollection,
   assertApiEntity,
 } from "../../../../shared/salesWorkbenchApiContract.mjs";
@@ -529,6 +530,7 @@ function sampleBookkeepingCategory(overrides = {}) {
     entryType: "expense",
     name: "通讯费",
     subcategories: ["电话"],
+    aliases: ["手机费"],
     isSystem: false,
     status: "active",
     version: 1,
@@ -1167,8 +1169,8 @@ describe("sales workbench API client", () => {
 
     const listed = await api.listBookkeepingCategories({ entryType: "expense", includeArchived: false });
     const fetched = await api.getBookkeepingCategory("category-1");
-    const created = await api.createBookkeepingCategory({ entryType: "expense", name: "通讯费", subcategories: ["电话"] });
-    const updated = await api.updateBookkeepingCategory("category-1", { name: "通信费", subcategories: ["电话", "流量"] }, 1);
+    const created = await api.createBookkeepingCategory({ entryType: "expense", name: "通讯费", subcategories: ["电话"], aliases: ["手机费"] });
+    const updated = await api.updateBookkeepingCategory("category-1", { name: "通信费", subcategories: ["电话", "流量"], aliases: ["移动通讯"] }, 1);
     const archived = await api.deleteBookkeepingCategory("category-1", 2);
 
     assert.equal(listed[0].name, "通讯费");
@@ -1184,11 +1186,13 @@ describe("sales workbench API client", () => {
       entryType: "expense",
       name: "通讯费",
       subcategories: ["电话"],
+      aliases: ["手机费"],
     });
     assert.equal(headerValue(calls[3].options, "If-Match"), '"1"');
     assert.deepEqual(JSON.parse(calls[3].options.body), {
       name: "通信费",
       subcategories: ["电话", "流量"],
+      aliases: ["移动通讯"],
     });
     assert.equal(headerValue(calls[4].options, "If-Match"), '"2"');
   });
@@ -3143,7 +3147,8 @@ describe("sales workbench API client", () => {
   });
 
   it("publishes strict travel-expense response contracts with integer-cent amounts", () => {
-    assert.equal(SALES_WORKBENCH_API_CONTRACT_VERSION, "2026-09-06");
+    assert.equal(SALES_WORKBENCH_API_CONTRACT_VERSION, "2026-09-25");
+    assert.equal(SALES_WORKBENCH_API_CONTRACT_RELEASE, "v0.13.15");
     assertApiEntity("travelExpensePayment", sampleTravelExpensePayment());
     assertApiEntity("travelExpenseAttachment", sampleTravelExpenseAttachment());
     assertApiEntity("travelExpense", sampleTravelExpense());

@@ -57,6 +57,18 @@ function normalizeSubcategories(value = []) {
   return result;
 }
 
+function normalizeAliases(value = []) {
+  if (value === null || value === undefined || value === "") return [];
+  if (!Array.isArray(value)) throw new TypeError("aliases must be an array");
+  if (value.length > 20) throw new TypeError("aliases cannot contain more than 20 items");
+  const result = [];
+  for (const item of value) {
+    const normalized = requiredText(item, "alias", 100);
+    if (!result.includes(normalized)) result.push(normalized);
+  }
+  return result;
+}
+
 function normalizeStatus(value = ACTIVE) {
   if (value !== ACTIVE && value !== ARCHIVED) {
     throw new HttpError(422, "VALIDATION_ERROR", "Request validation failed", {
@@ -87,6 +99,7 @@ function rowToItem(row) {
     entryType: row.entry_type,
     name: row.name,
     subcategories: JSON.parse(row.subcategories_json),
+    aliases: JSON.parse(row.aliases_json ?? "[]"),
     isSystem: Number(row.is_system) === 1,
     status: row.status,
     version: Number(row.version),
@@ -156,7 +169,7 @@ export function createBookkeepingCategoryRepository(db, {
       ? null
       : normalizeEntryType(entryType);
     const rows = db.prepare(`
-      SELECT id, owner, ledger_name, entry_type, name, subcategories_json,
+      SELECT id, owner, ledger_name, entry_type, name, subcategories_json, aliases_json,
              is_system, status, version, created_at, updated_at
       FROM bookkeeping_categories
       WHERE owner = $owner AND ledger_name = $ledgerName
@@ -203,22 +216,23 @@ export function createBookkeepingCategoryRepository(db, {
     });
   }
 
-  function create({ owner, ledgerName = DEFAULT_LEDGER_NAME, entryType, name, subcategories = [] } = {}) {
+  function create({ owner, ledgerName = DEFAULT_LEDGER_NAME, entryType, name, subcategories = [], aliases = [] } = {}) {
     const normalizedOwner = requiredText(owner, "owner", 200);
     const normalizedLedgerName = normalizeLedgerName(ledgerName);
     const normalizedEntryType = normalizeEntryType(entryType);
     const normalizedName = normalizeCategoryName(name);
     const normalizedSubcategories = normalizeSubcategories(subcategories);
+    const normalizedAliases = normalizeAliases(aliases);
     ensureDefaults({ owner: normalizedOwner, ledgerName: normalizedLedgerName });
     const now = nowIso(clock);
     const id = generatedId(idFactory);
     try {
       db.prepare(`
         INSERT INTO bookkeeping_categories (
-          id, owner, ledger_name, entry_type, name, subcategories_json,
+          id, owner, ledger_name, entry_type, name, subcategories_json, aliases_json,
           is_system, status, version, created_at, updated_at
         ) VALUES (
-          $id, $owner, $ledgerName, $entryType, $name, $subcategoriesJson,
+          $id, $owner, $ledgerName, $entryType, $name, $subcategoriesJson, $aliasesJson,
           0, 'active', 1, $now, $now
         )
       `).run({
@@ -228,6 +242,7 @@ export function createBookkeepingCategoryRepository(db, {
         $entryType: normalizedEntryType,
         $name: normalizedName,
         $subcategoriesJson: JSON.stringify(normalizedSubcategories),
+        $aliasesJson: JSON.stringify(normalizedAliases),
         $now: now,
       });
     } catch (error) {
@@ -241,7 +256,7 @@ export function createBookkeepingCategoryRepository(db, {
     const normalizedId = requiredText(id, "id", 200);
     const normalizedOwner = requiredText(owner, "owner", 200);
     const row = db.prepare(`
-      SELECT id, owner, ledger_name, entry_type, name, subcategories_json,
+      SELECT id, owner, ledger_name, entry_type, name, subcategories_json, aliases_json,
              is_system, status, version, created_at, updated_at
       FROM bookkeeping_categories
       WHERE id = $id AND owner = $owner
@@ -254,6 +269,7 @@ export function createBookkeepingCategoryRepository(db, {
     expectedVersion,
     name,
     subcategories,
+    aliases,
     status,
   } = {}) {
     const normalizedOwner = requiredText(owner, "owner", 200);
@@ -270,6 +286,7 @@ export function createBookkeepingCategoryRepository(db, {
     const nextSubcategories = subcategories === undefined
       ? current.subcategories
       : normalizeSubcategories(subcategories);
+    const nextAliases = aliases === undefined ? current.aliases : normalizeAliases(aliases);
     const nextStatus = status === undefined ? current.status : normalizeStatus(status);
     const now = nowIso(clock);
     try {
@@ -277,6 +294,7 @@ export function createBookkeepingCategoryRepository(db, {
         UPDATE bookkeeping_categories
         SET name = $name,
             subcategories_json = $subcategoriesJson,
+            aliases_json = $aliasesJson,
             status = $status,
             version = version + 1,
             updated_at = $now
@@ -286,6 +304,7 @@ export function createBookkeepingCategoryRepository(db, {
         $owner: normalizedOwner,
         $name: nextName,
         $subcategoriesJson: JSON.stringify(nextSubcategories),
+        $aliasesJson: JSON.stringify(nextAliases),
         $status: nextStatus,
         $now: now,
         $expectedVersion: expectedVersion,

@@ -505,6 +505,7 @@ export function SystemSettingsPage({ apiClient, backendStatus, section = "securi
       entryType: categoryEntryType,
       name: "",
       subcategoriesText: "",
+      aliasesText: "",
       isSystem: false,
       status: "active",
     });
@@ -519,6 +520,7 @@ export function SystemSettingsPage({ apiClient, backendStatus, section = "securi
       entryType: item.entryType,
       name: item.name,
       subcategoriesText: item.subcategories.join("、"),
+      aliasesText: (item.aliases ?? []).join("、"),
       isSystem: item.isSystem,
       status: item.status,
     });
@@ -536,14 +538,18 @@ export function SystemSettingsPage({ apiClient, backendStatus, section = "securi
       .split(/[、,，]/u)
       .map((item) => item.trim())
       .filter(Boolean);
+    const aliases = categoryEditor.aliasesText
+      .split(/[、,，]/u)
+      .map((item) => item.trim())
+      .filter(Boolean);
     setBusy("category-save");
     setError("");
     setNotice("");
     try {
       if (categoryEditor.id) {
         const updatePayload = categoryEditor.isSystem
-          ? { subcategories }
-          : { name: categoryEditor.name.trim(), subcategories, status: categoryEditor.status };
+          ? { subcategories, aliases }
+          : { name: categoryEditor.name.trim(), subcategories, aliases, status: categoryEditor.status };
         await apiClient.updateBookkeepingCategory(
           categoryEditor.id,
           updatePayload,
@@ -555,6 +561,7 @@ export function SystemSettingsPage({ apiClient, backendStatus, section = "securi
           entryType: categoryEditor.entryType,
           name: categoryEditor.name.trim(),
           subcategories,
+          aliases,
         });
         setNotice("记账分类已添加。");
       }
@@ -1063,6 +1070,7 @@ export function SystemSettingsPage({ apiClient, backendStatus, section = "securi
                           {item.status === "archived" ? <span className="settings-category-badge archived">已停用</span> : null}
                         </div>
                         <span>小类：{categorySubcategoryLabel(item)}</span>
+                        {(item.aliases ?? []).length ? <span>识别词：{item.aliases.join("、")}</span> : null}
                       </div>
                       <div className="settings-category-actions">
                         <button
@@ -1130,6 +1138,15 @@ export function SystemSettingsPage({ apiClient, backendStatus, section = "securi
                       onChange={(event) => setCategoryEditor((current) => ({ ...current, subcategoriesText: event.target.value }))}
                       placeholder="例如：早餐、午餐、晚餐"
                       aria-label="分类小类"
+                    />
+                  </label>
+                  <label>
+                    <span>识别关键词（用逗号分隔，可留空）</span>
+                    <input
+                      value={categoryEditor.aliasesText}
+                      onChange={(event) => setCategoryEditor((current) => ({ ...current, aliasesText: event.target.value }))}
+                      placeholder="例如：办公用品、文具采购"
+                      aria-label="分类识别关键词"
                     />
                   </label>
                   <div className="settings-button-row">

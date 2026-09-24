@@ -399,6 +399,90 @@ afterEach(async () => {
 });
 
 describe("小小微信图片记账与自然语言确认闭环", () => {
+  it("manages owner-scoped categories in the bound chat and applies saved keywords to new drafts", async () => {
+    const added = await request("/api/integrations/weixin-agent/events", {
+      method: "POST",
+      headers: eventHeaders("category-command-create"),
+      body: JSON.stringify({
+        conversationId: "category-command-chat",
+        text: "新增费用分类：办公费，关键词：办公用品、文具采购",
+        sourceMessageId: "category-command-create",
+        senderId: sender,
+        chatType: "direct",
+        suppressQuote: true,
+      }),
+    });
+    assert.equal(added.response.status, 200);
+    assert.match(added.body.text, /已新增支出分类“办公费”/u);
+    assert.match(added.body.text, /办公用品、文具采购/u);
+
+    const captured = await request("/api/integrations/weixin-agent/events", {
+      method: "POST",
+      headers: eventHeaders("category-command-capture"),
+      body: JSON.stringify({
+        conversationId: "category-command-chat",
+        text: "支出 2026-08-18 济宁出差购买办公用品 88.00 元",
+        sourceMessageId: "category-command-capture",
+        senderId: sender,
+        chatType: "direct",
+        suppressQuote: true,
+      }),
+    });
+    assert.equal(captured.response.status, 200);
+    const initialDraft = await leaseOutbox();
+    assert.match(initialDraft.item.message, /备注：8\.18济宁出差办公用品/u);
+    await ackOutbox(initialDraft, true, "category-command-capture-draft");
+    const corrected = await request("/api/integrations/weixin-agent/events", {
+      method: "POST",
+      headers: eventHeaders("category-command-correct-date"),
+      body: JSON.stringify({
+        conversationId: "category-command-chat",
+        text: "修改日期为2026-08-19",
+        sourceMessageId: "category-command-correct-date",
+        senderId: sender,
+        chatType: "direct",
+        quotedMessageId: "category-command-capture-draft",
+      }),
+    });
+    assert.equal(corrected.response.status, 200, JSON.stringify(corrected.body));
+    const correctedDraft = await leaseOutbox();
+    assert.match(correctedDraft.item.message, /备注：8\.19济宁出差办公用品/u);
+    await ackOutbox(correctedDraft, true, "category-command-corrected-draft");
+    const db = openDatabase({ databaseUrl: join(tempDir, "assistant.sqlite") });
+    try {
+      const entry = db.prepare(`
+        SELECT category, note FROM shortcut_bookkeeping_entries
+        WHERE owner = $owner AND status = 'review_required'
+        ORDER BY created_at DESC LIMIT 1
+      `).get({ $owner: owner });
+      assert.equal(entry.category, "办公费");
+      assert.equal(entry.note, "8.19济宁出差办公用品");
+      const category = db.prepare(`
+        SELECT status, aliases_json FROM bookkeeping_categories
+        WHERE owner = $owner AND name = '办公费'
+      `).get({ $owner: owner });
+      assert.equal(category.status, "active");
+      assert.deepEqual(JSON.parse(category.aliases_json), ["办公用品", "文具采购"]);
+    } finally {
+      db.close();
+    }
+
+    const archived = await request("/api/integrations/weixin-agent/events", {
+      method: "POST",
+      headers: eventHeaders("category-command-archive"),
+      body: JSON.stringify({
+        conversationId: "category-command-chat",
+        text: "删除费用分类：办公费",
+        sourceMessageId: "category-command-archive",
+        senderId: sender,
+        chatType: "direct",
+        suppressQuote: true,
+      }),
+    });
+    assert.equal(archived.response.status, 200);
+    assert.match(archived.body.text, /已停用/u);
+  });
+
   it("resolves only one active owner/date itinerary city and fails closed on ambiguity or overflow", () => {
     const db = openDatabase({ databaseUrl: join(tempDir, "assistant.sqlite") });
     const insert = ({ id, rowOwner = owner, date = "2026-08-20", status = "planned", city = "济宁", deletedAt = null }) => {
@@ -1529,7 +1613,7 @@ describe("小小微信图片记账与自然语言确认闭环", () => {
       "类型：支出",
       "金额：219.00 元",
       "费用类别：住宿费",
-      "备注：无",
+      "备注：出差住宿1晚",
       "周期：20260817-20260823",
       "AI 状态：已识别，待你确认",
       "",
@@ -1585,7 +1669,7 @@ describe("小小微信图片记账与自然语言确认闭环", () => {
     assert.equal(received.response.status, 200, JSON.stringify(received.body));
 
     const original = await leaseOutbox();
-    assert.match(original.item.message, /备注：无/u);
+    assert.match(original.item.message, /备注：出差住宿1晚/u);
     await ackOutbox(original, true, "provider-note-correction-original");
 
     const corrected = await request("/api/integrations/weixin-agent/events", {
@@ -1705,7 +1789,7 @@ describe("小小微信图片记账与自然语言确认闭环", () => {
     db = openDatabase({ databaseUrl: join(tempDir, "assistant.sqlite") });
     assert.deepEqual(
       db.prepare("SELECT id, note FROM shortcut_bookkeeping_entries ORDER BY id").all().map((row) => ({ ...row })),
-      [{ id: "entry-1", note: "8.18晚餐：继振、宫涛" }, { id: "entry-2", note: null }],
+      [{ id: "entry-1", note: "8.18晚餐：继振、宫涛" }, { id: "entry-2", note: "出差住宿1晚" }],
     );
     assert.deepEqual(
       db.prepare("SELECT id, version FROM assistant_pending_actions ORDER BY id").all().map((row) => ({ ...row })),
@@ -1888,7 +1972,7 @@ describe("小小微信图片记账与自然语言确认闭环", () => {
 
     const db = openDatabase({ databaseUrl: join(tempDir, "assistant.sqlite") });
     const entry = db.prepare("SELECT status, note FROM shortcut_bookkeeping_entries").get();
-    assert.deepEqual({ ...entry }, { status: "review_required", note: null });
+    assert.deepEqual({ ...entry }, { status: "review_required", note: "出差住宿1晚" });
     const action = db.prepare("SELECT status, version FROM assistant_pending_actions").get();
     assert.deepEqual({ ...action }, { status: "pending", version: 1 });
     db.close();
@@ -2189,8 +2273,8 @@ describe("小小微信图片记账与自然语言确认闭环", () => {
       summary.item.message,
       [
         "本次已确认并录入小小记账，共 2 笔：",
-        "1. 2026年8月18日出差消费，219.00 元",
-        "2. 2026年8月18日出差消费，219.00 元",
+        "1. 2026年8月18日出差住宿1晚，219.00 元",
+        "2. 2026年8月18日出差住宿1晚，219.00 元",
       ].join("\n"),
     );
     await ackOutbox(summary, true, "independent-batch-receipt");
@@ -2722,7 +2806,7 @@ describe("小小微信图片记账与自然语言确认闭环", () => {
     assert.equal(confirmed.response.status, 200, JSON.stringify(confirmed.body));
     assert.equal(
       confirmed.body.text,
-      "已确认并录入小小记账：2026年8月18日出差消费，金额 219.00 元，已自动关联发票。",
+      "已确认并录入小小记账：2026年8月18日出差住宿1晚，金额 219.00 元，已自动关联发票。",
     );
 
     const acceptedReceipt = await leaseOutbox();

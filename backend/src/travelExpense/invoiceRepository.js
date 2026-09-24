@@ -1203,7 +1203,10 @@ export function createInvoiceRepository(db, {
           )
         ORDER BY invoice.issued_on, invoice.created_at, invoice.id
       `).all({ $owner: owner });
-      const usedInvoiceIds = new Set();
+      const invoiceRemainders = new Map(invoices.map((invoice) => [
+        invoice.id,
+        Math.max(0, Number(invoice.total_cents) - Number(invoice.confirmed_coverage_cents)),
+      ]));
       const expenseRemainders = new Map();
       const created = [];
 
@@ -1220,7 +1223,7 @@ export function createInvoiceRepository(db, {
         );
         if (remaining <= 0) continue;
         const ranked = invoices
-          .filter((invoice) => !usedInvoiceIds.has(invoice.id))
+          .filter((invoice) => (invoiceRemainders.get(invoice.id) ?? 0) > 0)
           .filter((invoice) => invoice.issued_on
             && invoiceIssuedOnOrAfterPaymentDate(invoice.issued_on, target.paid_at, target.occurred_on)
             && calendarDayDistance(invoice.issued_on, target.occurred_on) <= AUTO_MATCH_MAX_DATE_DISTANCE_DAYS)
@@ -1228,7 +1231,7 @@ export function createInvoiceRepository(db, {
           .map((invoice) => {
             const dayDistance = calendarDayDistance(invoice.issued_on, target.occurred_on);
             const categoryExact = invoice.suggested_category === target.category;
-            const invoiceRemaining = Number(invoice.total_cents) - Number(invoice.confirmed_coverage_cents);
+            const invoiceRemaining = invoiceRemainders.get(invoice.id) ?? 0;
             const amountFit = invoiceRemaining <= remaining;
             const score = Math.max(1, Math.min(100,
               50 - Math.min(AUTO_MATCH_MAX_DATE_DISTANCE_DAYS, dayDistance)
@@ -1314,7 +1317,10 @@ export function createInvoiceRepository(db, {
             $actor: actor,
             $now: timestamp,
           });
-          usedInvoiceIds.add(rankedInvoice.invoice.id);
+          invoiceRemainders.set(
+            rankedInvoice.invoice.id,
+            invoiceRemainders.get(rankedInvoice.invoice.id) - proposedCents,
+          );
           remaining -= proposedCents;
           expenseRemainders.set(
             target.expense_id,
@@ -1763,7 +1769,7 @@ export function createInvoiceRepository(db, {
     return { expense, invoice };
   }
 
-  function acceptCandidateRecord(current, { owner, actor, timestamp }) {
+  function acceptCandidateRecord(current, { owner, actor, timestamp, preserveCandidateIds = [] }) {
     if (current.status !== "suggested") {
       throw new InvoiceMatchConflictError("CANDIDATE_NOT_SUGGESTED", "Invoice match candidate is not active");
     }
@@ -1801,12 +1807,15 @@ export function createInvoiceRepository(db, {
       $now: timestamp,
     });
     if (updated.changes !== 1) candidateCurrentOrFailure(current.id, owner, Number(current.version));
+    const preservedIds = [...new Set([current.id, ...preserveCandidateIds])];
+    const preserveBindings = Object.fromEntries(preservedIds.map((id, index) => [`$preserve${index}`, id]));
+    const preservePlaceholders = preservedIds.map((_, index) => `$preserve${index}`).join(", ");
     db.prepare(`
       UPDATE invoice_match_candidates
       SET status = 'expired', updated_at = $now, version = version + 1
       WHERE owner = $owner AND invoice_id = $invoiceId
-        AND id <> $id AND status = 'suggested'
-    `).run({ $owner: owner, $invoiceId: current.invoice_id, $id: current.id, $now: timestamp });
+        AND id NOT IN (${preservePlaceholders}) AND status = 'suggested'
+    `).run({ $owner: owner, $invoiceId: current.invoice_id, $now: timestamp, ...preserveBindings });
     return {
       candidate: candidateFromRow(db.prepare(`
         SELECT * FROM invoice_match_candidates WHERE id = $id AND owner = $owner
@@ -1862,15 +1871,10 @@ export function createInvoiceRepository(db, {
           "Weekly invoice suggestions changed; reload and review the complete set before accepting",
         );
       }
-      if (new Set(active.map((candidate) => candidate.invoice_id)).size !== active.length) {
-        throw new InvoiceMatchConflictError(
-          "CANDIDATE_SET_INVALID",
-          "Weekly invoice suggestions contain a duplicate invoice",
-        );
-      }
+      const preserveCandidateIds = candidates.map(({ id }) => id);
       return candidates.map(({ id, version }) => acceptCandidateRecord(
         candidateCurrentOrFailure(id, owner, version),
-        { owner, actor, timestamp },
+        { owner, actor, timestamp, preserveCandidateIds },
       ));
     });
   }
