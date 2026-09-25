@@ -36,6 +36,8 @@ const expenseQaInvoicePdfBase64 = ["a", "b"].map((suffix) => (
 const expenseProofFixtureBase64 = readFileSync(
   new URL("./fixtures/payment-proof-design-qa.png", import.meta.url),
 ).toString("base64");
+const CDP_COMMAND_TIMEOUT_MS = 30_000;
+const CDP_FLOW_TIMEOUT_MS = 12 * 60_000;
 
 const desktopRecord =
   "周三现场拜访日照中医医院，和主任及主管工程师梁斌讨论未来 3-5 年规划。客户希望补齐本地数据中心基础架构健壮度，未来将移动云作为灾备中心。客户反馈移动云资源计费、平台封闭、数据导出配合度和后台管理权都存在问题。需要输出十五五年度规划材料，并判断是否同步到商机档案和周报。";
@@ -460,6 +462,16 @@ function connectCdp(wsUrl) {
     const consoleErrors = [];
     const networkRequests = new Map();
     const networkResponses = [];
+    const rejectPending = (error) => {
+      for (const entry of pending.values()) {
+        clearTimeout(entry.timer);
+        entry.reject(error);
+      }
+      pending.clear();
+    };
+
+    ws.addEventListener("close", () => rejectPending(new Error("Chrome DevTools connection closed")));
+    ws.addEventListener("error", () => rejectPending(new Error("Chrome DevTools connection failed")));
 
     ws.addEventListener("message", (event) => {
       const message = JSON.parse(event.data);
@@ -489,8 +501,9 @@ function connectCdp(wsUrl) {
       }
 
       if (!pending.has(message.id)) return;
-      const { method, resolve, reject } = pending.get(message.id);
+      const { method, resolve, reject, timer } = pending.get(message.id);
       pending.delete(message.id);
+      clearTimeout(timer);
       if (message.error) reject(new Error(`CDP ${method} failed: ${message.error.message}`));
       else resolve(message.result);
     });
@@ -502,10 +515,23 @@ function connectCdp(wsUrl) {
           ws,
           consoleErrors,
           networkResponses,
-          send(method, params = {}) {
+          send(method, params = {}, { timeoutMs = CDP_COMMAND_TIMEOUT_MS } = {}) {
             const callId = ++id;
-            ws.send(JSON.stringify({ id: callId, method, params }));
-            return new Promise((resolve, reject) => pending.set(callId, { method, resolve, reject }));
+            return new Promise((resolve, reject) => {
+              const timer = setTimeout(() => {
+                if (!pending.has(callId)) return;
+                pending.delete(callId);
+                reject(new Error(`CDP ${method} timed out after ${timeoutMs}ms`));
+              }, timeoutMs);
+              pending.set(callId, { method, resolve, reject, timer });
+              try {
+                ws.send(JSON.stringify({ id: callId, method, params }));
+              } catch (error) {
+                clearTimeout(timer);
+                pending.delete(callId);
+                reject(error);
+              }
+            });
           },
         });
       },
@@ -611,12 +637,12 @@ async function openChromeCdp() {
   }
 }
 
-async function evaluate(cdp, expression) {
+async function evaluate(cdp, expression, { timeoutMs = CDP_COMMAND_TIMEOUT_MS } = {}) {
   const result = await cdp.send("Runtime.evaluate", {
     expression,
     awaitPromise: true,
     returnByValue: true,
-  });
+  }, { timeoutMs });
   if (result.exceptionDetails) {
     const details = result.exceptionDetails;
     const frames = details.stackTrace?.callFrames?.slice(0, 5).map((frame) => {
@@ -647,7 +673,10 @@ async function captureExpenseDesignScreenshots(cdp, isFlowRunning, viewport) {
       }
       await delay(40);
     }
-    if (!stageReady) return false;
+    if (!stageReady) {
+      throw new Error(`Timed out waiting for expense screenshot stage ${capture.stage}`);
+    }
+    console.log(`[integration-qa] screenshot-stage:start ${capture.stage}`);
 
     try {
       await cdp.send("Emulation.setDeviceMetricsOverride", {
@@ -706,6 +735,7 @@ async function captureExpenseDesignScreenshots(cdp, isFlowRunning, viewport) {
         captureError ??= error;
       }
     }
+    console.log(`[integration-qa] screenshot-stage:complete ${capture.stage}`);
   }
 
   if (captureError) throw captureError;
@@ -2761,7 +2791,7 @@ async function runViewport(cdp, url, backendUrl, viewport, historicalSolution, h
         productionCopy: window.__qaProductionCopy ?? { forbiddenByPage: [] }
       };
     })()
-  `);
+  `, { timeoutMs: CDP_FLOW_TIMEOUT_MS });
   const completedFlowPromise = flowPromise.then(
     (result) => {
       flowFinished = true;
@@ -2774,13 +2804,14 @@ async function runViewport(cdp, url, backendUrl, viewport, historicalSolution, h
   );
   if (!viewport.fullFlow) return completedFlowPromise;
 
+  console.log(`[integration-qa] desktop-flow:start ${viewport.name}`);
   const screenshotPromise = captureExpenseDesignScreenshots(cdp, () => !flowFinished, viewport);
   try {
     const [result, screenshotsCaptured] = await Promise.all([completedFlowPromise, screenshotPromise]);
     if (!screenshotsCaptured) throw new Error("Expense design screenshot stages were not reached in Chrome");
     return result;
   } catch (error) {
-    await Promise.allSettled([completedFlowPromise, screenshotPromise]);
+    await Promise.allSettled([screenshotPromise]);
     throw error;
   }
 }
@@ -3167,6 +3198,7 @@ async function main() {
   assert.ok(existsSync(backendDir), `Backend directory does not exist: ${backendDir}`);
 
   const runtimeMode = await detectIntegrationRuntime();
+  console.log(`[integration-qa] runtime:${runtimeMode} setup:start`);
   const expectAmapReady = String(process.env.SENT_ZX_EXPECT_AMAP ?? "false").toLowerCase() === "true";
   const realItineraryFlow = String(process.env.SENT_ZX_REAL_ITINERARY ?? "false").toLowerCase() === "true";
   const backendPort = await getFreePort();
@@ -3205,6 +3237,7 @@ async function main() {
         env: { NODE_ENV: "test", DATABASE_URL: databaseUrl },
       });
     }
+    console.log("[integration-qa] fixture:seeded");
 
     const createdHistoricalSolution = await createHistoricalSolutionFixture({
       runtimeMode,
@@ -3216,6 +3249,7 @@ async function main() {
       backendWslPath,
       databaseUrl,
     });
+    console.log("[integration-qa] fixture:historical-ready");
 
     const backendEnv = {
       PORT: String(backendPort),
@@ -3246,6 +3280,7 @@ async function main() {
           env: backendEnv,
         });
     await waitForHttp(`${backendUrl}/api/health`);
+    console.log("[integration-qa] backend:ready");
 
     const fixturePasswordField = ["pass", "word"].join("");
     const fixtureReadLogin = await fetch(`${backendUrl}/api/auth/login`, {
@@ -3292,8 +3327,10 @@ async function main() {
       },
     );
     await waitForHttp(frontendUrl);
+    console.log("[integration-qa] frontend:ready");
 
     cdp = await openChromeCdp();
+    console.log("[integration-qa] chrome:ready");
     await cdp.send("Page.addScriptToEvaluateOnNewDocument", {
       source: String.raw`
         (() => {
@@ -3384,6 +3421,7 @@ async function main() {
     });
     const viewportResults = [];
     for (const viewport of viewportCases) {
+      console.log(`[integration-qa] viewport:start ${viewport.name}`);
       viewportResults.push(await runViewport(
         cdp,
         frontendUrl,
@@ -3393,6 +3431,7 @@ async function main() {
         historicalItinerary,
         realItineraryFlow,
       ));
+      console.log(`[integration-qa] viewport:complete ${viewport.name}`);
     }
     const browserCustomerDeletes = cdp.networkResponses.filter((item) =>
       item.method === "DELETE" && /\/api\/customers\/[A-Za-z0-9._~-]+$/.test(new URL(item.url).pathname),
