@@ -155,21 +155,17 @@ test("proactive suggestions are mirrored into the unified inbox without changing
   db.close();
 });
 
-test("PushPlus acceptance is not reported as delivery until asynchronous result confirms it", async () => {
+test("PushPlus Token records platform acceptance without claiming final delivery", async () => {
   const db = openDatabase({ databaseUrl: ":memory:" });
   const time = fixedClock();
   const repository = createHospitalTenderPushplusDeliveryRepository(db, { clock: time.now, idFactory: () => "pushplus-1" });
   const calls = [];
   const notifier = createHospitalTenderPushplusNotifier({
     token: "mock-token",
-    accessKey: "mock-access-key",
     deliveryRepository: repository,
-    clock: time.now,
     fetchImpl: async (url, options) => {
       calls.push({ url: String(url), options });
-      return calls.length === 1
-        ? jsonResponse({ code: 200, data: "short-code-1" })
-        : jsonResponse({ code: 200, data: { status: 2 } });
+      return jsonResponse({ code: 200, data: "short-code-1" });
     },
   });
 
@@ -180,12 +176,9 @@ test("PushPlus acceptance is not reported as delivery until asynchronous result 
   assert.equal(submission.template, "markdown");
   assert.equal(submission.channel, "wechat");
   assert.equal(submission.token, "mock-token");
-
-  time.advance(31_000);
-  assert.deepEqual(await notifier.pollPending(), { checked: 1, sent: 1, failed: 0 });
-  assert.equal(calls[1].url.includes("shortCode=short-code-1"), true);
-  assert.equal(calls[1].options.headers["access-key"], "mock-access-key");
-  assert.equal(repository.statusCounts().sent, 1);
+  assert.equal(Object.hasOwn(notifier, "pollPending"), false);
+  assert.equal(calls.length, 1);
+  assert.equal(repository.statusCounts().sent, 0);
   db.close();
 });
 

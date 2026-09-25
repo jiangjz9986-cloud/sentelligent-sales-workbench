@@ -36,7 +36,6 @@ function productionConfig(overrides = {}) {
     AI_PLATFORM_TARGET_MODEL: "deepseek-flash",
     AI_PLATFORM_TARGET_REASONING_EFFORT: "max",
     HOSPITAL_TENDER_PUSHPLUS_TOKEN: ["pushplus", "fixture", "token"].join("-"),
-    HOSPITAL_TENDER_PUSHPLUS_ACCESS_KEY: ["pushplus", "fixture", "access", "key"].join("-"),
     ASR_TEMP_ROOT: "/run/sentelligent-asr",
     ASR_FFPROBE_COMMAND: "/usr/bin/ffprobe",
     ASR_FFMPEG_COMMAND: "/usr/bin/ffmpeg",

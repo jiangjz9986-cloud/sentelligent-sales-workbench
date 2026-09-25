@@ -184,7 +184,7 @@ function StatusMark({ status, children }) {
 export function SystemSettingsPage({ apiClient, backendStatus, section = "security", role = "admin" }) {
   const [settings, setSettings] = useState(null);
   const [apiKey, setApiKey] = useState("");
-  const [pushplusForm, setPushplusForm] = useState({ token: "", accessKey: "" });
+  const [pushplusForm, setPushplusForm] = useState({ token: "" });
   const [passwordForm, setPasswordForm] = useState({ current: "", next: "", confirm: "" });
   const [integrationStatus, setIntegrationStatus] = useState({
     loading: true,
@@ -306,7 +306,6 @@ export function SystemSettingsPage({ apiClient, backendStatus, section = "securi
             status: value.notification.status,
             provider: value.notification.provider,
             configured: value.notification.configured,
-            deliveryVerification: value.notification.deliveryVerification,
             deliveryCounts: value.notification.deliveryCounts,
             lastSuccessAt: value.notification.lastSuccessAt,
             lastFailureAt: value.notification.lastFailureAt,
@@ -315,7 +314,6 @@ export function SystemSettingsPage({ apiClient, backendStatus, section = "securi
       }) : Promise.resolve(null),
       readsNotifications ? read("requestHospitalTenderPushplusCredentials", (value) => value ? {
         token: value.token ?? null,
-        accessKey: value.accessKey ?? null,
       } : null) : Promise.resolve(null),
     ]).then(([weixin, hospitalHealth, scheduler, pushplusCredentials]) => {
       if (disposed) return;
@@ -431,8 +429,8 @@ export function SystemSettingsPage({ apiClient, backendStatus, section = "securi
 
   async function savePushplusCredentials(event) {
     event.preventDefault();
-    if (!pushplusForm.token.trim() && !pushplusForm.accessKey.trim()) {
-      setError("至少填写 PushPlus Token 或 AccessKey。");
+    if (!pushplusForm.token.trim()) {
+      setError("请输入 PushPlus Token。");
       return;
     }
     setBusy("pushplus");
@@ -440,14 +438,13 @@ export function SystemSettingsPage({ apiClient, backendStatus, section = "securi
     try {
       const result = await apiClient.requestHospitalTenderPushplusCredentials("PUT", {
         token: pushplusForm.token.trim(),
-        accessKey: pushplusForm.accessKey.trim(),
       });
-      setPushplusForm({ token: "", accessKey: "" });
+      setPushplusForm({ token: "" });
       setIntegrationStatus((current) => ({ ...current, pushplusCredentials: result }));
-      setNotice("PushPlus 凭据已加密保存，页面不会再次显示明文。");
+      setNotice("PushPlus Token 已加密保存，页面不会再次显示明文。");
       setError("");
     } catch {
-      setError("PushPlus 凭据保存失败，请检查输入后重试。");
+      setError("PushPlus Token 保存失败，请检查输入后重试。");
     } finally {
       setBusy("");
     }
@@ -455,18 +452,18 @@ export function SystemSettingsPage({ apiClient, backendStatus, section = "securi
 
   async function clearPushplusCredentials() {
     const confirmed = typeof window !== "undefined"
-      && window.confirm("确定清除 PushPlus Token 和 AccessKey 吗？清除后招标通知与送达核验将停止。");
+      && window.confirm("确定清除 PushPlus Token 吗？清除后招标通知与自动轮巡将停止。");
     if (!confirmed) return;
     setBusy("clear-pushplus");
     setNotice("");
     try {
       const result = await apiClient.requestHospitalTenderPushplusCredentials("DELETE", { confirmation: "CLEAR" });
-      setPushplusForm({ token: "", accessKey: "" });
+      setPushplusForm({ token: "" });
       setIntegrationStatus((current) => ({ ...current, pushplusCredentials: result }));
-      setNotice("PushPlus 凭据已清除，招标自动轮巡已停止。");
+      setNotice("PushPlus Token 已清除，招标自动轮巡已停止。");
       setError("");
     } catch {
-      setError("PushPlus 凭据清除失败，请稍后重试。");
+      setError("PushPlus Token 清除失败，请稍后重试。");
     } finally {
       setBusy("");
     }
@@ -678,11 +675,7 @@ export function SystemSettingsPage({ apiClient, backendStatus, section = "securi
   const weixin = integrationStatus.weixin;
   const pushplus = hospitalHealth?.notification ?? integrationStatus.scheduler?.notification ?? null;
   const pushplusTokenMeta = integrationStatus.pushplusCredentials?.token;
-  const pushplusAccessKeyMeta = integrationStatus.pushplusCredentials?.accessKey;
   const pushplusConfigured = pushplusTokenMeta ? Boolean(pushplusTokenMeta.configured) : Boolean(pushplus?.configured);
-  const pushplusVerificationReady = pushplusAccessKeyMeta
-    ? Boolean(pushplusAccessKeyMeta.configured)
-    : pushplus?.deliveryVerification === "enabled";
   const pushplusCounts = pushplus?.deliveryCounts ?? {};
   const pushplusSubmitting = ["queued", "submitting"]
     .reduce((total, status) => total + (Number.isSafeInteger(pushplusCounts[status]) ? pushplusCounts[status] : 0), 0);
@@ -883,18 +876,17 @@ export function SystemSettingsPage({ apiClient, backendStatus, section = "securi
           <div className="settings-grid settings-grid-focused">
             <Panel title="渠道职责与状态" meta="运行状态" className="settings-card settings-status-card">
               <div className="settings-card-icon clawbot"><BellRing size={20} /></div>
-              <p className="settings-description">站内通知面向工作简报、待办、发票缺口、运维告警和主动助手提醒。管理员可在本页安全配置招标 PushPlus 凭据。</p>
+              <p className="settings-description">站内通知面向工作简报、待办、发票缺口、运维告警和主动助手提醒。管理员可在本页安全配置招标 PushPlus Token。</p>
               <dl className="settings-facts">
                 <div><dt>记账助手</dt><dd>微信 Clawbot（仅记账）</dd></div>
                 <div><dt>Clawbot 会话</dt><dd><StatusMark status={notificationRuntimeStatus}>{integrationStatus.loading ? "读取中" : notificationRuntimeLabel}</StatusMark></dd></div>
                 <div><dt>医院招标</dt><dd>{integrationStatus.loading ? "读取中" : `PushPlus${pushplusConfigured ? "（已配置）" : "（未配置）"}`}</dd></div>
-                <div><dt>PushPlus 送达核验</dt><dd>{integrationStatus.loading ? "读取中" : pushplusVerificationReady ? "已启用" : "未配置 AccessKey"}</dd></div>
-                <div><dt>招标通知状态</dt><dd className="notification-delivery-counts">{integrationStatus.loading ? "读取中" : `已送达 ${pushplusCounts.sent ?? 0} · 已受理 ${pushplusCounts.accepted ?? 0} · 提交中 ${pushplusSubmitting} · 失败 ${pushplusCounts.failed ?? 0} · 结果未知 ${pushplusCounts.uncertain ?? 0}`}</dd></div>
+                <div><dt>招标通知状态</dt><dd className="notification-delivery-counts">{integrationStatus.loading ? "读取中" : `历史确认送达 ${pushplusCounts.sent ?? 0} · 已受理 ${pushplusCounts.accepted ?? 0} · 提交中 ${pushplusSubmitting} · 失败 ${pushplusCounts.failed ?? 0} · 结果未知 ${pushplusCounts.uncertain ?? 0}`}</dd></div>
               </dl>
               {weixin?.message ? <p className="settings-inline-note">{weixin.message}</p> : null}
             </Panel>
 
-            <Panel title="站内通知与投递状态" meta="服务端管理" className="settings-card settings-status-card">
+              <Panel title="站内通知与投递状态" meta="服务端管理" className="settings-card settings-status-card">
               <div className="settings-status-list">
                 <div className="settings-status-item">
                   <div>
@@ -906,10 +898,10 @@ export function SystemSettingsPage({ apiClient, backendStatus, section = "securi
                 <div className="settings-status-item">
                   <div>
                     <strong>PushPlus 状态含义</strong>
-                    <span>“已受理”不等于已送达；配置 AccessKey 后才会轮询最终结果</span>
+                    <span>“已受理”表示 PushPlus 接收了请求，不代表最终送达</span>
                   </div>
-                  <StatusMark status={pushplusVerificationReady ? "connected" : "offline"}>
-                    {pushplusVerificationReady ? "可核验" : "待配置"}
+                  <StatusMark status={pushplusConfigured ? "connected" : "offline"}>
+                    {pushplusConfigured ? "仅确认提交" : "待配置 Token"}
                   </StatusMark>
                 </div>
               </div>
@@ -918,18 +910,17 @@ export function SystemSettingsPage({ apiClient, backendStatus, section = "securi
 
             {role === "admin" ? (
               <Panel
-                title="医院招标 PushPlus 凭据"
-                meta={pushplusConfigured && pushplusVerificationReady ? "配置完整" : pushplusConfigured || pushplusVerificationReady ? "待补全" : "未配置"}
+                title="医院招标 PushPlus Token"
+                meta={pushplusConfigured ? "已配置" : "未配置"}
                 className="settings-card"
                 data-testid="pushplus-credentials-card"
               >
                 <div className="settings-card-icon deepseek"><KeyRound size={20} /></div>
-                <p className="settings-description">凭据仅发送到后端并以服务端密钥加密保存。保存后只显示掩码，页面不再读取明文。</p>
+                <p className="settings-description">Token 仅发送到后端并以服务端密钥加密保存。保存后只显示掩码，页面不再读取明文。</p>
                 <dl className="settings-facts">
                   <div><dt>PushPlus Token</dt><dd>{pushplusTokenMeta?.masked ?? (pushplusTokenMeta?.configured ? "已配置" : "未配置")}</dd></div>
-                  <div><dt>AccessKey</dt><dd>{pushplusAccessKeyMeta?.masked ?? (pushplusAccessKeyMeta?.configured ? "已配置" : "未配置")}</dd></div>
                   <div><dt>配置来源</dt><dd>{sourceLabel(pushplusTokenMeta?.source)}</dd></div>
-                  <div><dt>最近更新</dt><dd>{formatDate(pushplusTokenMeta?.updatedAt ?? pushplusAccessKeyMeta?.updatedAt)}</dd></div>
+                  <div><dt>最近更新</dt><dd>{formatDate(pushplusTokenMeta?.updatedAt)}</dd></div>
                 </dl>
                 <form className="settings-key-form" data-testid="pushplus-credentials-form" onSubmit={savePushplusCredentials}>
                   <label>
@@ -944,30 +935,18 @@ export function SystemSettingsPage({ apiClient, backendStatus, section = "securi
                       data-testid="pushplus-token-input"
                     />
                   </label>
-                  <label>
-                    <span>送达核验 AccessKey{pushplusAccessKeyMeta?.configured ? "（留空不修改）" : ""}</span>
-                    <input
-                      type="password"
-                      value={pushplusForm.accessKey}
-                      onChange={(event) => setPushplusForm((current) => ({ ...current, accessKey: event.target.value }))}
-                      autoComplete="new-password"
-                      placeholder={pushplusAccessKeyMeta?.configured ? "已配置；输入新值以替换" : "输入 PushPlus AccessKey"}
-                      aria-label="PushPlus AccessKey"
-                      data-testid="pushplus-access-key-input"
-                    />
-                  </label>
                   <div className="settings-button-row">
                     <button className="primary-button" type="submit" disabled={busy !== "" || backendStatus !== "connected"}>
                       <Save size={16} /> {busy === "pushplus" ? "保存中…" : "安全保存"}
                     </button>
-                    {pushplusConfigured || pushplusVerificationReady ? (
+                    {pushplusConfigured ? (
                       <button className="danger-button" type="button" onClick={clearPushplusCredentials} disabled={busy !== ""}>
-                        <Trash2 size={16} /> {busy === "clear-pushplus" ? "清除中…" : "清除凭据"}
+                        <Trash2 size={16} /> {busy === "clear-pushplus" ? "清除中…" : "清除 Token"}
                       </button>
                     ) : null}
                   </div>
                 </form>
-                <p className="settings-inline-note">空白字段不会覆盖现有值。Token 用于推送，AccessKey 用于查询最终送达状态；清除凭据会停用自动轮巡。</p>
+                <p className="settings-inline-note">空白字段不会覆盖现有 Token。保存后只显示掩码；清除 Token 会停用招标自动轮巡。</p>
               </Panel>
             ) : null}
           </div>

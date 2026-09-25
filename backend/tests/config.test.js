@@ -115,6 +115,7 @@ describe("backend model configuration", () => {
       assert.equal(config.proactiveNotificationHourlyLimit, 4);
       assert.equal(config.proactiveNotificationDailyLimit, 20);
       assert.equal(config.hospitalTenderPushplusToken, fixturePushplusToken);
+      assert.equal(Object.hasOwn(config, "hospitalTenderPushplusAccessKey"), false);
       assert.equal(config.invoiceEscalationAutoRun, true);
       assert.equal(config.invoiceEscalationPollMs, 45_000);
       assert.equal(config.port, 8788);
@@ -175,7 +176,7 @@ describe("backend model configuration", () => {
     assert.equal(config.proactiveNotificationHourlyLimit, 3);
     assert.equal(config.proactiveNotificationDailyLimit, 12);
     assert.equal(config.hospitalTenderPushplusToken, "");
-    assert.equal(config.hospitalTenderPushplusAccessKey, "");
+    assert.equal(Object.hasOwn(config, "hospitalTenderPushplusAccessKey"), false);
     assert.equal(config.invoiceEscalationAutoRun, false);
     assert.equal(config.invoiceEscalationPollMs, 60_000);
     assert.equal(config.nodeEnv, "development");
@@ -229,7 +230,7 @@ describe("backend model configuration", () => {
     });
     assert.equal(webManagedPushplus.hospitalTenderAutoRun, true);
     assert.equal(webManagedPushplus.hospitalTenderPushplusToken, "");
-    assert.equal(webManagedPushplus.hospitalTenderPushplusAccessKey, "");
+    assert.equal(Object.hasOwn(webManagedPushplus, "hospitalTenderPushplusAccessKey"), false);
     assert.equal(config.nodeEnv, "production");
     assert.equal(config.authAccount, "jiangjz");
     assert.equal(config.authCookieSecure, true);

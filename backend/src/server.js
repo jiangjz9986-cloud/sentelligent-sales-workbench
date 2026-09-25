@@ -3660,20 +3660,12 @@ export function createServer(options = {}) {
   const resolveHospitalTenderPushplusToken = () => secureSettingsRepository
     ? secureSettingsRepository.resolveSecret(HOSPITAL_TENDER_PUSHPLUS_TOKEN_SETTING_KEY, config.hospitalTenderPushplusToken)
     : config.hospitalTenderPushplusToken;
-  const resolveHospitalTenderPushplusAccessKey = () => secureSettingsRepository
-    ? secureSettingsRepository.resolveSecret(HOSPITAL_TENDER_PUSHPLUS_ACCESS_KEY_SETTING_KEY, config.hospitalTenderPushplusAccessKey)
-    : config.hospitalTenderPushplusAccessKey;
-  const hasHospitalTenderPushplusCredentials = () => Boolean(
-    String(resolveHospitalTenderPushplusToken() ?? "").trim()
-      && String(resolveHospitalTenderPushplusAccessKey() ?? "").trim(),
-  );
+  const hasHospitalTenderPushplusToken = () => Boolean(String(resolveHospitalTenderPushplusToken() ?? "").trim());
   const hospitalTenderPushplusNotifier = options.hospitalTenderPushplusNotifier
     ?? createHospitalTenderPushplusNotifier({
       tokenProvider: resolveHospitalTenderPushplusToken,
-      accessKeyProvider: resolveHospitalTenderPushplusAccessKey,
       deliveryRepository: hospitalTenderPushplusDeliveryRepository,
       fetchImpl: options.pushplusFetchImpl ?? options.fetchImpl ?? fetch,
-      clock: options.hospitalTenderPushplusClock ?? (() => new Date()),
     });
   const secureSettingMetadata = (key, fallback = "") => {
     const stored = secureSettingsRepository?.has(key) ?? false;
@@ -3712,7 +3704,6 @@ export function createServer(options = {}) {
   };
   const hospitalTenderPushplusSettingsMetadata = () => ({
     token: secureSettingMetadata(HOSPITAL_TENDER_PUSHPLUS_TOKEN_SETTING_KEY, config.hospitalTenderPushplusToken),
-    accessKey: secureSettingMetadata(HOSPITAL_TENDER_PUSHPLUS_ACCESS_KEY_SETTING_KEY, config.hospitalTenderPushplusAccessKey),
   });
   // PushPlus is reserved for tender-monitor notices. The shortcut-bookkeeping
   // runtime and WeChat outbox are declared later in this scope.
@@ -3732,7 +3723,6 @@ export function createServer(options = {}) {
     status: hasCustomTenderNotifier || Boolean(String(resolveHospitalTenderPushplusToken() ?? "").trim()) ? "enabled" : "disabled",
     provider: hasCustomTenderNotifier ? "custom" : "pushplus",
     configured: hasCustomTenderNotifier || Boolean(String(resolveHospitalTenderPushplusToken() ?? "").trim()),
-    deliveryVerification: String(resolveHospitalTenderPushplusAccessKey() ?? "").trim() ? "enabled" : "not_configured",
     deliveryCounts: hospitalTenderPushplusDeliveryRepository.statusCounts(),
   });
   const hospitalTenderScheduler = createHospitalTenderScheduler({
@@ -3758,17 +3748,8 @@ export function createServer(options = {}) {
   });
   const hospitalTenderAutoRun = options.hospitalTenderAutoRun ?? config.hospitalTenderAutoRun;
   if (hospitalTenderAutoRun && options.hospitalTenderSchedulerEnabled !== false
-    && (hasCustomTenderNotifier || hasHospitalTenderPushplusCredentials())) {
+    && (hasCustomTenderNotifier || hasHospitalTenderPushplusToken())) {
     hospitalTenderScheduler.start();
-  }
-  let hospitalTenderPushplusPollTimer = null;
-  if ((secureSettingsRepository || String(resolveHospitalTenderPushplusAccessKey() ?? "").trim())
-    && !options.hospitalTenderPushplusNotifier) {
-    hospitalTenderPushplusNotifier.pollPending().catch(() => {});
-    hospitalTenderPushplusPollTimer = setInterval(() => {
-      hospitalTenderPushplusNotifier.pollPending().catch(() => {});
-    }, 30_000);
-    hospitalTenderPushplusPollTimer.unref?.();
   }
   const databaseIdentity = config.authSessionSecret.length >= 32
     ? createDatabaseIdentity({
@@ -6665,20 +6646,13 @@ export function createServer(options = {}) {
         requireAdminRole(db, request);
         const repository = requireSecureSettings(secureSettingsRepository);
         const body = plainObject(await readJson(request));
-        allowedPayloadKeys(body, new Set(["token", "accessKey"]));
+        allowedPayloadKeys(body, new Set(["token"]));
         const values = {};
-        for (const [field, key] of [
-          ["token", HOSPITAL_TENDER_PUSHPLUS_TOKEN_SETTING_KEY],
-          ["accessKey", HOSPITAL_TENDER_PUSHPLUS_ACCESS_KEY_SETTING_KEY],
-        ]) {
-          if (!Object.hasOwn(body, field)) continue;
-          if (typeof body[field] !== "string" || body[field].length > 500) validationFailure(field, "format");
-          const value = body[field].trim();
-          if (!value) continue;
-          if (/[\u0000-\u001f\u007f-\u009f]/u.test(value)) validationFailure(field, "format");
-          values[key] = value;
-        }
-        if (Object.keys(values).length === 0) validationFailure("credentials", "required");
+        if (!Object.hasOwn(body, "token")) validationFailure("token", "required");
+        if (typeof body.token !== "string" || body.token.length > 500) validationFailure("token", "format");
+        const token = body.token.trim();
+        if (!token || /[\u0000-\u001f\u007f-\u009f]/u.test(token)) validationFailure("token", "format");
+        values[HOSPITAL_TENDER_PUSHPLUS_TOKEN_SETTING_KEY] = token;
         const item = withImmediateTransaction(db, () => {
           const before = hospitalTenderPushplusSettingsMetadata();
           for (const [key, value] of Object.entries(values)) repository.setSecret(key, value);
@@ -6697,18 +6671,15 @@ export function createServer(options = {}) {
             requestId,
             before: summarize(before),
             after: summarize(after),
-            metadata: { updatedFields: Object.keys(values).map((key) => key === HOSPITAL_TENDER_PUSHPLUS_TOKEN_SETTING_KEY ? "token" : "accessKey") },
+            metadata: { updatedFields: ["token"] },
           });
           return after;
         });
-        if (hasHospitalTenderPushplusCredentials()
+        if (hasHospitalTenderPushplusToken()
           && config.hospitalTenderAutoRun
           && hospitalTenderScheduler.getState()?.enabled
           && !hospitalTenderScheduler.isStarted()) {
           hospitalTenderScheduler.start();
-        }
-        if (typeof hospitalTenderPushplusNotifier.pollPending === "function") {
-          hospitalTenderPushplusNotifier.pollPending().catch(() => {});
         }
         sendJson(response, 200, { item }, { "Cache-Control": "no-store" });
         return;
@@ -6721,12 +6692,13 @@ export function createServer(options = {}) {
           throw new HttpError(428, "CONFIRMATION_REQUIRED", "Explicit confirmation is required to clear PushPlus credentials");
         }
         if (hospitalTenderScheduler.getState()?.lastStatus === "running") {
-          throw new HttpError(409, "HOSPITAL_TENDER_RUN_IN_PROGRESS", "招标轮巡运行中，完成后再清除 PushPlus 凭据");
+          throw new HttpError(409, "HOSPITAL_TENDER_RUN_IN_PROGRESS", "招标轮巡运行中，完成后再清除 PushPlus Token");
         }
         const repository = requireSecureSettings(secureSettingsRepository);
         const item = withImmediateTransaction(db, () => {
           const before = hospitalTenderPushplusSettingsMetadata();
           repository.clearSecret(HOSPITAL_TENDER_PUSHPLUS_TOKEN_SETTING_KEY);
+          // Retire any credential written by the former AccessKey settings UI.
           repository.clearSecret(HOSPITAL_TENDER_PUSHPLUS_ACCESS_KEY_SETTING_KEY);
           const after = hospitalTenderPushplusSettingsMetadata();
           const summarize = (metadata) => Object.fromEntries(Object.entries(metadata).map(([field, entry]) => [field, {
@@ -8001,8 +7973,8 @@ export function createServer(options = {}) {
         const patch = {};
         if (Object.hasOwn(body, "enabled")) {
           if (typeof body.enabled !== "boolean") throw new HttpError(422, "VALIDATION_ERROR", "enabled 必须是布尔值");
-          if (body.enabled && !hasCustomTenderNotifier && !hasHospitalTenderPushplusCredentials()) {
-            throw new HttpError(409, "PUSHPLUS_CREDENTIALS_REQUIRED", "请先在系统设置中配置 PushPlus Token 和 AccessKey");
+          if (body.enabled && !hasCustomTenderNotifier && !hasHospitalTenderPushplusToken()) {
+            throw new HttpError(409, "PUSHPLUS_CREDENTIALS_REQUIRED", "请先在系统设置中配置 PushPlus Token");
           }
           patch.enabled = body.enabled;
         }
@@ -12128,8 +12100,6 @@ export function createServer(options = {}) {
     if (backgroundStopped) return;
     backgroundStopped = true;
     hospitalTenderScheduler.stop();
-    if (hospitalTenderPushplusPollTimer) clearInterval(hospitalTenderPushplusPollTimer);
-    hospitalTenderPushplusPollTimer = null;
     actionReminderScheduler.stop();
     invoiceEscalationScheduler.stop();
     dailyDigestScheduler.stop();

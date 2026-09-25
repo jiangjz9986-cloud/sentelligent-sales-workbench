@@ -1422,7 +1422,6 @@ async function runViewport(cdp, url, backendUrl, viewport, historicalSolution, h
         const notificationSettingsText = notificationSettingsSection?.textContent ?? '';
         await waitUntil(() => document.querySelector('[data-testid="pushplus-credentials-form"]'), 5000);
         const firstCredential = ['qa', 'ui', 'pushplus', 'token', 'only'].join('-');
-        const verificationCredential = ['qa', 'ui', 'pushplus', 'access-key', 'only'].join('-');
         const setPasswordInput = (testId, value) => {
           const input = document.querySelector('[data-testid="' + testId + '"]');
           if (!input || input.type !== 'password') throw new Error('Missing password input ' + testId);
@@ -1430,28 +1429,27 @@ async function runViewport(cdp, url, backendUrl, viewport, historicalSolution, h
           input.dispatchEvent(new Event('input', { bubbles: true }));
         };
         setPasswordInput('pushplus-token-input', firstCredential);
-        setPasswordInput('pushplus-access-key-input', verificationCredential);
         document.querySelector('[data-testid="pushplus-credentials-form"]')?.requestSubmit();
-        await waitUntil(() => document.body.textContent.includes('PushPlus 凭据已加密保存'), 5000);
+        await waitUntil(() => document.body.textContent.includes('PushPlus Token 已加密保存'), 5000);
         const savedUiText = notificationSettingsSection?.textContent ?? '';
         settingsIa.pushplusWebConfig = window.location.pathname === '/settings/notifications'
           && savedUiText.includes('微信 Clawbot')
           && savedUiText.includes('服务端管理')
           && !savedUiText.includes(firstCredential)
-          && !savedUiText.includes(verificationCredential)
+          && !savedUiText.includes('AccessKey')
           && document.body.textContent.includes('页面不会再次显示明文')
           && document.querySelector('[data-testid="pushplus-token-input"]')?.value === ''
-          && document.querySelector('[data-testid="pushplus-access-key-input"]')?.value === '';
+          && document.querySelector('[data-testid="pushplus-access-key-input"]') === null;
         document.querySelector('[data-testid="subnav-settings"]')?.click();
         await waitUntil(() => document.querySelector('[data-testid="settings-security-section"]'), 5000);
         document.querySelector('[data-testid="subnav-settings-notifications"]')?.click();
         await waitUntil(() => document.querySelector('[data-testid="pushplus-credentials-form"]'), 5000);
         const persistedPushplusForm = document.querySelector('[data-testid="pushplus-credentials-form"]');
         settingsIa.pushplusReloadedMasked = persistedPushplusForm?.querySelector('[data-testid="pushplus-token-input"]')?.value === ''
-          && persistedPushplusForm?.querySelector('[data-testid="pushplus-access-key-input"]')?.value === ''
-          && [...persistedPushplusForm.querySelectorAll('button')].some((button) => button.textContent.includes('清除凭据'))
+          && persistedPushplusForm?.querySelector('[data-testid="pushplus-access-key-input"]') === null
+          && [...persistedPushplusForm.querySelectorAll('button')].some((button) => button.textContent.includes('清除 Token'))
           && !persistedPushplusForm.textContent.includes(firstCredential)
-          && !persistedPushplusForm.textContent.includes(verificationCredential);
+          && !persistedPushplusForm.textContent.includes('AccessKey');
         settingsIa.notifications = settingsIa.pushplusWebConfig && settingsIa.pushplusReloadedMasked;
         document.querySelector('[data-testid="subnav-settings-tender-schedule"]')?.click();
         await waitUntil(() => document.querySelector('[data-testid="settings-tender-schedule-section"]'), 5000);
