@@ -87,12 +87,26 @@ describe("hospital tender scheduler API", () => {
     assert.equal(initial.body.item.intervalMinutes, 60);
     assert.equal(initial.body.item.batchSize, 10);
     assert.equal(Array.isArray(initial.body.runs), true);
-    assert.deepEqual(initial.body.notification, { status: "disabled", provider: "weixin" });
+    assert.deepEqual(initial.body.notification, {
+      status: "disabled",
+      provider: "pushplus",
+      configured: false,
+      deliveryVerification: "not_configured",
+      deliveryCounts: {
+        queued: 0,
+        submitting: 0,
+        accepted: 0,
+        sent: 0,
+        failed: 0,
+        uncertain: 0,
+        total: 0,
+      },
+    });
 
     const updated = await request("/api/hospital-tenders/scheduler", {
       method: "PATCH",
       headers,
-      body: JSON.stringify({ enabled: true, intervalMinutes: 120, batchSize: 1 }),
+      body: JSON.stringify({ intervalMinutes: 120, batchSize: 1 }),
     });
     assert.equal(updated.response.status, 200);
     assert.equal(updated.body.item.intervalMinutes, 120);
@@ -101,7 +115,7 @@ describe("hospital tender scheduler API", () => {
     const unknownField = await request("/api/hospital-tenders/scheduler", {
       method: "PATCH",
       headers,
-      body: JSON.stringify({ enabled: true, unexpected: true }),
+      body: JSON.stringify({ unexpected: true }),
     });
     assert.equal(unknownField.response.status, 422);
 

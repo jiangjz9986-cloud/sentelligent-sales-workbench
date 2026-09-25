@@ -119,3 +119,18 @@ class SourceFixtureTests(TestCase):
                 self.assertTrue(result.success)
                 self.assertEqual(len(result.notices), 1)
                 self.assertEqual(result.notices[0].hospital_names, names)
+
+    def test_hospital_list_adapter_accepts_chinese_and_dotted_dates(self) -> None:
+        for date_text in ("2026年9月25日", "2026.09.25", "20260925"):
+            with self.subTest(date_text=date_text):
+                source = {
+                    "id": "customer-hospital",
+                    "name": "客户医院公告",
+                    "city": "济宁",
+                    "url": "https://hospital.example.test/notices",
+                    "hospital_names": ["示例医院"],
+                }
+                body = f"<ul><li><a href='/notice-1'>信息化设备采购公告</a>{date_text}</li></ul>"
+                result = HospitalHtmlAdapter(source, _Http(body)).fetch()
+                self.assertTrue(result.success)
+                self.assertEqual(len(result.notices), 1)

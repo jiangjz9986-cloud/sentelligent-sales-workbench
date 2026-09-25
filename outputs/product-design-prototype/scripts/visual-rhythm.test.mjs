@@ -25,6 +25,7 @@ const mobileShellViewports = viewports.filter((viewport) => viewport.mobile);
 
 const pages = [
   { name: "overview", testId: "page-overview" },
+  { name: "notifications", testId: "page-notifications" },
   { name: "quick", testId: "page-quick" },
   { name: "customer", testId: "page-customer" },
   { name: "opportunity", testId: "page-opportunity" },
@@ -1102,7 +1103,7 @@ describe("visual rhythm", () => {
           };
 
           await waitUntil(() => document.querySelector('[data-testid="page-overview"]'), 'workbench bootstrap');
-          document.querySelectorAll('.nav-item')[3]?.click();
+          document.querySelector('[data-testid="nav-opportunity"]')?.click();
           await waitUntil(() => document.querySelector('[data-testid="opportunity-list-view"]'), 'opportunity list');
           await waitUntil(() => {
             const root = document.querySelector('[data-testid="page-opportunity"]');

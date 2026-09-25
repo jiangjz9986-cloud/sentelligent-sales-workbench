@@ -19,6 +19,7 @@ import { apply as applyPhase1WriteIntegrity } from "../src/db/migrations/0002_ph
 import { apply as applySecureSettings } from "../src/db/migrations/0015_secure_settings.mjs";
 import { apply as applySecureSettingsPushplus } from "../src/db/migrations/0021_secure_settings_pushplus.mjs";
 import { apply as applySecureSettingsAsr } from "../src/db/migrations/0033_secure_settings_asr.mjs";
+import { apply as applySecureSettingsPushplusAccessKey } from "../src/db/migrations/0053_secure_settings_pushplus_access_key.mjs";
 import { apply as applyAiSuggestionReview } from "../src/db/migrations/0036_ai_suggestion_review.mjs";
 import { apply as applyAiModelProvenance } from "../src/db/migrations/0037_ai_model_provenance.mjs";
 
@@ -109,6 +110,10 @@ rowsHashOmittedColumns.ai_suggestions = [
 rowsHashOmittedColumns.weekly_reports = [
   ...(rowsHashOmittedColumns.weekly_reports ?? []),
   "source", "fallback_reason",
+];
+rowsHashOmittedColumns.customers = [
+  ...(rowsHashOmittedColumns.customers ?? []),
+  "tender_sources",
 ];
 rowsHashOmittedColumns.solution_drafts = [
   ...(rowsHashOmittedColumns.solution_drafts ?? []),
@@ -364,13 +369,19 @@ function rebuildDatabaseAs0032(db) {
       DROP TABLE IF EXISTS weixin_bookkeeping_batches;
       DROP INDEX IF EXISTS idx_bookkeeping_categories_owner_scope;
       DROP TABLE IF EXISTS bookkeeping_categories;
+      DROP INDEX IF EXISTS idx_in_app_notifications_owner_created;
+      DROP INDEX IF EXISTS idx_in_app_notifications_owner_unread;
+      DROP TABLE IF EXISTS in_app_notifications;
+      DROP INDEX IF EXISTS idx_tender_pushplus_result_checks;
+      DROP TABLE IF EXISTS hospital_tender_pushplus_deliveries;
+      ALTER TABLE customers DROP COLUMN tender_sources;
       DROP INDEX IF EXISTS idx_secure_setting_sync_operations_key;
       DROP INDEX IF EXISTS idx_secure_setting_sync_operations_state;
       DROP TABLE IF EXISTS secure_setting_sync_operations;
       DROP TABLE IF EXISTS secure_setting_sync_state;
       DELETE FROM schema_migrations WHERE version IN (
         '0033', '0034', '0035', '0036', '0037', '0038', '0039', '0040', '0041',
-        '0042', '0043', '0044', '0045', '0046', '0047', '0048', '0049', '0050'
+        '0042', '0043', '0044', '0045', '0046', '0047', '0048', '0049', '0050', '0051', '0052', '0053'
       );
     `);
     db.exec("COMMIT");
@@ -426,7 +437,7 @@ test("records versioned migrations exactly once and remains idempotent on reopen
       second = openDatabase({ databaseUrl });
       const secondMigrations = all(second, "SELECT version, checksum FROM schema_migrations ORDER BY version");
 
-      assert.equal(firstMigrations.length, 49);
+      assert.equal(firstMigrations.length, 52);
       assert.equal(firstMigrations[0].version, "0001");
       assert.equal(firstMigrations[1].version, "0002");
       assert.equal(firstMigrations[2].version, "0003");
@@ -476,6 +487,9 @@ test("records versioned migrations exactly once and remains idempotent on reopen
       assert.equal(firstMigrations[46].version, "0048");
       assert.equal(firstMigrations[47].version, "0049");
       assert.equal(firstMigrations[48].version, "0050");
+      assert.equal(firstMigrations[49].version, "0051");
+      assert.equal(firstMigrations[50].version, "0052");
+      assert.equal(firstMigrations[51].version, "0053");
       assert.match(firstMigrations[0].checksum, /^[a-f0-9]{64}$/);
       assert.match(firstMigrations[1].checksum, /^[a-f0-9]{64}$/);
       assert.match(firstMigrations[2].checksum, /^[a-f0-9]{64}$/);
@@ -535,6 +549,9 @@ test("records versioned migrations exactly once and remains idempotent on reopen
         "../src/db/migrations/0048_weixin_bookkeeping_batches.mjs",
         "../src/db/migrations/0049_bookkeeping_categories.mjs",
         "../src/db/migrations/0050_bookkeeping_category_aliases.mjs",
+        "../src/db/migrations/0051_notification_channels.mjs",
+        "../src/db/migrations/0052_customer_tender_sources.mjs",
+        "../src/db/migrations/0053_secure_settings_pushplus_access_key.mjs",
       ].map((relativePath) => readFileSync(fileURLToPath(new URL(relativePath, import.meta.url)), "utf8"));
       assert.equal(firstMigrations[0].checksum, migrationChecksum(migrationSources[0]));
       assert.equal(firstMigrations[1].checksum, migrationChecksum(migrationSources[1]));
@@ -585,6 +602,8 @@ test("records versioned migrations exactly once and remains idempotent on reopen
       assert.equal(firstMigrations[46].checksum, migrationChecksum(migrationSources[46]));
       assert.equal(firstMigrations[47].checksum, migrationChecksum(migrationSources[47]));
       assert.equal(firstMigrations[48].checksum, migrationChecksum(migrationSources[48]));
+      assert.equal(firstMigrations[49].checksum, migrationChecksum(migrationSources[49]));
+      assert.equal(firstMigrations[50].checksum, migrationChecksum(migrationSources[50]));
       assert.deepEqual(secondMigrations, firstMigrations);
     } finally {
       second?.close();
@@ -948,7 +967,52 @@ test("migration 0033 upgrades the direct 0021 cleared matrix without changing an
   }
 });
 
-test("current migrations upgrade a complete 0032 database through 0033-0050 in order", () => {
+test("migration 0053 preserves encrypted settings rows and allows only the PushPlus AccessKey", () => {
+  const db = createConnection({ databaseUrl: ":memory:" });
+  try {
+    applySecureSettings(db);
+    applySecureSettingsPushplus(db);
+    applySecureSettingsAsr(db);
+    seedSecureSettingsMatrix(db, "active");
+    db.prepare(`
+      INSERT INTO secure_settings (
+        setting_key, ciphertext, status, created_at, rotated_at, updated_at,
+        last_success_at, last_failure_at, last_error_code, last_delivery_count, last_chunk_count
+      ) VALUES (
+        'asr_api_key', NULL, 'cleared', '2026-09-20T00:00:00.000Z', NULL, '2026-09-20T00:00:00.000Z',
+        NULL, NULL, NULL, NULL, NULL
+      )
+    `).run();
+    const before = secureSettingsRows(db);
+
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      applySecureSettingsPushplusAccessKey(db);
+      db.exec("COMMIT");
+    } catch (error) {
+      db.exec("ROLLBACK");
+      throw error;
+    }
+
+    assert.deepEqual(secureSettingsRows(db), before);
+    const tableSql = db.prepare(
+      "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'secure_settings'",
+    ).get().sql;
+    assert.match(tableSql, /hospital_tender_pushplus_access_key/u);
+    db.prepare(`
+      INSERT INTO secure_settings (setting_key, ciphertext, status, created_at, updated_at)
+      VALUES ('hospital_tender_pushplus_access_key', 'synthetic-access-ciphertext', 'active', '2026-09-25T00:00:00.000Z', '2026-09-25T00:00:00.000Z')
+    `).run();
+    assert.throws(() => db.prepare(`
+      INSERT INTO secure_settings (setting_key, ciphertext, status, created_at, updated_at)
+      VALUES ('unapproved_secret', 'ciphertext', 'active', '2026-09-25T00:00:00.000Z', '2026-09-25T00:00:00.000Z')
+    `).run(), /CHECK constraint failed/i);
+  } finally {
+    db.close();
+  }
+});
+
+test("current migrations upgrade a complete 0032 database through 0033-0053 in order", () => {
   withDatabase((databaseUrl) => {
     const db = openDatabase({ databaseUrl });
     try {
@@ -964,6 +1028,7 @@ test("current migrations upgrade a complete 0032 database through 0033-0050 in o
       assert.equal(columnNames(db, "quick_records").includes("confirmation_preview_id"), false);
       assert.equal(columnNames(db, "quick_records").includes("confirmation_preview_status"), false);
       assert.equal(columnNames(db, "weekly_reports").includes("entries_json"), false);
+      assert.equal(columnNames(db, "customers").includes("tender_sources"), false);
 
       migrateDatabase(db);
 
@@ -971,15 +1036,15 @@ test("current migrations upgrade a complete 0032 database through 0033-0050 in o
         "SELECT version, checksum, applied_at FROM schema_migrations ORDER BY version",
       ).all().map((row) => ({ ...row }));
       const added = ledgerAfter.filter((row) => !ledgerBefore.some((before) => before.version === row.version));
-      assert.equal(ledgerAfter.length, 49);
+      assert.equal(ledgerAfter.length, 52);
       assert.deepEqual(added.map((row) => row.version), [
         "0033", "0034", "0035", "0036", "0037", "0038", "0039", "0040", "0041",
-        "0042", "0043", "0044", "0045", "0046", "0047", "0048", "0049", "0050",
+        "0042", "0043", "0044", "0045", "0046", "0047", "0048", "0049", "0050", "0051", "0052", "0053",
       ]);
       assert.deepEqual(
         ledgerAfter.filter((row) => ![
           "0033", "0034", "0035", "0036", "0037", "0038", "0039", "0040", "0041",
-          "0042", "0043", "0044", "0045", "0046", "0047", "0048", "0049", "0050",
+          "0042", "0043", "0044", "0045", "0046", "0047", "0048", "0049", "0050", "0051", "0052", "0053",
         ].includes(row.version)),
         ledgerBefore,
       );
@@ -1006,6 +1071,19 @@ test("current migrations upgrade a complete 0032 database through 0033-0050 in o
       assert.equal(columnNames(db, "quick_records").includes("confirmation_preview_id"), true);
       assert.equal(columnNames(db, "quick_records").includes("confirmation_preview_status"), true);
       assert.equal(columnNames(db, "weekly_reports").includes("entries_json"), true);
+      assert.equal(columnInfo(db, "customers", "tender_sources").dflt_value, "'[]'");
+      const secureSettingsSql = db.prepare(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'secure_settings'",
+      ).get().sql;
+      assert.match(secureSettingsSql, /hospital_tender_pushplus_access_key/u);
+      db.prepare(`
+        INSERT INTO secure_settings (setting_key, ciphertext, status, created_at, updated_at)
+        VALUES ('hospital_tender_pushplus_access_key', 'synthetic-access-ciphertext', 'active', '2026-09-25T00:00:00.000Z', '2026-09-25T00:00:00.000Z')
+      `).run();
+      assert.throws(() => db.prepare(`
+        INSERT INTO secure_settings (setting_key, ciphertext, status, created_at, updated_at)
+        VALUES ('unapproved_secret', 'ciphertext', 'active', '2026-09-25T00:00:00.000Z', '2026-09-25T00:00:00.000Z')
+      `).run(), /CHECK constraint failed/i);
     } finally {
       db.close();
     }
@@ -1158,7 +1236,7 @@ test("reconciles the former settings migration 0019 before applying Shortcut mig
       );
       assert.equal(
         db.prepare("SELECT COUNT(*) AS count FROM schema_migrations").get().count,
-        49,
+        52,
       );
     } finally {
       db.close();
@@ -1582,7 +1660,7 @@ test("upgrades all legacy business data into the phase one write-integrity schem
       assert.deepEqual(hashesAfter, hashesBefore);
       assert.deepEqual(
         all(migrated, "SELECT version FROM schema_migrations ORDER BY version").map((row) => row.version),
-        ["0001", "0002", "0003", "0005", "0006", "0007", "0008", "0009", "0010", "0011", "0012", "0013", "0014", "0015", "0016", "0017", "0018", "0019", "0020", "0021", "0022", "0023", "0024", "0025", "0026", "0027", "0028", "0029", "0030", "0031", "0032", "0033", "0034", "0035", "0036", "0037", "0038", "0039", "0040", "0041", "0042", "0043", "0044", "0045", "0046", "0047", "0048", "0049", "0050"],
+        ["0001", "0002", "0003", "0005", "0006", "0007", "0008", "0009", "0010", "0011", "0012", "0013", "0014", "0015", "0016", "0017", "0018", "0019", "0020", "0021", "0022", "0023", "0024", "0025", "0026", "0027", "0028", "0029", "0030", "0031", "0032", "0033", "0034", "0035", "0036", "0037", "0038", "0039", "0040", "0041", "0042", "0043", "0044", "0045", "0046", "0047", "0048", "0049", "0050", "0051", "0052", "0053"],
       );
     } finally {
       migrated.close();
@@ -1776,7 +1854,7 @@ test("adopts legacy baseline tables by adding missing columns without losing row
       assert.equal(all(db, "SELECT title, assignee FROM action_items WHERE id = 'legacy-action'")[0].title, "Legacy action");
       assert.equal(all(db, "SELECT assignee, due FROM risk_items WHERE id = 'legacy-risk'")[0].due, null);
       assert.equal(all(db, "SELECT artifact_type FROM solution_drafts WHERE id = 'legacy-solution'")[0].artifact_type, "solution_framework");
-      assert.equal(all(db, "SELECT version FROM schema_migrations").length, 49);
+      assert.equal(all(db, "SELECT version FROM schema_migrations").length, 52);
     } finally {
       db.close();
     }
@@ -2330,7 +2408,7 @@ test("rolls back every 0002 schema change when the module migration fails partwa
       assert.equal(columnNames(db, "customers").includes("version"), true);
       assert.deepEqual(
         all(db, "SELECT version FROM schema_migrations ORDER BY version").map((row) => row.version),
-        ["0001", "0002", "0003", "0005", "0006", "0007", "0008", "0009", "0010", "0011", "0012", "0013", "0014", "0015", "0016", "0017", "0018", "0019", "0020", "0021", "0022", "0023", "0024", "0025", "0026", "0027", "0028", "0029", "0030", "0031", "0032", "0033", "0034", "0035", "0036", "0037", "0038", "0039", "0040", "0041", "0042", "0043", "0044", "0045", "0046", "0047", "0048", "0049", "0050"],
+        ["0001", "0002", "0003", "0005", "0006", "0007", "0008", "0009", "0010", "0011", "0012", "0013", "0014", "0015", "0016", "0017", "0018", "0019", "0020", "0021", "0022", "0023", "0024", "0025", "0026", "0027", "0028", "0029", "0030", "0031", "0032", "0033", "0034", "0035", "0036", "0037", "0038", "0039", "0040", "0041", "0042", "0043", "0044", "0045", "0046", "0047", "0048", "0049", "0050", "0051", "0052", "0053"],
       );
     } finally {
       db.close();

@@ -274,12 +274,13 @@ describe("todo agent HTTP boundary", () => {
     const second = await server.actionReminderScheduler.runOnce();
     assert.equal(second.enqueuedCount, 0, "reminded_at must stop the second tick");
     withDb((db) => {
-      const rows = db.prepare("SELECT * FROM weixin_confirmation_outbox").all();
+      const rows = db.prepare("SELECT * FROM in_app_notifications WHERE owner = 'assistantowner'").all();
       assert.equal(rows.length, 1);
-      const payload = JSON.parse(rows[0].payload_json);
-      assert.equal(payload.kind, "action_reminder");
-      assert.equal(payload.idSuffix, "xyz789");
-      assert.equal(payload.customerName, null);
+      assert.equal(rows[0].category, "action_reminder");
+      assert.match(rows[0].title, /给王工送方案/u);
+      assert.match(rows[0].body, /给王工送方案/u);
+      assert.equal(rows[0].href, "/opportunities/actions");
+      assert.equal(db.prepare("SELECT COUNT(*) AS count FROM weixin_confirmation_outbox").get().count, 0);
       assert.equal(
         db.prepare("SELECT COUNT(*) AS count FROM audit_logs WHERE action = 'action.reminder.sent'").get().count,
         1,

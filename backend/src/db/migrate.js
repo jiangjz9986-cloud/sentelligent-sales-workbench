@@ -51,6 +51,9 @@ import { apply as applyTravelExpenseInvoiceType } from "./migrations/0047_travel
 import { apply as applyWeixinBookkeepingBatches } from "./migrations/0048_weixin_bookkeeping_batches.mjs";
 import { apply as applyBookkeepingCategories } from "./migrations/0049_bookkeeping_categories.mjs";
 import { apply as applyBookkeepingCategoryAliases } from "./migrations/0050_bookkeeping_category_aliases.mjs";
+import { apply as applyNotificationChannels } from "./migrations/0051_notification_channels.mjs";
+import { apply as applyCustomerTenderSources } from "./migrations/0052_customer_tender_sources.mjs";
+import { apply as applySecureSettingsPushplusAccessKey } from "./migrations/0053_secure_settings_pushplus_access_key.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const migrations = [
@@ -346,6 +349,24 @@ const migrations = [
     path: resolve(here, "migrations", "0050_bookkeeping_category_aliases.mjs"),
     type: "module",
     apply: applyBookkeepingCategoryAliases,
+  },
+  {
+    version: "0051",
+    path: resolve(here, "migrations", "0051_notification_channels.mjs"),
+    type: "module",
+    apply: applyNotificationChannels,
+  },
+  {
+    version: "0052",
+    path: resolve(here, "migrations", "0052_customer_tender_sources.mjs"),
+    type: "module",
+    apply: applyCustomerTenderSources,
+  },
+  {
+    version: "0053",
+    path: resolve(here, "migrations", "0053_secure_settings_pushplus_access_key.mjs"),
+    type: "module",
+    apply: applySecureSettingsPushplusAccessKey,
   },
 ];
 

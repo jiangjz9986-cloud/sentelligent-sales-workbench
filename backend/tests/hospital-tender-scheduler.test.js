@@ -43,6 +43,10 @@ function customers(count = 12) {
     name: index === 0 ? "胜利油田中心医院" : `医院${index + 1}`,
     region: "东营市",
     needs: index === 0 ? ["信息化"] : [],
+    tenderSources: index === 0 ? [
+      { id: "official", type: "hospital_official", label: "医院官网", url: "https://hospital.example.test/notices" },
+      { id: "county-platform", type: "public_resource", label: "嘉祥县平台", url: "https://trade.example.test/jiaxiang" },
+    ] : [],
     summary: "",
     opportunities: [],
     aliases: [],
@@ -107,6 +111,10 @@ describe("hospital tender scheduler", () => {
     assert.equal(collected.length, 200);
     assert.equal(collected[0].name, "胜利油田中心医院");
     assert.deepEqual(collected[0].aliases, ["信息化"]);
+    assert.deepEqual(collected[0].announcement_sources, [
+      { id: "official", type: "hospital_official", label: "医院官网", url: "https://hospital.example.test/notices" },
+      { id: "county-platform", type: "public_resource", label: "嘉祥县平台", url: "https://trade.example.test/jiaxiang" },
+    ]);
   });
 
   it("persists a source snapshot and advances stable ten-customer batches", async () => {

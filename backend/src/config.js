@@ -465,6 +465,8 @@ function validateProductionConfig(config, { explicitAllowedOrigins }) {
     config.aiPlatformAuthSecret,
     ...(config.aiPlatformAuthToken ? [config.aiPlatformAuthToken] : []),
     ...(config.hospitalTenderSyncToken ? [config.hospitalTenderSyncToken] : []),
+    ...(config.hospitalTenderPushplusToken ? [config.hospitalTenderPushplusToken] : []),
+    ...(config.hospitalTenderPushplusAccessKey ? [config.hospitalTenderPushplusAccessKey] : []),
     ...(config.opsAlertToken ? [config.opsAlertToken] : []),
   ];
   if (new Set(independentSecrets).size !== independentSecrets.length) {
@@ -899,6 +901,12 @@ export function loadConfig(
     ),
     hospitalTenderIntervalMinutes,
     hospitalTenderBatchSize,
+    hospitalTenderPushplusToken: String(
+      env.hospitalTenderPushplusToken ?? env.HOSPITAL_TENDER_PUSHPLUS_TOKEN ?? "",
+    ).trim(),
+    hospitalTenderPushplusAccessKey: String(
+      env.hospitalTenderPushplusAccessKey ?? env.HOSPITAL_TENDER_PUSHPLUS_ACCESS_KEY ?? "",
+    ).trim(),
     proactiveAssistantAutoRun: booleanValue(
       env.proactiveAssistantAutoRun ?? env.PROACTIVE_ASSISTANT_AUTO_RUN,
       nodeEnv === "production",

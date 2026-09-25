@@ -596,6 +596,10 @@ describe("sales workbench backend API", () => {
         opportunities: [],
         aliases: ["胶州医院别名"],
         tags: ["客户验收"],
+        tenderSources: [
+          { id: "hospital-source", type: "hospital_official", label: "医院采购公告", url: "https://hospital.example.test/notices" },
+          { id: "city-source", type: "public_resource", label: "胶州市公共资源交易平台", url: "https://procurement.example.test/jiaozhou" },
+        ],
       }),
     });
 
@@ -604,6 +608,10 @@ describe("sales workbench backend API", () => {
     assert.equal(createdCustomer.body.item.name, "胶州中医医院");
     assert.deepEqual(createdCustomer.body.item.aliases, ["胶州医院别名"]);
     assert.deepEqual(createdCustomer.body.item.tags, ["客户验收"]);
+    assert.deepEqual(createdCustomer.body.item.tenderSources, [
+      { id: "hospital-source", type: "hospital_official", label: "医院采购公告", url: "https://hospital.example.test/notices" },
+      { id: "city-source", type: "public_resource", label: "胶州市公共资源交易平台", url: "https://procurement.example.test/jiaozhou" },
+    ]);
     assert.equal(typeof createdCustomer.body.item.createdAt, "string");
     assert.equal(typeof createdCustomer.body.item.updatedAt, "string");
 
@@ -625,6 +633,7 @@ describe("sales workbench backend API", () => {
     assert.deepEqual(updatedCustomer.body.item.needs, ["未来规划初访", "补齐现有基础架构"]);
     assert.deepEqual(updatedCustomer.body.item.aliases, createdCustomer.body.item.aliases);
     assert.deepEqual(updatedCustomer.body.item.tags, createdCustomer.body.item.tags);
+    assert.deepEqual(updatedCustomer.body.item.tenderSources, createdCustomer.body.item.tenderSources);
     assert.equal(updatedCustomer.body.item.createdAt, createdCustomer.body.item.createdAt);
     const loadedCustomer = await request(`/api/customers/${createdCustomer.body.item.id}`);
     assert.equal(loadedCustomer.response.status, 200);

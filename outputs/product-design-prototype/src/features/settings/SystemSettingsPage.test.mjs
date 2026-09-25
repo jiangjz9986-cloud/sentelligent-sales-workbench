@@ -24,7 +24,7 @@ test("system settings renders one focused child page for each grouped settings r
   assert.match(shellSource, /<SystemSettingsPage[\s\S]*?section=\{settingsSection\}/);
 });
 
-test("notification settings expose read-only WeChat Clawbot runtime status", async () => {
+test("notification settings show the bookkeeping, tender PushPlus, and in-app channel split", async () => {
   const [source, styles] = await Promise.all([
     readFile(pagePath, "utf8"),
     readFile(stylesPath, "utf8"),
@@ -36,15 +36,26 @@ test("notification settings expose read-only WeChat Clawbot runtime status", asy
   assert.notEqual(notificationSection, "");
   assert.match(source, /\["notifications", "tender-schedule", "bookkeeping-log", "bookkeeping-categories"\]\.includes\(section\)/);
   assert.match(source, /readsNotifications \? read\("getWeixinBindingStatus"/);
-  assert.match(notificationSection, /data-notification-mode="read-only"/);
-  assert.match(notificationSection, /微信 Clawbot 通知状态/);
-  assert.match(notificationSection, /meta="只读"/);
+  assert.match(source, /readsNotifications \|\| readsTenderSchedule \? read\("getHospitalTenderHealth"/);
+  assert.match(notificationSection, /data-notification-mode="admin-configurable"/);
+  assert.match(notificationSection, /渠道职责与状态/);
+  assert.match(notificationSection, /meta="运行状态"/);
   assert.match(notificationSection, /meta="服务端管理"/);
-  assert.match(notificationSection, /服务端自动入队并按策略投递/);
-  assert.match(notificationSection, /保持微信 Clawbot 在线/);
-  assert.match(notificationSection, /服务端在投递前校验业务账号绑定、收件人和可用会话上下文/);
-  assert.doesNotMatch(notificationSection, /<(?:form|input|button)\b/u);
-  assert.doesNotMatch(source, /pushplus/iu);
+  assert.match(notificationSection, /微信 Clawbot（仅记账）/);
+  assert.match(notificationSection, /PushPlus 送达核验/);
+  assert.match(notificationSection, /微信 Clawbot（仅记账）/);
+  assert.match(notificationSection, /主动助手提醒统一进入站内通知中心/);
+  assert.match(notificationSection, /“已受理”不等于已送达/);
+  assert.match(notificationSection, /PushPlus 的提交、送达、失败或结果未知/);
+  assert.match(source, /requestHospitalTenderPushplusCredentials/);
+  assert.match(notificationSection, /data-testid="pushplus-credentials-form"/);
+  assert.match(notificationSection, /data-testid="pushplus-token-input"/);
+  assert.match(notificationSection, /data-testid="pushplus-access-key-input"/);
+  assert.match(notificationSection, /type="password"/);
+  assert.match(notificationSection, /页面不再读取明文/);
+  assert.match(notificationSection, /空白字段不会覆盖现有值/);
+  assert.match(source, /pushplusConfigured/);
+  assert.match(source, /deliveryVerification/);
   assert.match(styles, /\.settings-card-icon\.clawbot\s*\{/);
   assert.doesNotMatch(styles, /\.settings-card-icon\.pushplus\s*\{/i);
 });

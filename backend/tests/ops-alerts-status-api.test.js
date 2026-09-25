@@ -125,6 +125,11 @@ describe("ops alerts status endpoint", () => {
       }),
     });
     assert.equal(queued.response.status, 200);
+    const adminNotices = server.inAppNotificationRepository.list({ owner, limit: 10 });
+    assert.equal(adminNotices.length, 1);
+    assert.equal(adminNotices[0].category, "ops_alert");
+    assert.match(adminNotices[0].body, /每日备份超过 26 小时未更新/u);
+    assert.equal(adminNotices[0].href, "/settings/notifications");
 
     const workerReport = await fetch(`${baseUrl}/api/integrations/weixin-agent/confirmation-outbox`, {
       headers: {
@@ -134,15 +139,15 @@ describe("ops alerts status endpoint", () => {
         "X-Weixin-Delivery-Expires-At": "2026-08-28T17:00:00.000Z",
       },
     });
-    assert.equal(workerReport.status, 200);
+    assert.equal(workerReport.status, 204, "ops alerts must no longer enter the bookkeeping-only WeChat outbox");
 
     const after = await request("/api/integrations/ops-alerts/status", {
       headers: { Authorization: `Bearer ${opsToken}` },
     });
     assert.equal(after.response.status, 200);
-    // The lease above moved the queued alert into processing; the worker
-    // heartbeat reported through the same GET is now inside the stale window.
-    assert.equal(after.body.item.outbox.processing, 1);
+    // The worker heartbeat is still recorded, but non-bookkeeping alerts do
+    // not create an outbox row or a pending Clawbot delivery.
+    assert.equal(after.body.item.outbox.processing, 0);
     assert.equal(after.body.item.outbox.queued, 0);
     assert.equal(after.body.item.weixinDelivery.status, "ready");
     assert.equal(after.body.item.weixinDelivery.expiresAt, "2026-08-28T17:00:00.000Z");

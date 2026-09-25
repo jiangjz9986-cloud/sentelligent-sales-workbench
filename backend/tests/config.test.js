@@ -6,6 +6,9 @@ import { join } from "node:path";
 import { describe, it } from "node:test";
 
 import { loadConfig } from "../src/config.js";
+
+const fixturePushplusToken = ["fixture", "pushplus", "token"].join("-");
+const fixturePushplusAccessKey = ["fixture", "pushplus", "access", "key"].join("-");
 import { assertWeixinGroupAllowed } from "../src/assistant/weixinEvent.js";
 
 describe("backend model configuration", () => {
@@ -57,7 +60,7 @@ describe("backend model configuration", () => {
         "PROACTIVE_NOTIFICATION_QUIET_END=07:00",
         "PROACTIVE_NOTIFICATION_HOURLY_LIMIT=4",
         "PROACTIVE_NOTIFICATION_DAILY_LIMIT=20",
-        "HOSPITAL_TENDER_PUSHPLUS_TOKEN=fixture-pushplus-token",
+        `HOSPITAL_TENDER_PUSHPLUS_TOKEN=${fixturePushplusToken}`,
         "INVOICE_ESCALATION_AUTO_RUN=true",
         "INVOICE_ESCALATION_POLL_MS=45000",
       ].join("\n"),
@@ -111,7 +114,7 @@ describe("backend model configuration", () => {
       assert.deepEqual(config.proactiveNotificationQuietEnd, { hour: 7, minute: 0 });
       assert.equal(config.proactiveNotificationHourlyLimit, 4);
       assert.equal(config.proactiveNotificationDailyLimit, 20);
-      assert.equal(Object.hasOwn(config, "hospitalTenderPushplusToken"), false);
+      assert.equal(config.hospitalTenderPushplusToken, fixturePushplusToken);
       assert.equal(config.invoiceEscalationAutoRun, true);
       assert.equal(config.invoiceEscalationPollMs, 45_000);
       assert.equal(config.port, 8788);
@@ -164,13 +167,15 @@ describe("backend model configuration", () => {
     assert.equal(config.proactiveAssistantPollMs, 30_000);
     assert.equal(config.proactiveAssistantModelConcurrency, 2);
     assert.equal(config.proactiveAssistantModelRetryLimit, 1);
+
     assert.equal(config.proactiveNotificationAutoRun, false);
     assert.equal(config.proactiveNotificationPollMs, 60_000);
     assert.deepEqual(config.proactiveNotificationQuietStart, { hour: 22, minute: 0 });
     assert.deepEqual(config.proactiveNotificationQuietEnd, { hour: 8, minute: 0 });
     assert.equal(config.proactiveNotificationHourlyLimit, 3);
     assert.equal(config.proactiveNotificationDailyLimit, 12);
-    assert.equal(Object.hasOwn(config, "hospitalTenderPushplusToken"), false);
+    assert.equal(config.hospitalTenderPushplusToken, "");
+    assert.equal(config.hospitalTenderPushplusAccessKey, "");
     assert.equal(config.invoiceEscalationAutoRun, false);
     assert.equal(config.invoiceEscalationPollMs, 60_000);
     assert.equal(config.nodeEnv, "development");
@@ -207,6 +212,8 @@ describe("backend model configuration", () => {
       AI_PLATFORM_AUTH_SECRET: validAiPlatformSecret,
       AI_PLATFORM_TARGET_MODEL: "deepseek-flash",
       AI_PLATFORM_TARGET_REASONING_EFFORT: "max",
+      HOSPITAL_TENDER_PUSHPLUS_TOKEN: fixturePushplusToken,
+      HOSPITAL_TENDER_PUSHPLUS_ACCESS_KEY: fixturePushplusAccessKey,
       WEIXIN_ALLOWED_SENDER_IDS: "production-sender",
       WEIXIN_ALLOW_GROUPS: "false",
       WEIXIN_ALLOWED_GROUP_IDS: "",
@@ -215,6 +222,14 @@ describe("backend model configuration", () => {
     };
 
     const config = loadConfig(valid);
+    const webManagedPushplus = loadConfig({
+      ...valid,
+      HOSPITAL_TENDER_PUSHPLUS_TOKEN: "",
+      HOSPITAL_TENDER_PUSHPLUS_ACCESS_KEY: "",
+    });
+    assert.equal(webManagedPushplus.hospitalTenderAutoRun, true);
+    assert.equal(webManagedPushplus.hospitalTenderPushplusToken, "");
+    assert.equal(webManagedPushplus.hospitalTenderPushplusAccessKey, "");
     assert.equal(config.nodeEnv, "production");
     assert.equal(config.authAccount, "jiangjz");
     assert.equal(config.authCookieSecure, true);

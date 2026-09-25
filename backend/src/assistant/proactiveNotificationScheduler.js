@@ -24,7 +24,7 @@ function quietEnd(now, startHour, endHour, startMinute = 0, endMinute = 0) {
 }
 
 export function createProactiveNotificationScheduler({
-  db = null,
+  db = null, inAppNotificationRepository = null,
   suggestionRepository, notificationRepository, outboxRepository,
   resolveDeliveries = () => [],
   clock = () => new Date(), pollMs = 60_000, quietStartHour = 22, quietStartMinute = 0, quietEndHour = 8, quietEndMinute = 0,
@@ -84,7 +84,18 @@ export function createProactiveNotificationScheduler({
     for (const owner of owners) {
       for (let offset = 0; offset < 10_000; offset += 100) {
         const page = suggestionRepository.list({ owner, status: "pending", limit: 100, offset });
-        for (const suggestion of page) notificationRepository.ensure({ owner, suggestion });
+        for (const suggestion of page) {
+          notificationRepository.ensure({ owner, suggestion });
+          inAppNotificationRepository?.ensure({
+            owner,
+            category: "proactive_assistant",
+            idempotencyKey: `proactive:${suggestion.id}:v${suggestion.version}`,
+            title: `主动建议：${String(suggestion.title).slice(0, 180)}`,
+            body: String(suggestion.title).slice(0, 10_000),
+            href: "/",
+            priority: Number.isSafeInteger(suggestion.priority) ? suggestion.priority : 0,
+          });
+        }
         if (page.length < 100) break;
       }
     }

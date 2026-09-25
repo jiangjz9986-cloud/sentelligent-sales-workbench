@@ -7,7 +7,6 @@ import { afterEach, beforeEach, describe, it } from "node:test";
 import { hashPassword } from "../src/auth/password.js";
 import { createServer } from "../src/server.js";
 import { openDatabase } from "../src/db.js";
-import { shortcutBookkeepingConversationId } from "../src/weixin/bookkeepingDeliveryScope.js";
 
 // v0.9.2：digest/run 归位 admin 门禁——账号须能建 users 行（bootstrap admin 正则
 // 不含连字符），改用无连字符账号。
@@ -151,22 +150,20 @@ describe("digest HTTP surface", () => {
     const status = await request("/api/digest/status", { headers: { Cookie: session.cookie } });
     assert.equal(status.body.markers.daily.enqueued, true);
     withDb((db) => {
-      assert.equal(db.prepare("SELECT COUNT(*) AS count FROM weixin_confirmation_outbox").get().count, 1);
+      const notices = db.prepare("SELECT * FROM in_app_notifications WHERE owner = $owner").all({ $owner: OWNER });
+      assert.equal(notices.length, 1);
+      assert.equal(notices[0].category, "daily_digest");
+      assert.match(notices[0].body, /首站 日照中医医院/u);
+      assert.equal(db.prepare("SELECT COUNT(*) AS count FROM weixin_confirmation_outbox").get().count, 0);
       const audit = db.prepare("SELECT * FROM audit_logs WHERE action = 'digest.daily.sent'").all();
       assert.equal(audit.length, 1);
       assert.equal(audit[0].actor, "system:daily-digest");
       assert.equal(JSON.parse(audit[0].metadata_json).manual, true);
     });
 
-    // The delivery worker leases the row and receives the rendered card plus
-    // the v0.9.3 multi-target fields.
+    // Digests are now durable in-app notices, not Clawbot outbox messages.
     const leased = await request("/api/integrations/weixin-agent/confirmation-outbox", { headers: workerHeaders() });
-    assert.equal(leased.response.status, 200);
-    assert.ok(leased.body.leaseToken);
-    assert.equal(leased.body.item.targetSenderId, "sender-1");
-    assert.equal(leased.body.item.deliveryScope, shortcutBookkeepingConversationId(OWNER, "sender-1"));
-    assert.ok(leased.body.item.message.startsWith("【小小晨报】08-28 周五"));
-    assert.ok(leased.body.item.message.includes("■ 今日行程（1 站）"));
+    assert.equal(leased.response.status, 204);
   });
 
   it("sends the scheduled digest via runOnce once the gate opens", async () => {
@@ -177,9 +174,11 @@ describe("digest HTTP surface", () => {
     const second = await server.dailyDigestScheduler.runOnce();
     assert.deepEqual(second.daily.map((item) => [item.owner, item.status]), [[OWNER, "already_sent"]]);
     withDb((db) => {
-      const rows = db.prepare("SELECT payload_json FROM weixin_confirmation_outbox").all();
+      const rows = db.prepare("SELECT category, idempotency_key FROM in_app_notifications WHERE owner = $owner").all({ $owner: OWNER });
       assert.equal(rows.length, 1);
-      assert.equal(JSON.parse(rows[0].payload_json).kind, "daily_digest");
+      assert.equal(rows[0].category, "daily_digest");
+      assert.match(rows[0].idempotency_key, /^daily-digest:/u);
+      assert.equal(db.prepare("SELECT COUNT(*) AS count FROM weixin_confirmation_outbox").get().count, 0);
     });
   });
 });

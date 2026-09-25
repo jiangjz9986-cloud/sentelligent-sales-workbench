@@ -19,7 +19,7 @@ const WRITABLE_FIELDS = Object.freeze({
   customer: Object.freeze([
     "name", "region", "type", "level", "contact", "relation", "stakeholders",
     "decisionChain", "historyProjects", "infrastructure", "syncPreview", "budget", "summary",
-    "needs", "risks", "opportunities",
+    "needs", "risks", "opportunities", "tenderSources",
   ]),
   opportunity: Object.freeze([
     "customerId", "name", "customer", "stage", "amount", "probability", "days",
@@ -518,6 +518,41 @@ function assertProactiveNotificationPage(value, path = "proactiveNotifications")
   return {
     items: page.items.map((item, index) => assertProactiveNotification(item, `${path}.items[${index}]`)),
     total: page.total,
+  };
+}
+
+function assertInAppNotificationPage(value, path = "inAppNotifications") {
+  const page = apiObject(value, path);
+  if (!Array.isArray(page.items)) throw new TypeError(`${path}.items: expected array`);
+  for (const [name, count] of [["total", page.total], ["unreadCount", page.unreadCount]]) {
+    if (!Number.isSafeInteger(count) || count < 0) throw new TypeError(`${path}.${name}: expected non-negative integer`);
+  }
+  const categories = new Set(["daily_digest", "action_reminder", "invoice_escalation", "ops_alert", "proactive_assistant"]);
+  return {
+    items: page.items.map((raw, index) => {
+      const itemPath = `${path}.items[${index}]`;
+      const item = apiObject(raw, itemPath);
+      const category = requiredApiString(item.category, `${itemPath}.category`);
+      if (!categories.has(category)) throw new TypeError(`${itemPath}.category: invalid`);
+      const href = requiredApiString(item.href, `${itemPath}.href`);
+      if (!href.startsWith("/") || href.startsWith("//") || href.includes("\\")) throw new TypeError(`${itemPath}.href: invalid`);
+      const readAt = item.readAt == null ? null : requiredApiString(item.readAt, `${itemPath}.readAt`);
+      if (item.unread !== (readAt === null)) throw new TypeError(`${itemPath}.unread: inconsistent with readAt`);
+      if (!Number.isSafeInteger(item.priority) || item.priority < 0 || item.priority > 100) throw new TypeError(`${itemPath}.priority: invalid`);
+      return {
+        id: requiredApiString(item.id, `${itemPath}.id`),
+        category,
+        title: requiredApiString(item.title, `${itemPath}.title`),
+        body: requiredApiString(item.body, `${itemPath}.body`),
+        href,
+        priority: item.priority,
+        createdAt: requiredApiString(item.createdAt, `${itemPath}.createdAt`),
+        readAt,
+        unread: item.unread,
+      };
+    }),
+    total: page.total,
+    unreadCount: page.unreadCount,
   };
 }
 
@@ -1527,6 +1562,36 @@ export function createSalesWorkbenchApi({ baseUrl, fetchImpl = fetch, onUnauthor
         body: "{}",
       });
       return assertProactiveNotification(response?.item, "proactiveNotification.item");
+    },
+
+    async getInAppNotifications({ limit, offset, unreadOnly = false, signal } = {}) {
+      const response = await requestApi(queryPath("/api/notifications", {
+        limit,
+        offset,
+        unreadOnly: unreadOnly ? "true" : undefined,
+      }), { signal });
+      return assertInAppNotificationPage(response, "inAppNotifications");
+    },
+
+    async markInAppNotificationRead(notificationId) {
+      const id = requiredApiString(notificationId, "inAppNotificationId");
+      const response = await requestApi(`/api/notifications/${encodeURIComponent(id)}/read`, {
+        method: "POST",
+        body: "{}",
+      });
+      return assertInAppNotificationPage({ items: [response?.item], total: 1, unreadCount: 0 }, "inAppNotificationRead").items[0];
+    },
+
+    async markAllInAppNotificationsRead() {
+      const response = await requestApi("/api/notifications/read-all", {
+        method: "POST",
+        body: "{}",
+      });
+      const item = apiObject(response?.item, "inAppNotificationReadAll.item");
+      for (const field of ["updatedCount", "unreadCount"]) {
+        if (!Number.isSafeInteger(item[field]) || item[field] < 0) throw new TypeError(`inAppNotificationReadAll.${field}: invalid`);
+      }
+      return item;
     },
 
     async updateProactiveLifecycle(proactiveId, payload = {}, idempotencyKey) {
@@ -2656,6 +2721,15 @@ export function createSalesWorkbenchApi({ baseUrl, fetchImpl = fetch, onUnauthor
 
     async getSecuritySettings() {
       const response = await requestApi("/api/settings/security");
+      return response.item;
+    },
+
+    async requestHospitalTenderPushplusCredentials(method = "GET", payload = null) {
+      if (!["GET", "PUT", "DELETE"].includes(method)) throw new TypeError("Invalid method");
+      const response = await requestApi("/api/settings/pushplus-credentials", {
+        method,
+        ...(payload === null ? {} : { body: JSON.stringify(payload) }),
+      });
       return response.item;
     },
 

@@ -315,7 +315,7 @@ function hasWeixinBookkeepingConfirmationConfiguration(environment) {
   );
 }
 
-function hasHospitalTenderSchedulerConfiguration(environment, database) {
+function hasHospitalTenderSchedulerConfiguration(environment) {
   const schedulerMode = environment.HOSPITAL_TENDER_AUTO_RUN;
   return (
     (schedulerMode === "true" || schedulerMode === "false") &&
@@ -351,6 +351,8 @@ function hasProductionModelConfiguration(environment) {
     environment.ASSISTANT_CONFIRMATION_SECRET,
     environment.SETTINGS_ENCRYPTION_KEY,
     environment.HOSPITAL_TENDER_SYNC_TOKEN,
+    environment.HOSPITAL_TENDER_PUSHPLUS_TOKEN,
+    environment.HOSPITAL_TENDER_PUSHPLUS_ACCESS_KEY,
   ]
     .filter((value) => typeof value === "string" && value.length > 0)
     .every((value) => value !== modelKey);
@@ -377,7 +379,6 @@ function hasNoRetiredBookkeepingVariables(environment) {
     "SHORTCUT_WEBHOOK_OWNER",
     "SHORTCUT_WEBHOOK_RATE_LIMIT",
     "SHORTCUT_WEBHOOK_WINDOW_MS",
-    "HOSPITAL_TENDER_PUSHPLUS_TOKEN",
   ].every((name) => !String(environment?.[name] ?? "").trim());
 }
 
@@ -2707,10 +2708,10 @@ export async function runProductionPreflight({
       "env.production",
       environmentResult.error === null &&
         environment.NODE_ENV === "production" &&
-        hasHospitalTenderSchedulerConfiguration(environment, database),
-      "Environment is explicitly production with the fixed 60-minute/10-customer tender schedule; automatic execution may be explicitly enabled or disabled and all notifications use the bound WeChat Clawbot outbox.",
+        hasHospitalTenderSchedulerConfiguration(environment),
+      "Environment is production with the fixed tender schedule; PushPlus credentials are managed through encrypted admin settings and tender execution stays gated until both are configured.",
       environmentResult.error ??
-        "NODE_ENV must be production, hospital tender auto-run must be explicitly true or false with the fixed 60-minute/10-customer schedule, and PushPlus must not be used as a notification dependency.",
+        "NODE_ENV must be production and tender auto-run must be explicitly true or false with the fixed 60-minute/10-customer schedule.",
     ),
     makeCheck(
       "env.authRequired",
@@ -2771,8 +2772,8 @@ export async function runProductionPreflight({
     makeCheck(
       "env.retiredBookkeepingIntegrations",
       hasNoRetiredBookkeepingVariables(environment),
-      "Retired Shortcut, iCost, and PushPlus notification variables are absent from the production environment.",
-      "Remove ICOST_WEBHOOK_*, SHORTCUT_WEBHOOK_*, SHORTCUT_WEIXIN_CONFIRMATION_ENABLED, and HOSPITAL_TENDER_PUSHPLUS_TOKEN before release.",
+      "Retired Shortcut and iCost variables are absent; PushPlus is allowed only as the hospital-tender channel.",
+      "Remove ICOST_WEBHOOK_*, SHORTCUT_WEBHOOK_*, and SHORTCUT_WEIXIN_CONFIRMATION_ENABLED; do not reuse PushPlus credentials for other notification categories.",
     ),
     makeCheck(
       "env.invoiceExtraction",

@@ -926,7 +926,7 @@ async function runViewport(cdp, url, backendUrl, viewport, historicalSolution, h
       if (${viewport.fullFlow ? "true" : "false"}) {
         const cardInteractions = {};
         const openOverview = async () => {
-          document.querySelectorAll('.nav-item')[0]?.click();
+          document.querySelector('[data-testid="nav-overview"]')?.click();
           await waitUntil(() => document.querySelector('[data-testid="page-overview"]'), 5000);
         };
         const clickCardOpening = async (selector, text, expectedSelector, expectedText) => {
@@ -1218,7 +1218,7 @@ async function runViewport(cdp, url, backendUrl, viewport, historicalSolution, h
         window.__qaAiSuggestions = aiSuggestions;
       }
 
-      document.querySelectorAll('.nav-item')[1]?.click();
+      document.querySelector('[data-testid="nav-quick"]')?.click();
       await waitUntil(() => document.querySelector('[data-testid="page-quick"]'));
 
       if (${viewport.fullFlow ? "true" : "false"}) {
@@ -1420,11 +1420,39 @@ async function runViewport(cdp, url, backendUrl, viewport, historicalSolution, h
         await waitUntil(() => document.querySelector('[data-testid="settings-notifications-section"]'), 5000);
         const notificationSettingsSection = document.querySelector('[data-testid="settings-notifications-section"]');
         const notificationSettingsText = notificationSettingsSection?.textContent ?? '';
-        settingsIa.notifications = window.location.pathname === '/settings/notifications'
-          && notificationSettingsText.includes('微信 Clawbot')
-          && notificationSettingsText.includes('只读')
-          && notificationSettingsText.includes('服务端管理')
-          && !notificationSettingsSection?.querySelector('form, input, button');
+        await waitUntil(() => document.querySelector('[data-testid="pushplus-credentials-form"]'), 5000);
+        const firstCredential = ['qa', 'ui', 'pushplus', 'token', 'only'].join('-');
+        const verificationCredential = ['qa', 'ui', 'pushplus', 'access-key', 'only'].join('-');
+        const setPasswordInput = (testId, value) => {
+          const input = document.querySelector('[data-testid="' + testId + '"]');
+          if (!input || input.type !== 'password') throw new Error('Missing password input ' + testId);
+          Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(input, value);
+          input.dispatchEvent(new Event('input', { bubbles: true }));
+        };
+        setPasswordInput('pushplus-token-input', firstCredential);
+        setPasswordInput('pushplus-access-key-input', verificationCredential);
+        document.querySelector('[data-testid="pushplus-credentials-form"]')?.requestSubmit();
+        await waitUntil(() => document.body.textContent.includes('PushPlus 凭据已加密保存'), 5000);
+        const savedUiText = notificationSettingsSection?.textContent ?? '';
+        settingsIa.pushplusWebConfig = window.location.pathname === '/settings/notifications'
+          && savedUiText.includes('微信 Clawbot')
+          && savedUiText.includes('服务端管理')
+          && !savedUiText.includes(firstCredential)
+          && !savedUiText.includes(verificationCredential)
+          && document.body.textContent.includes('页面不会再次显示明文')
+          && document.querySelector('[data-testid="pushplus-token-input"]')?.value === ''
+          && document.querySelector('[data-testid="pushplus-access-key-input"]')?.value === '';
+        document.querySelector('[data-testid="subnav-settings"]')?.click();
+        await waitUntil(() => document.querySelector('[data-testid="settings-security-section"]'), 5000);
+        document.querySelector('[data-testid="subnav-settings-notifications"]')?.click();
+        await waitUntil(() => document.querySelector('[data-testid="pushplus-credentials-form"]'), 5000);
+        const persistedPushplusForm = document.querySelector('[data-testid="pushplus-credentials-form"]');
+        settingsIa.pushplusReloadedMasked = persistedPushplusForm?.querySelector('[data-testid="pushplus-token-input"]')?.value === ''
+          && persistedPushplusForm?.querySelector('[data-testid="pushplus-access-key-input"]')?.value === ''
+          && [...persistedPushplusForm.querySelectorAll('button')].some((button) => button.textContent.includes('清除凭据'))
+          && !persistedPushplusForm.textContent.includes(firstCredential)
+          && !persistedPushplusForm.textContent.includes(verificationCredential);
+        settingsIa.notifications = settingsIa.pushplusWebConfig && settingsIa.pushplusReloadedMasked;
         document.querySelector('[data-testid="subnav-settings-tender-schedule"]')?.click();
         await waitUntil(() => document.querySelector('[data-testid="settings-tender-schedule-section"]'), 5000);
         const tenderScheduleText = document.querySelector('[data-testid="settings-tender-schedule-section"]')?.textContent ?? '';
@@ -1471,6 +1499,15 @@ async function runViewport(cdp, url, backendUrl, viewport, historicalSolution, h
           && getEditorControl(customerEditor, '客户名称')?.value === ''
           && customerEditor.textContent.includes('创建客户');
         setEditorField(customerEditor, '客户名称', '测试集成客户');
+        clickEditorButton(customerEditor, '创建客户');
+        await waitUntil(() => customerEditor.querySelector('.editor-status')?.textContent?.includes('请填写医院官网公告页'), 3000);
+        const customerTenderSourcesRequired = customerEditor.querySelector('.editor-status')?.textContent?.includes('请填写医院官网公告页') ?? false;
+        setEditorField(customerEditor, '医院官网公告页 1 地址', 'https://hospital.example.test/notices');
+        setEditorField(customerEditor, '公共资源交易平台公告页 1 地址', 'https://procurement.example.test/notices');
+        clickEditorButton(customerEditor, '添加平台入口');
+        await waitUntil(() => [...customerEditor.querySelectorAll('.form-field span')]
+          .some((label) => label.textContent?.trim() === '公共资源交易平台公告页 2 地址'), 3000);
+        setEditorField(customerEditor, '公共资源交易平台公告页 2 地址', 'https://county-procurement.example.test/notices');
         setEditorField(customerEditor, '区域', '青岛测试');
         setEditorField(customerEditor, '类型', '集成测试');
         setEditorField(customerEditor, '级别', '新建线索');
@@ -1482,8 +1519,13 @@ async function runViewport(cdp, url, backendUrl, viewport, historicalSolution, h
         const customerCreated = document.querySelector('[data-testid="page-customer"]')?.textContent?.includes('测试集成客户') ?? false;
         document.querySelector('[data-testid="customer-edit-detail"]')?.click();
         await waitUntil(() => document.querySelector('[data-testid="customer-editor"]'), 5000);
-        const originalCustomerLevel = getEditorControl(document.querySelector('[data-testid="customer-editor"]'), '级别')?.value;
-        setEditorField(document.querySelector('[data-testid="customer-editor"]'), '级别', '取消不应保存');
+        const customerSourceEditor = document.querySelector('[data-testid="customer-editor"]');
+        const customerTenderSourcesSaved =
+          getEditorControl(customerSourceEditor, '医院官网公告页 1 地址')?.value === 'https://hospital.example.test/notices'
+          && getEditorControl(customerSourceEditor, '公共资源交易平台公告页 1 地址')?.value === 'https://procurement.example.test/notices'
+          && getEditorControl(customerSourceEditor, '公共资源交易平台公告页 2 地址')?.value === 'https://county-procurement.example.test/notices';
+        const originalCustomerLevel = getEditorControl(customerSourceEditor, '级别')?.value;
+        setEditorField(customerSourceEditor, '级别', '取消不应保存');
         document.querySelector('[data-testid="customer-cancel-edit"]')?.click();
         await waitUntil(
           () => document.querySelector('[data-testid="customer-detail-view"]') && !document.querySelector('[data-testid="customer-editor"]'),
@@ -1515,6 +1557,8 @@ async function runViewport(cdp, url, backendUrl, viewport, historicalSolution, h
         setEditorField(document.querySelector('[data-testid="customer-editor"]'), '客户名称', '测试删除客户');
         setEditorField(document.querySelector('[data-testid="customer-editor"]'), '区域', '删除验证');
         setEditorField(document.querySelector('[data-testid="customer-editor"]'), '类型', '集成测试');
+        setEditorField(document.querySelector('[data-testid="customer-editor"]'), '医院官网公告页 1 地址', 'https://hospital.example.test/delete-notices');
+        setEditorField(document.querySelector('[data-testid="customer-editor"]'), '公共资源交易平台公告页 1 地址', 'https://procurement.example.test/delete-notices');
         document.querySelector('[data-testid="customer-save-edit"]')?.click();
         await waitUntil(
           () => document.querySelector('[data-testid="page-customer"] h1')?.textContent?.includes('测试删除客户')
@@ -1615,7 +1659,9 @@ async function runViewport(cdp, url, backendUrl, viewport, historicalSolution, h
         const kanbanDynamicOpportunityOpened = document.querySelector('[data-testid="page-opportunity"] h1')?.textContent?.includes('测试集成客户规划调研') ?? false;
         window.__qaEdit = {
           customerCreateStartsBlank,
+          customerTenderSourcesRequired,
           customerCreated,
+          customerTenderSourcesSaved,
           customerCancelPreserved,
           customerSaveClosedEditor,
           customerUpdated,
@@ -3748,6 +3794,8 @@ async function main() {
         assert.equal(result.actionFlow.detailViewOpened, true, "desktop action page should open detail as a sub view");
         assert.equal(result.editFlow.customerCreateStartsBlank, true, "desktop customer create button should open a blank customer editor directly");
         assert.equal(result.editFlow.customerCreated, true, "desktop flow should create and update a customer through the UI");
+        assert.equal(result.editFlow.customerTenderSourcesRequired, true, "new customers should require both official source categories");
+        assert.equal(result.editFlow.customerTenderSourcesSaved, true, "customer source URLs should persist through the API");
         assert.equal(result.editFlow.customerCancelPreserved, true, "desktop customer cancel should discard local edits");
         assert.equal(result.editFlow.customerSaveClosedEditor, true, "desktop customer save should return to read-only detail");
         assert.equal(result.editFlow.customerUpdated, true, "desktop customer save should persist and reload the edited value");
@@ -3902,7 +3950,7 @@ async function main() {
         assert.equal(result.settingsIa.security, true, "desktop system settings should open the focused security and AI page");
         assert.equal(result.settingsIa.primaryHighlighted, true, "desktop settings child pages should keep system settings highlighted");
         assert.equal(result.settingsIa.weixin, true, "desktop WeChat settings child should preserve the complete binding controls");
-        assert.equal(result.settingsIa.notifications, true, "desktop notification settings child should expose read-only WeChat Clawbot status");
+        assert.equal(result.settingsIa.notifications, true, "desktop notification settings should save and reload masked PushPlus credentials from the admin web form");
         assert.equal(result.settingsIa.tenderSchedule, true, "desktop tender scheduler settings child should expose fixed policy and run controls");
         assert.equal(result.aiSuggestions.customer, true, "desktop customer page should generate an AI suggestion through the UI");
         assert.equal(result.aiSuggestions.opportunity, true, "desktop opportunity page should generate an AI suggestion through the UI");

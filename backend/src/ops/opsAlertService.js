@@ -1,8 +1,5 @@
 // Machine-facing ops-alert intake. Validation is fail-closed (unknown fields
-// rejected), storm control is the hour-keyed outbox idempotency key, and the
-// WeChat outbox is the only external channel. Delivery readiness is deliberately
-// not consulted here: a bound conversation must retain alerts durably while the
-// provider context is temporarily unavailable or expired.
+// rejected), and the persisted notification adapter owns idempotency.
 
 import { HttpError } from "../http/errors.js";
 
@@ -62,6 +59,7 @@ function validateAlertInput(body) {
 export function createOpsAlertService({
   outboxRepository,
   resolveDeliveries,
+  deliveryMode = "weixin_outbox",
   recordAudit = null,
   clock = () => new Date(),
 } = {}) {
@@ -102,14 +100,14 @@ export function createOpsAlertService({
 
     let item;
     let delivery;
-    // 目标=active admin 绑定（告警非订阅内容，无视 digest_enabled）；幂等键
-    // 加 owner 后缀。没有绑定时明确失败，调用方不得旁路到其他通知提供方。
+    // 运维告警进入 active admin 的站内通知中心，不依赖微信绑定或订阅设置。
+    // 幂等键按 owner 隔离；没有 active admin 时明确失败。
     let targets = [];
     try {
       targets = (resolveDeliveries() ?? [])
         .map((target) => ({
           owner: String(target?.account ?? target?.owner ?? "").trim(),
-          conversationId: String(target?.conversationId ?? "").trim(),
+          conversationId: String(target?.conversationId ?? "in-app").trim(),
         }))
         .filter((target) => target.owner && target.conversationId);
     } catch {
@@ -140,9 +138,9 @@ export function createOpsAlertService({
       item = firstQueued
         ? { id: firstQueued.id, status: firstQueued.status, replayed: !anyNew }
         : { id: null, status: "deduplicated", replayed: true };
-      delivery = "weixin_outbox";
+      delivery = deliveryMode;
     } else {
-      throw new HttpError(503, "OPS_ALERT_DELIVERY_UNAVAILABLE", "No bound WeChat ops alert delivery is available");
+      throw new HttpError(503, "OPS_ALERT_DELIVERY_UNAVAILABLE", "No active admin in-app notification recipient is available");
     }
 
     try {

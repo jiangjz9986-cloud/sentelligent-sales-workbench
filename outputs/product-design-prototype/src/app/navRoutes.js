@@ -5,6 +5,7 @@
 
 export const ROUTE_BY_ACTIVE = Object.freeze({
   overview: Object.freeze({ page: "overview", mode: "index" }),
+  notifications: Object.freeze({ page: "notifications", mode: "index" }),
   quick: Object.freeze({ page: "quick-records", mode: "new" }),
   customer: Object.freeze({ page: "customers", mode: "list" }),
   "hospital-tenders": Object.freeze({ page: "hospital-tenders", mode: "index" }),
@@ -28,6 +29,7 @@ export const ROUTE_BY_ACTIVE = Object.freeze({
 
 export const ACTIVE_BY_ROUTE_PAGE = Object.freeze({
   overview: "overview",
+  notifications: "notifications",
   "quick-records": "quick",
   customers: "customer",
   "hospital-tenders": "hospital-tenders",

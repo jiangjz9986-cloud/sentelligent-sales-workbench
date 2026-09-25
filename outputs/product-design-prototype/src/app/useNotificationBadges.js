@@ -27,6 +27,7 @@ export function useNotificationBadges({
   active,
 }) {
   const [polledSummary, setPolledSummary] = useState(null);
+  const [polledUnreadCount, setPolledUnreadCount] = useState(0);
   const summary = polledSummary ?? overviewSummary;
 
   useEffect(() => {
@@ -43,8 +44,14 @@ export function useNotificationBadges({
     async function poll() {
       if (document.visibilityState !== "visible") return;
       try {
-        const next = await apiClient.getDashboardSummary();
-        if (!cancelled) setPolledSummary(next);
+        const [next, notifications] = await Promise.all([
+          apiClient.getDashboardSummary(),
+          apiClient.getInAppNotifications?.({ limit: 1 }),
+        ]);
+        if (!cancelled) {
+          setPolledSummary(next);
+          setPolledUnreadCount(notifications?.unreadCount ?? 0);
+        }
       } catch {
         // Keep the last badge values when polling fails.
       }
@@ -87,6 +94,7 @@ export function useNotificationBadges({
       tenderHigh,
       morning,
       badgeMore: tenderHigh + (todos.overdueCount ?? 0),
+      inAppUnread: polledUnreadCount,
     };
-  }, [summary, active]);
+  }, [summary, active, polledUnreadCount]);
 }

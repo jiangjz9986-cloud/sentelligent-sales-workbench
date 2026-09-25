@@ -103,7 +103,7 @@ import {
   createInvoiceRepository,
 } from "./travelExpense/invoiceRepository.js";
 import { createInvoiceEscalationGapRepository } from "./travelExpense/invoiceEscalationGapRepository.js";
-import { createInvoiceEscalationOutboxRenderer } from "./travelExpense/invoiceEscalation.js";
+import { renderInvoiceEscalationMessage } from "./travelExpense/invoiceEscalation.js";
 import { createInvoiceEscalationScheduler } from "./travelExpense/invoiceEscalationScheduler.js";
 import { withDocumentBlobWritePreflight } from "./travelExpense/documentBlobStore.js";
 import {
@@ -129,6 +129,8 @@ import { AmapServiceError, createAmapClient } from "./maps/amapClient.js";
 import { createMockAmapClient } from "./maps/amapMockClient.js";
 import { OPS_ALERT_MAX_QUEUE_AGE_MS } from "./ops/opsAlertMessage.js";
 import { createOpsAlertService } from "./ops/opsAlertService.js";
+import { createInAppNotificationRepository } from "./notifications/inAppNotificationRepository.js";
+import { createInAppDeliveryAdapter } from "./notifications/inAppDelivery.js";
 import {
   claimIdempotency,
   completeIdempotency,
@@ -188,7 +190,6 @@ import { createProactiveSuggestionRepository } from "./assistant/proactiveSugges
 import { createProactiveConfirmationPreviewRepository } from "./assistant/proactiveConfirmationRepository.js";
 import { createProactiveNotificationRepository } from "./assistant/proactiveNotificationRepository.js";
 import { createProactiveNotificationScheduler } from "./assistant/proactiveNotificationScheduler.js";
-import { renderProactiveNotificationMessage } from "./assistant/proactiveNotificationMessage.js";
 import { createCustomerProactiveSubjectService } from "./assistant/customerProactiveSubjectService.js";
 import {
   createCustomerAssistantAdapter,
@@ -261,6 +262,8 @@ import {
   ASR_SETTING_KEY,
   createSecureSettingsRepository,
   DEEPSEEK_SETTING_KEY,
+  HOSPITAL_TENDER_PUSHPLUS_ACCESS_KEY_SETTING_KEY,
+  HOSPITAL_TENDER_PUSHPLUS_TOKEN_SETTING_KEY,
 } from "./settings/repository.js";
 import { isValidSettingsEncryptionKey, maskSecret } from "./settings/secretBox.js";
 import {
@@ -270,7 +273,8 @@ import {
   serializeHospitalTenderSource,
 } from "./hospitalTender/sync.js";
 import { createInternalHospitalTenderRunner } from "./hospitalTender/internalRunner.js";
-import { createHospitalTenderWeixinNotifier } from "./hospitalTender/weixinNotifier.js";
+import { createHospitalTenderPushplusDeliveryRepository } from "./hospitalTender/pushplusDeliveryRepository.js";
+import { createHospitalTenderPushplusNotifier } from "./hospitalTender/pushplusNotifier.js";
 import {
   partialSchema,
   requestSchemas,
@@ -3647,6 +3651,30 @@ export function createServer(options = {}) {
       ? { idFactory: options.hospitalTenderSchedulerIdFactory }
       : {}),
   });
+  const hospitalTenderPushplusDeliveryRepository = options.hospitalTenderPushplusDeliveryRepository
+    ?? createHospitalTenderPushplusDeliveryRepository(db, {
+      clock: options.hospitalTenderPushplusClock ?? (() => new Date()),
+      ...(options.hospitalTenderPushplusIdFactory ? { idFactory: options.hospitalTenderPushplusIdFactory } : {}),
+    });
+  hospitalTenderPushplusDeliveryRepository.markInterruptedAttemptsUncertain();
+  const resolveHospitalTenderPushplusToken = () => secureSettingsRepository
+    ? secureSettingsRepository.resolveSecret(HOSPITAL_TENDER_PUSHPLUS_TOKEN_SETTING_KEY, config.hospitalTenderPushplusToken)
+    : config.hospitalTenderPushplusToken;
+  const resolveHospitalTenderPushplusAccessKey = () => secureSettingsRepository
+    ? secureSettingsRepository.resolveSecret(HOSPITAL_TENDER_PUSHPLUS_ACCESS_KEY_SETTING_KEY, config.hospitalTenderPushplusAccessKey)
+    : config.hospitalTenderPushplusAccessKey;
+  const hasHospitalTenderPushplusCredentials = () => Boolean(
+    String(resolveHospitalTenderPushplusToken() ?? "").trim()
+      && String(resolveHospitalTenderPushplusAccessKey() ?? "").trim(),
+  );
+  const hospitalTenderPushplusNotifier = options.hospitalTenderPushplusNotifier
+    ?? createHospitalTenderPushplusNotifier({
+      tokenProvider: resolveHospitalTenderPushplusToken,
+      accessKeyProvider: resolveHospitalTenderPushplusAccessKey,
+      deliveryRepository: hospitalTenderPushplusDeliveryRepository,
+      fetchImpl: options.pushplusFetchImpl ?? options.fetchImpl ?? fetch,
+      clock: options.hospitalTenderPushplusClock ?? (() => new Date()),
+    });
   const secureSettingMetadata = (key, fallback = "") => {
     const stored = secureSettingsRepository?.has(key) ?? false;
     if (stored) {
@@ -3682,9 +3710,12 @@ export function createServer(options = {}) {
       fallbackSuppressed: false,
     };
   };
-  // WeChat "小小" is the only tender-notification channel. The
-  // shortcut-bookkeeping runtime and outbox repository are declared later in
-  // this scope, so readiness and the notifier itself resolve lazily at call time.
+  const hospitalTenderPushplusSettingsMetadata = () => ({
+    token: secureSettingMetadata(HOSPITAL_TENDER_PUSHPLUS_TOKEN_SETTING_KEY, config.hospitalTenderPushplusToken),
+    accessKey: secureSettingMetadata(HOSPITAL_TENDER_PUSHPLUS_ACCESS_KEY_SETTING_KEY, config.hospitalTenderPushplusAccessKey),
+  });
+  // PushPlus is reserved for tender-monitor notices. The shortcut-bookkeeping
+  // runtime and WeChat outbox are declared later in this scope.
   const weixinDeliveryEnabled = () => {
     try {
       return Boolean(shortcutBookkeepingAssistantRuntime?.ready);
@@ -3692,59 +3723,17 @@ export function createServer(options = {}) {
       return false;
     }
   };
-  const weixinTenderDeliveryBound = () => {
-    try {
-      return weixinBindingsRepository.listDigestTargets().length > 0;
-    } catch {
-      return false;
-    }
-  };
-  // 招标推送按客户 owner 分组投递（v0.9.3）：matchedCustomerIds → owner 映射。
-  const resolveCustomerOwnersByIds = (customerIds) => {
-    const map = new Map();
-    const ids = [...new Set((customerIds ?? []).filter((id) => typeof id === "string" && id))];
-    for (let index = 0; index < ids.length; index += 100) {
-      const chunk = ids.slice(index, index + 100);
-      const placeholders = chunk.map((_, position) => `$id${position}`).join(", ");
-      const params = Object.fromEntries(chunk.map((id, position) => [`$id${position}`, id]));
-      for (const row of db.prepare(
-        `SELECT id, owner FROM customers WHERE deleted_at IS NULL AND id IN (${placeholders})`,
-      ).all(params)) {
-        map.set(row.id, row.owner);
-      }
-    }
-    return map;
-  };
-  let hospitalTenderWeixinNotifierInstance = null;
-  const hospitalTenderWeixinNotify = async (batch) => {
-    if (!hospitalTenderWeixinNotifierInstance) {
-      hospitalTenderWeixinNotifierInstance = createHospitalTenderWeixinNotifier({
-        outboxRepository: weixinConfirmationOutboxRepository,
-        resolveDigestDeliveries: () => weixinBindingsRepository.listDigestTargets(),
-        // 无路由公告兜底目标：active ∧ digest_enabled 的 admin 绑定。
-        resolveAdminDeliveries: () => weixinBindingsRepository.listAdminTargets().filter(
-          (target) => weixinBindingsRepository.activeByAccount(target.account)?.digestEnabled === true,
-        ),
-        resolveCustomerOwners: resolveCustomerOwnersByIds,
-        recordUnrouted: ({ count, cycleNumber }) => insertAudit(db, {
-          action: "hospital_tender.push.unrouted",
-          entityType: "hospital_tender_notice",
-          entityId: `cycle:${cycleNumber}`,
-          actor: "system:hospital-tender",
-          before: null,
-          after: null,
-          metadata: { count, cycleNumber },
-        }),
-      });
-    }
-    return hospitalTenderWeixinNotifierInstance(batch);
-  };
+  const hasCustomTenderNotifier = options.hospitalTenderNotifier !== undefined
+    || options.hospitalTenderPushplusNotifier !== undefined;
   const hospitalTenderNotifier = options.hospitalTenderNotifier !== undefined
     ? options.hospitalTenderNotifier
-    : hospitalTenderWeixinNotify;
+    : hospitalTenderPushplusNotifier.notify;
   const hospitalTenderNotificationState = () => ({
-    status: weixinTenderDeliveryBound() ? "enabled" : "disabled",
-    provider: "weixin",
+    status: hasCustomTenderNotifier || Boolean(String(resolveHospitalTenderPushplusToken() ?? "").trim()) ? "enabled" : "disabled",
+    provider: hasCustomTenderNotifier ? "custom" : "pushplus",
+    configured: hasCustomTenderNotifier || Boolean(String(resolveHospitalTenderPushplusToken() ?? "").trim()),
+    deliveryVerification: String(resolveHospitalTenderPushplusAccessKey() ?? "").trim() ? "enabled" : "not_configured",
+    deliveryCounts: hospitalTenderPushplusDeliveryRepository.statusCounts(),
   });
   const hospitalTenderScheduler = createHospitalTenderScheduler({
     db,
@@ -3757,9 +3746,9 @@ export function createServer(options = {}) {
     ).map(customerFromRow),
     notifier: hospitalTenderNotifier,
     onBatchCommitted: (payload) => enqueueProactiveTenderEvents(payload),
-    // Binding readiness, not provider context freshness, gates creation. Once
-    // bound, an expired context still retains messages in the durable outbox.
-    notificationEnabled: weixinTenderDeliveryBound,
+    // PushPlus credentials resolve from encrypted admin settings first, then
+    // the legacy deployment environment fallback; tender notices never use WeChat.
+    notificationEnabled: () => hasCustomTenderNotifier || Boolean(String(resolveHospitalTenderPushplusToken() ?? "").trim()),
     clock: options.hospitalTenderSchedulerClock ?? (() => new Date()),
     ...(options.hospitalTenderSchedulerIdFactory
       ? { idFactory: options.hospitalTenderSchedulerIdFactory }
@@ -3768,7 +3757,19 @@ export function createServer(options = {}) {
     batchSize: config.hospitalTenderBatchSize,
   });
   const hospitalTenderAutoRun = options.hospitalTenderAutoRun ?? config.hospitalTenderAutoRun;
-  if (hospitalTenderAutoRun && options.hospitalTenderSchedulerEnabled !== false) hospitalTenderScheduler.start();
+  if (hospitalTenderAutoRun && options.hospitalTenderSchedulerEnabled !== false
+    && (hasCustomTenderNotifier || hasHospitalTenderPushplusCredentials())) {
+    hospitalTenderScheduler.start();
+  }
+  let hospitalTenderPushplusPollTimer = null;
+  if ((secureSettingsRepository || String(resolveHospitalTenderPushplusAccessKey() ?? "").trim())
+    && !options.hospitalTenderPushplusNotifier) {
+    hospitalTenderPushplusNotifier.pollPending().catch(() => {});
+    hospitalTenderPushplusPollTimer = setInterval(() => {
+      hospitalTenderPushplusNotifier.pollPending().catch(() => {});
+    }, 30_000);
+    hospitalTenderPushplusPollTimer.unref?.();
+  }
   const databaseIdentity = config.authSessionSecret.length >= 32
     ? createDatabaseIdentity({
         databaseUrl: config.databaseUrl,
@@ -3807,14 +3808,6 @@ export function createServer(options = {}) {
   const invoiceEscalationGapRepository = options.invoiceEscalationGapRepository
     ?? createInvoiceEscalationGapRepository(db);
   const invoiceEscalationClock = options.invoiceEscalationSchedulerClock ?? (() => new Date());
-  const invoiceEscalationOutboxRenderer = options.invoiceEscalationOutboxRenderer
-    ?? createInvoiceEscalationOutboxRenderer({
-      getInvoiceGap: invoiceEscalationGapRepository.getInvoiceGap,
-      clock: options.invoiceEscalationOutboxClock ?? invoiceEscalationClock,
-      ...(options.invoiceEscalationLevels !== undefined
-        ? { levels: options.invoiceEscalationLevels }
-        : {}),
-    });
   const expenseModelClient = createExpenseModelClient(
     config.aiPlatformRoutingPolicy?.phase === "canary" ? { ...runtimeConfig, aiPlatformMode: "disabled" } : runtimeConfig,
     options.fetchImpl ?? fetch,
@@ -4239,6 +4232,46 @@ export function createServer(options = {}) {
       clock: options.proactiveNotificationClock ?? assistantClock,
       ...(options.proactiveNotificationIdFactory ? { idFactory: options.proactiveNotificationIdFactory } : {}),
     });
+  const inAppNotificationRepository = options.inAppNotificationRepository
+    ?? createInAppNotificationRepository(db, {
+      clock: options.inAppNotificationClock ?? assistantClock,
+      ...(options.inAppNotificationIdFactory ? { idFactory: options.inAppNotificationIdFactory } : {}),
+    });
+  const inAppDeliveryAdapter = createInAppDeliveryAdapter({
+    repository: inAppNotificationRepository,
+    renderMessage: (payload) => {
+      if (payload.kind === "daily_digest") return renderDailyDigestMessage(payload);
+      if (payload.kind === "friday_closeout") return renderFridayCloseoutMessage(payload);
+      if (payload.kind === "invoice_gap_escalation") return renderInvoiceEscalationMessage(payload);
+      if (payload.kind === "action_reminder") {
+        return [
+          `提醒时间：${String(payload.remindAtDisplay ?? "").slice(0, 60)}`,
+          `待办：${String(payload.title ?? "").slice(0, 200)}`,
+          ...(payload.customerName ? [`客户：${String(payload.customerName).slice(0, 200)}`] : []),
+          ...(payload.priority ? [`优先级：${String(payload.priority).slice(0, 20)}`] : []),
+          ...(payload.reasonExcerpt ? [`备注：${String(payload.reasonExcerpt).slice(0, 200)}`] : []),
+          ...(payload.late === true ? ["该提醒因系统离线迟到。"] : []),
+        ].join("\n");
+      }
+      if (payload.kind === "ops_alert") {
+        const severity = payload.severity === "critical" ? "严重" : "警告";
+        return [
+          `级别：${severity}`,
+          `来源：${String(payload.origin ?? "").slice(0, 100)}`,
+          `时间：${String(payload.occurredAt ?? "").slice(0, 64)}`,
+          `摘要：${String(payload.summary ?? "").slice(0, 300)}`,
+          ...(payload.detail ? [`详情：${String(payload.detail).slice(0, 2000)}`] : []),
+        ].join("\n");
+      }
+      throw new TypeError("unsupported in-app notification payload");
+    },
+  });
+  const listActiveInAppDeliveries = () => db.prepare(
+    "SELECT account FROM users WHERE status = 'active' ORDER BY account",
+  ).all().map(({ account }) => ({ account, owner: account, conversationId: "in-app" }));
+  const listAdminInAppDeliveries = () => db.prepare(
+    "SELECT account FROM users WHERE status = 'active' AND role = 'admin' ORDER BY account",
+  ).all().map(({ account }) => ({ account, owner: account, conversationId: "in-app" }));
 
   // Business writes enqueue only after their surrounding transaction has
   // returned successfully.  The queue payload is deliberately limited to
@@ -4284,6 +4317,19 @@ export function createServer(options = {}) {
       console.warn(`category=proactive_event enqueue_failed entityType=${normalizedEntityType} code=${String(error?.code ?? "EVENT_QUEUE_FAILED").replace(/[^A-Za-z0-9_.:-]/gu, "_")}`);
       return null;
     }
+  }
+
+  function resolveCustomerOwnersByIds(customerIds = []) {
+    const ids = [...new Set(customerIds.filter((value) => typeof value === "string" && value.trim()).map((value) => value.trim()))];
+    if (ids.length === 0) return new Map();
+    const placeholders = ids.map((_, index) => `$customer${index}`);
+    const params = Object.fromEntries(ids.map((id, index) => [`$customer${index}`, id]));
+    const rows = db.prepare(`
+      SELECT id, owner
+      FROM customers
+      WHERE deleted_at IS NULL AND id IN (${placeholders.join(", ")})
+    `).all(params);
+    return new Map(rows.map((row) => [row.id, row.owner]));
   }
 
   // A committed tender snapshot can affect more than one customer owner. Keep
@@ -4442,16 +4488,23 @@ export function createServer(options = {}) {
       clock: options.shortcutBookkeepingAssistantClock ?? assistantClock,
     });
   const renderWeixinOutboxMessage = (outboxItem) => {
-    if (outboxItem?.payload?.kind === "invoice_gap_escalation") return invoiceEscalationOutboxRenderer(outboxItem);
-    if (outboxItem?.payload?.kind === "proactive_suggestion") {
-      const notification = proactiveNotificationRepository.getByOutboxId(outboxItem.id);
-      const suggestion = notification
-        ? proactiveSuggestionRepository.get(notification.suggestionId, { owner: notification.owner })
-        : null;
-      if (!notification || !suggestion || suggestion.version !== notification.suggestionVersion || suggestion.status !== "pending") {
-        throw Object.assign(new Error("proactive notification is stale"), { code: "WEIXIN_OUTBOX_STALE" });
-      }
-      return renderProactiveNotificationMessage(outboxItem);
+    // Validate the current binding before rendering owner-scoped bookkeeping
+    // data. leaseNext invokes this synchronously after acquiring the lease.
+    const activeBinding = weixinBindingsRepository.activeByAccount(outboxItem?.owner);
+    if (
+      !activeBinding
+      || outboxItem?.conversationId !== shortcutBookkeepingConversationId(outboxItem.owner, activeBinding.senderId)
+    ) {
+      throw Object.assign(new Error("WeChat delivery scope no longer matches the active binding"), {
+        code: "WEIXIN_DELIVERY_SCOPE_MISMATCH",
+      });
+    }
+    const bookkeepingKinds = new Set([
+      "accepted_batch", "advance_allocation", "allocation_confirmed", "accepted",
+      "confirmation", "region_refresh", "cancelled", "correction",
+    ]);
+    if (!bookkeepingKinds.has(outboxItem?.payload?.kind)) {
+      throw Object.assign(new Error("WeChat delivery is restricted to bookkeeping"), { code: "WEIXIN_OUTBOX_STALE" });
     }
     return shortcutBookkeepingAssistantRuntime.renderOutboxMessage(outboxItem);
   };
@@ -4566,9 +4619,9 @@ export function createServer(options = {}) {
   const actionReminderScheduler = createActionReminderScheduler({
     db,
     store: assistantActionItemStore,
-    outboxRepository: weixinConfirmationOutboxRepository,
-    resolveDeliveries: () => weixinBindingsRepository.listDigestTargets(),
-    deliveryReady: weixinDeliveryEnabled,
+    outboxRepository: inAppDeliveryAdapter,
+    resolveDeliveries: listActiveInAppDeliveries,
+    deliveryReady: () => true,
     clock: options.actionReminderSchedulerClock ?? (() => new Date()),
     pollMs: config.actionReminderPollMs,
   });
@@ -4576,10 +4629,10 @@ export function createServer(options = {}) {
   if (actionReminderAutoRun && options.actionReminderSchedulerEnabled !== false) actionReminderScheduler.start();
   const invoiceEscalationScheduler = options.invoiceEscalationScheduler
     ?? createInvoiceEscalationScheduler({
-      outboxRepository: weixinConfirmationOutboxRepository,
+      outboxRepository: inAppDeliveryAdapter,
       listInvoiceGaps: invoiceEscalationGapRepository.listInvoiceGaps,
-      resolveDeliveries: () => weixinBindingsRepository.listDigestTargets(),
-      deliveryReady: weixinDeliveryEnabled,
+      resolveDeliveries: listActiveInAppDeliveries,
+      deliveryReady: () => true,
       clock: invoiceEscalationClock,
       pollMs: config.invoiceEscalationPollMs,
       ...(options.invoiceEscalationLevels !== undefined
@@ -4606,11 +4659,11 @@ export function createServer(options = {}) {
   });
   const dailyDigestScheduler = createDailyDigestScheduler({
     db,
-    outboxRepository: weixinConfirmationOutboxRepository,
+    outboxRepository: inAppDeliveryAdapter,
     buildDailyDigest: digestContentBuilder.buildDailyDigest,
     buildFridayCloseout: digestContentBuilder.buildFridayCloseout,
-    resolveDeliveries: () => weixinBindingsRepository.listDigestTargets(),
-    deliveryReady: weixinDeliveryEnabled,
+    resolveDeliveries: listActiveInAppDeliveries,
+    deliveryReady: () => true,
     clock: dailyDigestClock,
     pollMs: config.dailyDigestPollMs,
     dailyTime: config.dailyDigestTime,
@@ -4619,10 +4672,9 @@ export function createServer(options = {}) {
   const dailyDigestAutoRun = options.dailyDigestAutoRun ?? config.dailyDigestAutoRun;
   if (dailyDigestAutoRun && options.dailyDigestSchedulerEnabled !== false) dailyDigestScheduler.start();
   const opsAlertService = options.opsAlertService ?? createOpsAlertService({
-    outboxRepository: weixinConfirmationOutboxRepository,
-    // 告警非订阅内容：目标=active admin 绑定（无视 digest_enabled）。上下文
-    // 失效时照常入队；无绑定则端点返回 503。
-    resolveDeliveries: () => weixinBindingsRepository.listAdminTargets(),
+    outboxRepository: inAppDeliveryAdapter,
+    deliveryMode: "in_app",
+    resolveDeliveries: listAdminInAppDeliveries,
     recordAudit: ({ actor, requestId, entityId, metadata }) => insertAudit(db, {
       action: "ops_alert.receive",
       entityType: "ops_alert",
@@ -4640,10 +4692,11 @@ export function createServer(options = {}) {
       db,
       suggestionRepository: proactiveSuggestionRepository,
       notificationRepository: proactiveNotificationRepository,
+      inAppNotificationRepository,
       outboxRepository: weixinConfirmationOutboxRepository,
-      resolveDeliveries: () => weixinBindingsRepository.listDigestTargets(),
-      // Proactive suggestions stay in the owner-scoped in-app inbox when the
-      // owner has no WeChat binding; there is no global notification fallback.
+      resolveDeliveries: () => [],
+      // Suggestions remain owner-scoped in-app notifications. Clawbot is
+      // reserved for bookkeeping, so no binding can activate external delivery.
       clock: options.proactiveNotificationClock ?? assistantClock,
       pollMs: options.proactiveNotificationPollMs ?? config.proactiveNotificationPollMs,
       quietStartHour: options.proactiveNotificationQuietStartHour ?? config.proactiveNotificationQuietStart.hour,
@@ -4664,6 +4717,7 @@ export function createServer(options = {}) {
       generatedAt: new Date().toISOString(),
       outbox: weixinConfirmationOutboxRepository.statusCounts(),
       proactiveNotifications: proactiveNotificationRepository.statusCounts(),
+      tenderNotification: hospitalTenderNotificationState(),
       weixinDelivery: weixinDeliveryReadiness.snapshot(),
       weixinBindings: { active: weixinBindingsRepository.countActive() },
       schedulers: {
@@ -4828,6 +4882,14 @@ export function createServer(options = {}) {
           region: region.slice(0, 100),
           status: "direct",
           source_ids: [],
+          announcement_sources: Array.isArray(customer.tenderSources)
+            ? customer.tenderSources.map((source) => ({
+              id: String(source.id ?? "").slice(0, 120),
+              type: source.type,
+              label: String(source.label ?? "").slice(0, 100),
+              url: String(source.url ?? "").slice(0, 2048),
+            }))
+            : [],
           aliases,
         };
       });
@@ -6592,6 +6654,107 @@ export function createServer(options = {}) {
         }
       };
 
+      if (request.method === "GET" && url.pathname === "/api/settings/pushplus-credentials") {
+        requireAdminRole(db, request);
+        requireSecureSettings(secureSettingsRepository);
+        sendJson(response, 200, { item: hospitalTenderPushplusSettingsMetadata() }, { "Cache-Control": "no-store" });
+        return;
+      }
+
+      if (request.method === "PUT" && url.pathname === "/api/settings/pushplus-credentials") {
+        requireAdminRole(db, request);
+        const repository = requireSecureSettings(secureSettingsRepository);
+        const body = plainObject(await readJson(request));
+        allowedPayloadKeys(body, new Set(["token", "accessKey"]));
+        const values = {};
+        for (const [field, key] of [
+          ["token", HOSPITAL_TENDER_PUSHPLUS_TOKEN_SETTING_KEY],
+          ["accessKey", HOSPITAL_TENDER_PUSHPLUS_ACCESS_KEY_SETTING_KEY],
+        ]) {
+          if (!Object.hasOwn(body, field)) continue;
+          if (typeof body[field] !== "string" || body[field].length > 500) validationFailure(field, "format");
+          const value = body[field].trim();
+          if (!value) continue;
+          if (/[\u0000-\u001f\u007f-\u009f]/u.test(value)) validationFailure(field, "format");
+          values[key] = value;
+        }
+        if (Object.keys(values).length === 0) validationFailure("credentials", "required");
+        const item = withImmediateTransaction(db, () => {
+          const before = hospitalTenderPushplusSettingsMetadata();
+          for (const [key, value] of Object.entries(values)) repository.setSecret(key, value);
+          const after = hospitalTenderPushplusSettingsMetadata();
+          const summarize = (metadata) => Object.fromEntries(Object.entries(metadata).map(([field, entry]) => [field, {
+            configured: entry.configured,
+            status: entry.status,
+            source: entry.source,
+            updatedAt: entry.updatedAt,
+          }]));
+          insertAudit(db, {
+            action: "settings.hospital_tender_pushplus.save",
+            entityType: "secure_setting",
+            entityId: "hospital_tender_pushplus",
+            actor: request.authContext.account,
+            requestId,
+            before: summarize(before),
+            after: summarize(after),
+            metadata: { updatedFields: Object.keys(values).map((key) => key === HOSPITAL_TENDER_PUSHPLUS_TOKEN_SETTING_KEY ? "token" : "accessKey") },
+          });
+          return after;
+        });
+        if (hasHospitalTenderPushplusCredentials()
+          && config.hospitalTenderAutoRun
+          && hospitalTenderScheduler.getState()?.enabled
+          && !hospitalTenderScheduler.isStarted()) {
+          hospitalTenderScheduler.start();
+        }
+        if (typeof hospitalTenderPushplusNotifier.pollPending === "function") {
+          hospitalTenderPushplusNotifier.pollPending().catch(() => {});
+        }
+        sendJson(response, 200, { item }, { "Cache-Control": "no-store" });
+        return;
+      }
+
+      if (request.method === "DELETE" && url.pathname === "/api/settings/pushplus-credentials") {
+        requireAdminRole(db, request);
+        const confirmation = validateSecureSettingBody(await readJson(request), { field: "confirmation", max: 32 });
+        if (confirmation !== "CLEAR") {
+          throw new HttpError(428, "CONFIRMATION_REQUIRED", "Explicit confirmation is required to clear PushPlus credentials");
+        }
+        if (hospitalTenderScheduler.getState()?.lastStatus === "running") {
+          throw new HttpError(409, "HOSPITAL_TENDER_RUN_IN_PROGRESS", "招标轮巡运行中，完成后再清除 PushPlus 凭据");
+        }
+        const repository = requireSecureSettings(secureSettingsRepository);
+        const item = withImmediateTransaction(db, () => {
+          const before = hospitalTenderPushplusSettingsMetadata();
+          repository.clearSecret(HOSPITAL_TENDER_PUSHPLUS_TOKEN_SETTING_KEY);
+          repository.clearSecret(HOSPITAL_TENDER_PUSHPLUS_ACCESS_KEY_SETTING_KEY);
+          const after = hospitalTenderPushplusSettingsMetadata();
+          const summarize = (metadata) => Object.fromEntries(Object.entries(metadata).map(([field, entry]) => [field, {
+            configured: entry.configured,
+            status: entry.status,
+            source: entry.source,
+            updatedAt: entry.updatedAt,
+          }]));
+          insertAudit(db, {
+            action: "settings.hospital_tender_pushplus.clear",
+            entityType: "secure_setting",
+            entityId: "hospital_tender_pushplus",
+            actor: request.authContext.account,
+            requestId,
+            before: summarize(before),
+            after: summarize(after),
+            metadata: { confirmation: "provided" },
+          });
+          return after;
+        });
+        if (hospitalTenderScheduler.isStarted()) hospitalTenderScheduler.stop();
+        if (hospitalTenderScheduler.getState()?.enabled) {
+          hospitalTenderSchedulerRepository.updateState({ enabled: false, nextRunAt: null, lastStatus: "disabled" });
+        }
+        sendJson(response, 200, { item }, { "Cache-Control": "no-store" });
+        return;
+      }
+
       if (request.method === "GET" && url.pathname === "/api/settings/security") {
         requireAdminRole(db, request);
         const repository = requireSecureSettings(secureSettingsRepository);
@@ -6965,6 +7128,52 @@ export function createServer(options = {}) {
         } : null;
         const notifications = owner ? proactiveNotificationRepository.statusCounts({ owner }) : null;
         sendJson(response, 200, { item: { ...status, counts, notifications, notificationScheduler: proactiveNotificationScheduler.status() } }, { "Cache-Control": "no-store" });
+        return;
+      }
+
+      if (request.method === "GET" && url.pathname === "/api/notifications") {
+        if (config.authRequired && request.authContext.kind !== "user") return unauthorized(response);
+        const owner = requestOwner(request) ?? LEGACY_OWNER;
+        const rawLimit = url.searchParams.get("limit") ?? "50";
+        const rawOffset = url.searchParams.get("offset") ?? "0";
+        const rawUnreadOnly = url.searchParams.get("unreadOnly") ?? "false";
+        if (!/^\d+$/u.test(rawLimit) || !/^\d+$/u.test(rawOffset)
+          || !["true", "false", "1", "0"].includes(rawUnreadOnly)) {
+          throw new HttpError(422, "VALIDATION_ERROR", "通知筛选或分页参数无效");
+        }
+        const limit = Number(rawLimit);
+        const offset = Number(rawOffset);
+        if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100
+          || !Number.isSafeInteger(offset) || offset < 0 || offset > 1_000_000) {
+          throw new HttpError(422, "VALIDATION_ERROR", "通知分页参数超出范围");
+        }
+        const unreadOnly = rawUnreadOnly === "true" || rawUnreadOnly === "1";
+        sendJson(response, 200, {
+          items: inAppNotificationRepository.list({ owner, limit, offset, unreadOnly }),
+          total: inAppNotificationRepository.count({ owner, unreadOnly }),
+          unreadCount: inAppNotificationRepository.count({ owner, unreadOnly: true }),
+        }, { "Cache-Control": "no-store" });
+        return;
+      }
+
+      if (request.method === "POST" && url.pathname === "/api/notifications/read-all") {
+        if (config.authRequired && request.authContext.kind !== "user") return unauthorized(response);
+        await validateEmptyBody(request);
+        const owner = requestOwner(request) ?? LEGACY_OWNER;
+        const updatedCount = inAppNotificationRepository.markAllRead({ owner });
+        sendJson(response, 200, {
+          item: { updatedCount, unreadCount: inAppNotificationRepository.count({ owner, unreadOnly: true }) },
+        }, { "Cache-Control": "no-store" });
+        return;
+      }
+
+      if (request.method === "POST" && parts[0] === "api" && parts[1] === "notifications"
+        && parts[2] && parts[3] === "read" && parts.length === 4) {
+        if (config.authRequired && request.authContext.kind !== "user") return unauthorized(response);
+        await validateEmptyBody(request);
+        const owner = requestOwner(request) ?? LEGACY_OWNER;
+        const item = inAppNotificationRepository.markRead(parts[2], { owner });
+        sendJson(response, 200, { item }, { "Cache-Control": "no-store" });
         return;
       }
 
@@ -7792,6 +8001,9 @@ export function createServer(options = {}) {
         const patch = {};
         if (Object.hasOwn(body, "enabled")) {
           if (typeof body.enabled !== "boolean") throw new HttpError(422, "VALIDATION_ERROR", "enabled 必须是布尔值");
+          if (body.enabled && !hasCustomTenderNotifier && !hasHospitalTenderPushplusCredentials()) {
+            throw new HttpError(409, "PUSHPLUS_CREDENTIALS_REQUIRED", "请先在系统设置中配置 PushPlus Token 和 AccessKey");
+          }
           patch.enabled = body.enabled;
         }
         if (Object.hasOwn(body, "intervalMinutes")) {
@@ -11916,6 +12128,8 @@ export function createServer(options = {}) {
     if (backgroundStopped) return;
     backgroundStopped = true;
     hospitalTenderScheduler.stop();
+    if (hospitalTenderPushplusPollTimer) clearInterval(hospitalTenderPushplusPollTimer);
+    hospitalTenderPushplusPollTimer = null;
     actionReminderScheduler.stop();
     invoiceEscalationScheduler.stop();
     dailyDigestScheduler.stop();
@@ -11925,6 +12139,8 @@ export function createServer(options = {}) {
   server.on("close", stopBackgroundSchedulers);
   server.hospitalTenderScheduler = hospitalTenderScheduler;
   server.hospitalTenderSchedulerRepository = hospitalTenderSchedulerRepository;
+  server.hospitalTenderPushplusDeliveryRepository = hospitalTenderPushplusDeliveryRepository;
+  server.hospitalTenderPushplusNotifier = hospitalTenderPushplusNotifier;
   server.hospitalTenderLeadConversionService = hospitalTenderLeadConversionService;
   server.hospitalTenderLeadConversionHttp = hospitalTenderLeadConversionHttp;
   server.visitTemperatureSuggestionService = visitTemperatureSuggestionService;
@@ -11943,6 +12159,7 @@ export function createServer(options = {}) {
   server.actionRiskWritebackService = actionRiskWritebackService;
   server.customerImportHttp = customerImportHttp;
   server.proactiveNotificationRepository = proactiveNotificationRepository;
+  server.inAppNotificationRepository = inAppNotificationRepository;
   server.proactiveNotificationScheduler = proactiveNotificationScheduler;
 
   // Node's native close callback only waits for HTTP connections.  Wrap it so

@@ -3,6 +3,7 @@ import {
   ChevronRight,
   Plus,
   Save,
+  Trash2,
 } from "lucide-react";
 import { useEffect, useState } from "react";
 import {
@@ -80,6 +81,14 @@ function CustomerRecordMetadata({ selected }) {
 }
 
 function customerToForm(customer) {
+  const tenderSources = Array.isArray(customer?.tenderSources)
+    ? customer.tenderSources.map((source) => ({ ...source }))
+    : [];
+  for (const type of ["hospital_official", "public_resource"]) {
+    if (!tenderSources.some((source) => source.type === type)) {
+      tenderSources.push({ id: `draft-${type}`, type, label: "", url: "" });
+    }
+  }
   return {
     id: customer?.id ?? "",
     name: customer?.name ?? "",
@@ -93,6 +102,7 @@ function customerToForm(customer) {
     needs: textFromArray(customer?.needs),
     risks: textFromArray(customer?.risks),
     infrastructure: textFromArray(customer?.infrastructure),
+    tenderSources,
   };
 }
 
@@ -110,6 +120,9 @@ function customerFromForm(form, isNew) {
     needs: arrayFromText(form.needs),
     risks: arrayFromText(form.risks),
     infrastructure: arrayFromText(form.infrastructure),
+    tenderSources: form.tenderSources
+      .filter((source) => source.url.trim())
+      .map(({ id, type, label, url }) => ({ id, type, label: label.trim(), url: url.trim() })),
     stakeholders: isNew ? [] : undefined,
     decisionChain: isNew ? [] : undefined,
     historyProjects: isNew ? [] : undefined,
@@ -138,11 +151,102 @@ function CustomerEditor({ selected, initialMode = "edit", onSaveCustomer, onSave
     setForm((current) => ({ ...current, [field]: value }));
   }
 
+  function updateTenderSource(sourceId, field, value) {
+    setForm((current) => ({
+      ...current,
+      tenderSources: current.tenderSources.map((source) => source.id === sourceId ? { ...source, [field]: value } : source),
+    }));
+  }
+
+  function addTenderSource(type) {
+    const id = globalThis.crypto?.randomUUID?.() ?? `source-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    setForm((current) => ({
+      ...current,
+      tenderSources: [...current.tenderSources, { id, type, label: "", url: "" }],
+    }));
+  }
+
+  function removeTenderSource(sourceId, type) {
+    setForm((current) => {
+      const remaining = current.tenderSources.filter((source) => source.id !== sourceId);
+      if (!remaining.some((source) => source.type === type)) {
+        remaining.push({ id: `draft-${type}`, type, label: "", url: "" });
+      }
+      return { ...current, tenderSources: remaining };
+    });
+  }
+
+  function renderTenderSourceGroup(type, title, addLabel) {
+    const rows = form.tenderSources.filter((source) => source.type === type);
+    return (
+      <section className="customer-tender-source-group" aria-label={title}>
+        <div className="customer-tender-source-heading">
+          <strong>{title}</strong>
+          <button
+            className="ghost-button"
+            type="button"
+            onClick={() => addTenderSource(type)}
+            aria-label={addLabel}
+            title={addLabel}
+            disabled={form.tenderSources.length >= 20}
+          >
+            <Plus size={15} />
+            <span>{addLabel}</span>
+          </button>
+        </div>
+        {rows.map((source, index) => (
+          <div className="customer-tender-source-row" key={source.id}>
+            <div className="customer-tender-source-fields">
+              <FormField label={`${title} ${index + 1} 地址`}>
+                <input
+                  type="url"
+                  inputMode="url"
+                  autoComplete="url"
+                  maxLength={2048}
+                  placeholder="https://..."
+                  value={source.url}
+                  data-testid={`customer-tender-source-${type}-${index}`}
+                  aria-label={`${title} ${index + 1} 地址`}
+                  onChange={(event) => updateTenderSource(source.id, "url", event.target.value)}
+                />
+              </FormField>
+              <FormField label="来源名称（可选）">
+                <input
+                  value={source.label ?? ""}
+                  maxLength={100}
+                  placeholder={type === "public_resource" ? "例如：嘉祥县公共资源交易平台" : "例如：医院官网采购公告"}
+                  aria-label={`${title} ${index + 1} 来源名称`}
+                  onChange={(event) => updateTenderSource(source.id, "label", event.target.value)}
+                />
+              </FormField>
+            </div>
+            <button
+              className="icon-button customer-tender-source-remove"
+              type="button"
+              aria-label={`删除${title} ${index + 1}`}
+              title={`删除${title} ${index + 1}`}
+              onClick={() => removeTenderSource(source.id, type)}
+            >
+              <Trash2 size={15} />
+            </button>
+          </div>
+        ))}
+      </section>
+    );
+  }
+
   async function submit(event) {
     event.preventDefault();
     if (!form.name.trim()) {
       setSaveStatus("客户名称不能为空");
       return;
+    }
+    if (isNew) {
+      const configuredTypes = new Set(form.tenderSources.filter((source) => source.url.trim()).map((source) => source.type));
+      if (!configuredTypes.has("hospital_official") || !configuredTypes.has("public_resource")) {
+        setSaveStatus("请填写医院官网公告页和至少一个公共资源交易平台地址");
+        return;
+      }
     }
     setSaveStatus("保存中");
     try {
@@ -200,6 +304,10 @@ function CustomerEditor({ selected, initialMode = "edit", onSaveCustomer, onSave
         <FormField label="预算节奏">
           <input value={form.budget} onChange={(event) => update("budget", event.target.value)} />
         </FormField>
+      </div>
+      <div className="customer-tender-sources" data-testid="customer-tender-sources">
+        {renderTenderSourceGroup("hospital_official", "医院官网公告页", "添加医院公告页")}
+        {renderTenderSourceGroup("public_resource", "公共资源交易平台公告页", "添加平台入口")}
       </div>
       <FormField label="客户摘要">
         <textarea value={form.summary} onChange={(event) => update("summary", event.target.value)} />

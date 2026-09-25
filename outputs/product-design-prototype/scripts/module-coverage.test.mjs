@@ -30,11 +30,11 @@ function extractVisualPageNames(source) {
 }
 
 describe("business module delivery coverage", () => {
-  it("groups the workbench into nine top-level modules with the approved customer, opportunity, and settings children", () => {
+  it("groups the workbench into ten top-level modules with the approved customer, opportunity, and settings children", () => {
     const dataSource = read("src/data/salesWorkbenchData.js");
     assert.deepEqual(
       extractNavIds(dataSource),
-      ["overview", "quick", "customer", "opportunity", "itinerary", "expense", "weekly", "knowledge", "settings"],
+      ["overview", "notifications", "quick", "customer", "opportunity", "itinerary", "expense", "weekly", "knowledge", "settings"],
     );
     assert.deepEqual(
       Object.fromEntries(["customer", "opportunity", "settings"].map((parent) => [parent, extractSubnavIds(dataSource, parent)])),
