@@ -1165,18 +1165,13 @@ describe("secure system settings API", () => {
 });
 
 describe("hospital tender PushPlus secure settings API", () => {
-  it("stores credentials encrypted, updates the live notifier, and never returns secret text", async () => {
+  it("stores only the PushPlus Token encrypted, updates the live notifier, and never returns secret text", async () => {
     const environmentToken = ["fixture", "environment", "pushplus", "token"].join("-");
-    const environmentAccessKey = ["fixture", "environment", "pushplus", "access"].join("-");
     const token = ["fixture", "web", "pushplus", "token"].join("-");
-    const accessKey = ["fixture", "web", "pushplus", "access", "key"].join("-");
     const providerCalls = [];
-    let fakeNow = new Date("2026-09-25T03:00:00.000Z");
     await startServer({
       hospitalTenderAutoRun: true,
       hospitalTenderPushplusToken: environmentToken,
-      hospitalTenderPushplusAccessKey: environmentAccessKey,
-      hospitalTenderPushplusClock: () => new Date(fakeNow),
       pushplusFetchImpl: async (url, init = {}) => {
         const parsed = new URL(url);
         if (parsed.pathname.endsWith("/send")) {
@@ -1184,8 +1179,7 @@ describe("hospital tender PushPlus secure settings API", () => {
           providerCalls.push({ path: parsed.pathname, token: body.token });
           return new Response(JSON.stringify({ code: 200, data: "fixture-short-code" }), { status: 200 });
         }
-        providerCalls.push({ path: parsed.pathname, accessKey: init.headers?.["access-key"] });
-        return new Response(JSON.stringify({ code: 200, data: { status: 2 } }), { status: 200 });
+        throw new Error("unexpected PushPlus result query");
       },
     });
     const auth = await login();
@@ -1195,37 +1189,38 @@ describe("hospital tender PushPlus secure settings API", () => {
     assert.equal(initial.response.status, 200);
     assert.equal(initial.response.headers.get("cache-control"), "no-store");
     assert.equal(initial.body.item.token.source, "environment");
-    assert.equal(initial.body.item.accessKey.source, "environment");
+    assert.deepEqual(Object.keys(initial.body.item), ["token"]);
     assert.doesNotMatch(JSON.stringify(initial.body), new RegExp(environmentToken, "u"));
-    assert.doesNotMatch(JSON.stringify(initial.body), new RegExp(environmentAccessKey, "u"));
 
     server.hospitalTenderSchedulerRepository.updateState({ enabled: true });
+    const rejectedAccessKey = await request("/api/settings/pushplus-credentials", {
+      method: "PUT",
+      headers,
+      body: JSON.stringify({ token, accessKey: "must-not-enter" }),
+    });
+    assert.equal(rejectedAccessKey.response.status, 422);
+
     const saved = await request("/api/settings/pushplus-credentials", {
       method: "PUT",
       headers,
-      body: JSON.stringify({ token, accessKey }),
+      body: JSON.stringify({ token }),
     });
     assert.equal(saved.response.status, 200, JSON.stringify(saved.body));
     assert.equal(saved.body.item.token.source, "settings");
-    assert.equal(saved.body.item.accessKey.source, "settings");
+    assert.deepEqual(Object.keys(saved.body.item), ["token"]);
     assert.equal(server.hospitalTenderScheduler.isStarted(), true);
     const responseDump = JSON.stringify(saved.body);
-    for (const secret of [token, accessKey, environmentToken, environmentAccessKey]) {
+    for (const secret of [token, environmentToken]) {
       assert.doesNotMatch(responseDump, new RegExp(secret, "u"));
     }
 
-    for (const [key, secret] of [
-      [HOSPITAL_TENDER_PUSHPLUS_TOKEN_SETTING_KEY, token],
-      [HOSPITAL_TENDER_PUSHPLUS_ACCESS_KEY_SETTING_KEY, accessKey],
-    ]) {
-      const state = readSecureSettingState(key);
-      assert.equal(readSecureSecret(key), secret);
-      assert.equal(state.setting.status, "active");
-      assert.notEqual(state.setting.ciphertext, secret);
-      assert.doesNotMatch(state.setting.ciphertext, new RegExp(secret, "u"));
-    }
+    const tokenState = readSecureSettingState(HOSPITAL_TENDER_PUSHPLUS_TOKEN_SETTING_KEY);
+    assert.equal(readSecureSecret(HOSPITAL_TENDER_PUSHPLUS_TOKEN_SETTING_KEY), token);
+    assert.equal(tokenState.setting.status, "active");
+    assert.notEqual(tokenState.setting.ciphertext, token);
+    assert.doesNotMatch(tokenState.setting.ciphertext, new RegExp(token, "u"));
     const auditDump = JSON.stringify(readPushplusAudit());
-    for (const secret of [token, accessKey, environmentToken, environmentAccessKey]) {
+    for (const secret of [token, environmentToken]) {
       assert.doesNotMatch(auditDump, new RegExp(secret, "u"));
     }
 
@@ -1235,9 +1230,7 @@ describe("hospital tender PushPlus secure settings API", () => {
       notices: [{ title: "公开招标", sourceName: "医院官网", publishedAt: "2026-09-25", url: "https://example.test/tender/1" }],
     }), 1);
     assert.equal(providerCalls[0].token, token);
-    fakeNow = new Date(fakeNow.getTime() + 60_000);
-    assert.deepEqual(await server.hospitalTenderPushplusNotifier.pollPending(), { checked: 1, sent: 1, failed: 0 });
-    assert.equal(providerCalls[1].accessKey, accessKey);
+    assert.deepEqual(providerCalls.map((call) => call.path), ["/send"]);
 
     const cleared = await request("/api/settings/pushplus-credentials", {
       method: "DELETE",
@@ -1246,7 +1239,8 @@ describe("hospital tender PushPlus secure settings API", () => {
     });
     assert.equal(cleared.response.status, 200);
     assert.equal(cleared.body.item.token.status, "cleared");
-    assert.equal(cleared.body.item.accessKey.status, "cleared");
+    assert.deepEqual(Object.keys(cleared.body.item), ["token"]);
+    assert.equal(readSecureSettingState(HOSPITAL_TENDER_PUSHPLUS_ACCESS_KEY_SETTING_KEY).setting.status, "cleared");
     assert.equal(server.hospitalTenderScheduler.isStarted(), false);
     assert.equal(server.hospitalTenderScheduler.getState().enabled, false);
     await assert.rejects(
@@ -1259,7 +1253,7 @@ describe("hospital tender PushPlus secure settings API", () => {
     ]);
   });
 
-  it("keeps auto-run and manual monitoring stopped until both web credentials exist", async () => {
+  it("requires only the PushPlus Token before tender auto-run can be enabled", async () => {
     await startServer({ hospitalTenderAutoRun: true });
     server.hospitalTenderSchedulerRepository.updateState({ enabled: true });
     assert.equal(server.hospitalTenderScheduler.isStarted(), false);
@@ -1281,6 +1275,22 @@ describe("hospital tender PushPlus secure settings API", () => {
     assert.equal(enabled.response.status, 409);
     assert.equal(enabled.body.error.code, "PUSHPLUS_CREDENTIALS_REQUIRED");
     assert.equal(server.hospitalTenderScheduler.isStarted(), false);
+
+    const token = ["synthetic", "token-only", "pushplus"].join("-");
+    const saved = await request("/api/settings/pushplus-credentials", {
+      method: "PUT",
+      headers,
+      body: JSON.stringify({ token }),
+    });
+    assert.equal(saved.response.status, 200);
+    const enabledWithToken = await request("/api/hospital-tenders/scheduler", {
+      method: "PATCH",
+      headers,
+      body: JSON.stringify({ enabled: true }),
+    });
+    assert.equal(enabledWithToken.response.status, 200);
+    assert.equal(enabledWithToken.body.notification.configured, true);
+    assert.equal(server.hospitalTenderScheduler.isStarted(), true);
   });
 
   it("requires an active admin, CSRF-protected writes, and nonempty credential input", async () => {

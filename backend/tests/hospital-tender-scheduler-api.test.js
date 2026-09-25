@@ -91,7 +91,6 @@ describe("hospital tender scheduler API", () => {
       status: "disabled",
       provider: "pushplus",
       configured: false,
-      deliveryVerification: "not_configured",
       deliveryCounts: {
         queued: 0,
         submitting: 0,

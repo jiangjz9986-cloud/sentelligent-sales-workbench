@@ -82,7 +82,7 @@ cp .env.example .env
 - `HOSPITAL_TENDER_AUTO_RUN`: 是否启动自动轮巡；生产默认开启，开发默认关闭。
 - `HOSPITAL_TENDER_INTERVAL_MINUTES`: 自动轮巡间隔，默认 `60` 分钟。
 - `HOSPITAL_TENDER_BATCH_SIZE`: 每次匹配客户数量，默认 `10`；批次游标和未完成快照保存在 SQLite 中，服务重启后继续。
-- 医院招标通知不再读取或发送到 PushPlus；有活动微信绑定时统一写入 WeChat Clawbot durable outbox，无绑定时继续采集和入库并报告通知未启用。
+- 医院招标通知通过 PushPlus Token 推送；差旅记账助手仍仅使用微信 Clawbot，其他业务提醒进入站内通知。
 - `SETTINGS_ENCRYPTION_KEY`: 配置页密钥库的 32 字节 base64url 主密钥；只放在后端环境文件或进程环境，不进入 SQLite、前端或 Git。未配置时系统配置 API fail-closed。
 
 Model mode example:
@@ -95,7 +95,7 @@ AI_ANALYSIS_MODE=model npm start
 
 ## System settings security boundary
 
-登录后的 `/settings/config` 页面通过 `/api/settings/security` 查看 DeepSeek、ASR 和微信 Clawbot 的非敏感状态。`POST /api/settings/icost-token/rotate` 生成的 iCost 令牌只在该次成功响应出现一次；后续响应仅包含掩码、时间和状态。DeepSeek API Key 与其他仍支持的服务端密钥只能由服务端接收、使用 AES-256-GCM 信封加密后保存，普通 API 和前端永远不能读取明文。PushPlus 设置接口已退役并返回 404；历史 `secure_settings` 行仅保留用于迁移兼容，不会被读取用于新投递。
+登录后的 `/settings/config` 页面通过 `/api/settings/security` 查看 DeepSeek、ASR 和微信 Clawbot 的非敏感状态。医院招标 PushPlus Token 仅在 `/settings/notifications` 配置，经 `/api/settings/pushplus-credentials` 写入后使用 AES-256-GCM 信封加密保存；界面只返回掩码。投递只依赖 Token，PushPlus 返回“已受理”表示请求已提交，不代表终端已送达。AccessKey 配置入口与运行时依赖已移除；历史 `secure_settings` 记录仅保留迁移兼容，并在清除 PushPlus Token 时一并标记清除。
 
 SQLite 的 `secure_settings` 表只保存版本化密文和时间元数据。解密主密钥由 `SETTINGS_ENCRYPTION_KEY` 提供，服务启动时不把它写入数据库；若主密钥缺失或格式不正确，配置读写接口返回 `503 SECURE_SETTINGS_NOT_CONFIGURED`，不会退回到明文数据库字段。运行时模型、iCost webhook 和微信 Clawbot 投递边界从受保护配置与绑定表读取；令牌/Key 不进入审计快照、错误正文、HTML 或 `localStorage`。微信上下文过期不会删除 durable outbox 消息；真实入站消息恢复上下文后，worker 逐条按约 1 秒间隔释放积压。
 

@@ -4280,7 +4280,6 @@ describe("sales workbench API client", () => {
   it("keeps secure settings writes on the authenticated CSRF boundary and never normalizes secrets into storage", async () => {
     const calls = [];
     const pushplusToken = ["synthetic", "pushplus", "token"].join("-");
-    const pushplusAccessKey = ["synthetic", "pushplus", "access", "key"].join("-");
     const api = createSalesWorkbenchApi({
       baseUrl: "https://example.test",
       fetchImpl: async (url, options = {}) => {
@@ -4289,7 +4288,7 @@ describe("sales workbench API client", () => {
           return jsonResponse({ item: { deepseek: { configured: false } } });
         }
         if (url.endsWith("/api/settings/pushplus-credentials") && options.method === "GET") {
-          return jsonResponse({ item: { token: { configured: false }, accessKey: { configured: false } } });
+          return jsonResponse({ item: { token: { configured: false } } });
         }
         if (url.endsWith("/api/settings/deepseek-key") && options.method === "PUT") {
           return jsonResponse({ item: { configured: true, masked: "synt••••test", status: "active" } });
@@ -4298,10 +4297,10 @@ describe("sales workbench API client", () => {
           return jsonResponse({ item: { configured: false, masked: null, status: "cleared" } });
         }
         if (url.endsWith("/api/settings/pushplus-credentials") && options.method === "PUT") {
-          return jsonResponse({ item: { token: { configured: true }, accessKey: { configured: true } } });
+          return jsonResponse({ item: { token: { configured: true } } });
         }
         if (url.endsWith("/api/settings/pushplus-credentials") && options.method === "DELETE") {
-          return jsonResponse({ item: { token: { configured: false }, accessKey: { configured: false } } });
+          return jsonResponse({ item: { token: { configured: false } } });
         }
         return jsonResponse({ error: "not_found" }, 404);
       },
@@ -4312,13 +4311,13 @@ describe("sales workbench API client", () => {
     assert.equal((await api.requestHospitalTenderPushplusCredentials()).token.configured, false);
     await api.saveDeepSeekApiKey(syntheticKey);
     await api.clearDeepSeekApiKey();
-    await api.requestHospitalTenderPushplusCredentials("PUT", { token: pushplusToken, accessKey: pushplusAccessKey });
+    await api.requestHospitalTenderPushplusCredentials("PUT", { token: pushplusToken });
     await api.requestHospitalTenderPushplusCredentials("DELETE", { confirmation: "CLEAR" });
     assert.equal(calls.length, 6);
     assert.equal(calls[2].options.body, JSON.stringify({ apiKey: syntheticKey }));
     assert.equal(calls[2].options.headers["X-CSRF-Token"], "fixture-csrf-token");
     assert.equal(calls[3].options.body, JSON.stringify({ confirmation: "CLEAR" }));
-    assert.equal(calls[4].options.body, JSON.stringify({ token: pushplusToken, accessKey: pushplusAccessKey }));
+    assert.equal(calls[4].options.body, JSON.stringify({ token: pushplusToken }));
     assert.equal(calls[4].options.headers["X-CSRF-Token"], "fixture-csrf-token");
     assert.equal(calls[5].options.body, JSON.stringify({ confirmation: "CLEAR" }));
   });
