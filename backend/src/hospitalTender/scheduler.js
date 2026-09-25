@@ -99,6 +99,14 @@ function collectorCustomers(customers) {
       region: String(customer.region ?? customer.city ?? "全国").slice(0, 100),
       status: "direct",
       source_ids: [],
+      announcement_sources: Array.isArray(customer.tenderSources)
+        ? customer.tenderSources.map((source) => ({
+          id: String(source.id ?? "").slice(0, 120),
+          type: source.type,
+          label: String(source.label ?? "").slice(0, 100),
+          url: String(source.url ?? "").slice(0, 2048),
+        }))
+        : [],
       aliases,
     }];
   });

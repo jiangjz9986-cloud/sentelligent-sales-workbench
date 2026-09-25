@@ -229,20 +229,18 @@ export function UserManagementPage({ apiClient, backendStatus, authSession }) {
     }
   }
 
-  async function toggleBindingSwitch(binding, field) {
-    const enabling = field === "financialEnabled" ? !binding.financialEnabled : !binding.digestEnabled;
-    if (field === "financialEnabled" && enabling) {
+  async function toggleBindingSwitch(binding) {
+    const enabling = !binding.financialEnabled;
+    if (enabling) {
       const confirmed = typeof window !== "undefined" && window.confirm(
         `确定为 ${binding.userDisplayName ?? binding.account} 开通微信记账能力吗？开通后该微信可直接写入财务流水。`,
       );
       if (!confirmed) return;
     }
-    await runAction(`binding-${field}-${binding.senderId}`, () => apiClient.updateWeixinBinding(binding.senderId, {
+    await runAction(`binding-financialEnabled-${binding.senderId}`, () => apiClient.updateWeixinBinding(binding.senderId, {
       expectedVersion: binding.version,
-      [field]: enabling,
-    }), field === "financialEnabled"
-      ? (enabling ? "已开通记账能力" : "已关闭记账能力")
-      : (enabling ? "已开启晨报等主动推送" : "已关闭晨报等主动推送"));
+      financialEnabled: enabling,
+    }), enabling ? "已开通记账能力" : "已关闭记账能力");
   }
 
   async function unbindBinding(binding) {
@@ -418,7 +416,7 @@ export function UserManagementPage({ apiClient, backendStatus, authSession }) {
                         <th scope="col">账号</th>
                         <th scope="col">微信标识</th>
                         <th scope="col">记账能力</th>
-                        <th scope="col">主动推送</th>
+                        <th scope="col">其他通知</th>
                         <th scope="col">状态</th>
                         <th scope="col">绑定时间</th>
                         <th scope="col">操作</th>
@@ -435,9 +433,7 @@ export function UserManagementPage({ apiClient, backendStatus, authSession }) {
                             </span>
                           </td>
                           <td>
-                            <span className={`pill ${binding.digestEnabled ? "tone-green" : "tone-gray"}`}>
-                              {binding.digestEnabled ? "开启" : "关闭"}
-                            </span>
+                            <span className="pill tone-blue">站内通知中心</span>
                           </td>
                           <td>
                             <span className={`pill ${binding.status === "active" ? "tone-green" : "tone-gray"}`}>
@@ -453,19 +449,10 @@ export function UserManagementPage({ apiClient, backendStatus, authSession }) {
                                     className="ghost-button"
                                     type="button"
                                     data-testid={`binding-financial-${binding.account}`}
-                                    onClick={() => toggleBindingSwitch(binding, "financialEnabled")}
+                                    onClick={() => toggleBindingSwitch(binding)}
                                     disabled={busy !== ""}
                                   >
                                     <Link2 size={14} /> {binding.financialEnabled ? "关记账" : "开记账"}
-                                  </button>
-                                  <button
-                                    className="ghost-button"
-                                    type="button"
-                                    data-testid={`binding-digest-${binding.account}`}
-                                    onClick={() => toggleBindingSwitch(binding, "digestEnabled")}
-                                    disabled={busy !== ""}
-                                  >
-                                    <RefreshCw size={14} /> {binding.digestEnabled ? "关推送" : "开推送"}
                                   </button>
                                   <button
                                     className="danger-button"
@@ -506,7 +493,7 @@ export function UserManagementPage({ apiClient, backendStatus, authSession }) {
                   10 分钟内有效、只可使用一次。请当面或电话告知本人，让其在微信中对小小发送：
                   <strong>绑定 {drawer.issued.code}</strong>
                 </p>
-                <p>过期时间：{formatDate(drawer.issued.expiresAt)}。绑定成功后默认开启晨报推送，记账能力需在本页显式开通。</p>
+                <p>过期时间：{formatDate(drawer.issued.expiresAt)}。绑定后其他通知可在站内通知中心查看，记账能力需在本页显式开通。</p>
                 <div className="settings-button-row">
                   <button className="primary-button" type="button" onClick={() => { setDrawer(null); reloadList(); }}>
                     我已告知本人

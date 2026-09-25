@@ -180,13 +180,13 @@ export function createWeixinConfirmationOutboxRepository(db, {
       if (typeof message !== "string" || !message.trim() || message.length > 20_000) throw new TypeError("rendered message is invalid");
     } catch (error) {
       try {
-        if (error?.code === "WEIXIN_OUTBOX_STALE") {
-          discardLeased(base.id, { leaseToken: leased.leaseToken });
+        if (error?.code === "WEIXIN_OUTBOX_STALE" || error?.code === "WEIXIN_DELIVERY_SCOPE_MISMATCH") {
+          discardLeased(base.id, { leaseToken: leased.leaseToken, errorCode: error.code });
         } else {
           ackFailure(base.id, { leaseToken: leased.leaseToken, errorCode: "WEIXIN_RENDER_FAILED" });
         }
       } catch { /* best effort */ }
-      if (error?.code === "WEIXIN_OUTBOX_STALE") return null;
+      if (error?.code === "WEIXIN_OUTBOX_STALE" || error?.code === "WEIXIN_DELIVERY_SCOPE_MISMATCH") return null;
       throw error;
     }
     return { item: { ...base, status: "processing" }, leaseToken: leased.leaseToken, workerId: leased.workerId, message };

@@ -146,7 +146,7 @@ describe("ops alerts machine endpoint", () => {
     db.close();
   });
 
-  it("queues one ops_alert outbox row per source-hour, dedupes storms, and audits", async () => {
+  it("stores one owner-scoped in-app alert per source-hour, dedupes storms, and audits", async () => {
     await startServer();
     const first = await request("/api/integrations/ops-alerts", {
       method: "POST",
@@ -154,7 +154,7 @@ describe("ops alerts machine endpoint", () => {
       body: JSON.stringify(alertBody()),
     });
     assert.equal(first.response.status, 200);
-    assert.equal(first.body.item.status, "queued");
+    assert.equal(first.body.item.status, "sent");
     assert.equal(first.body.item.replayed, false);
 
     for (let index = 0; index < 9; index += 1) {
@@ -179,21 +179,20 @@ describe("ops alerts machine endpoint", () => {
     assert.equal(changedDetail.body.item.replayed, true);
 
     const db = createConnection({ databaseUrl: join(tempDir, "ops-alerts.sqlite") });
-    const rows = db.prepare("SELECT owner, conversation_id, payload_json FROM weixin_confirmation_outbox").all();
+    const rows = db.prepare("SELECT owner, category, title, body, href FROM in_app_notifications").all();
     assert.equal(rows.length, 1);
     assert.equal(rows[0].owner, owner);
-    assert.equal(rows[0].conversation_id, shortcutBookkeepingConversationId(owner, sender));
-    const payload = JSON.parse(rows[0].payload_json);
-    assert.equal(payload.kind, "ops_alert");
-    assert.equal(payload.origin, "systemd:sentelligent-frontend.service");
-    assert.equal(payload.severity, "critical");
-    assert.equal(Object.hasOwn(payload, "source"), false);
+    assert.equal(rows[0].category, "ops_alert");
+    assert.match(rows[0].title, /严重告警/u);
+    assert.match(rows[0].body, /systemd:sentelligent-frontend\.service/u);
+    assert.equal(rows[0].href, "/settings/notifications");
+    assert.equal(db.prepare("SELECT COUNT(*) AS count FROM weixin_confirmation_outbox").get().count, 0);
     const audits = db.prepare("SELECT actor, metadata_json FROM audit_logs WHERE action = 'ops_alert.receive'").all();
     assert.equal(audits.length, 11);
     assert.equal(audits[0].actor, owner);
     const metadata = JSON.parse(audits[0].metadata_json);
     assert.equal(metadata.severity, "critical");
-    assert.equal(metadata.delivery, "weixin_outbox");
+    assert.equal(metadata.delivery, "in_app");
     assert.equal(metadata.replayed, false);
     assert.equal(JSON.parse(audits.at(-1).metadata_json).replayed, true);
     db.close();
@@ -217,7 +216,7 @@ describe("ops alerts machine endpoint", () => {
     assert.equal(nextHour.body.item.replayed, false);
     assert.notEqual(nextHour.body.item.id, first.body.item.id);
     const db = createConnection({ databaseUrl: join(tempDir, "ops-alerts.sqlite") });
-    assert.equal(db.prepare("SELECT COUNT(*) AS count FROM weixin_confirmation_outbox").get().count, 2);
+    assert.equal(db.prepare("SELECT COUNT(*) AS count FROM in_app_notifications").get().count, 2);
     db.close();
   });
 
@@ -244,11 +243,11 @@ describe("ops alerts machine endpoint", () => {
     assert.equal(replay.body.item.id, first.body.item.id);
 
     const db = createConnection({ databaseUrl: join(tempDir, "ops-alerts.sqlite") });
-    assert.equal(db.prepare("SELECT COUNT(*) AS count FROM weixin_confirmation_outbox").get().count, 1);
+    assert.equal(db.prepare("SELECT COUNT(*) AS count FROM in_app_notifications").get().count, 1);
     db.close();
   });
 
-  it("sweeps stale ops alerts before listening without expiring business outbox rows", async () => {
+  it("sweeps stale ops alerts without delivering queued legacy notices to Clawbot", async () => {
     const databaseUrl = join(tempDir, "ops-alerts.sqlite");
     const seedDb = openDatabase({ databaseUrl });
     let id = 0;
@@ -292,7 +291,7 @@ describe("ops alerts machine endpoint", () => {
     ].sort((left, right) => left.id.localeCompare(right.id)));
   });
 
-  it("returns 503 without a bound WeChat target and has no fallback notification option", async () => {
+  it("returns 503 without an active admin recipient and has no fallback notification option", async () => {
     await startServer({
       seedBinding: false,
     });
@@ -308,7 +307,7 @@ describe("ops alerts machine endpoint", () => {
     db.close();
   });
 
-  it("keeps the alert queued while the worker reports an expired context", async () => {
+  it("stores alerts in-app even when the bookkeeping worker context is expired", async () => {
     await startServer();
     const report = await request("/api/integrations/weixin-agent/confirmation-outbox", {
       headers: {
@@ -326,7 +325,11 @@ describe("ops alerts machine endpoint", () => {
       body: JSON.stringify(alertBody()),
     });
     assert.equal(accepted.response.status, 200);
-    assert.equal(accepted.body.item.status, "queued");
+    assert.equal(accepted.body.item.status, "sent");
+    const db = createConnection({ databaseUrl: join(tempDir, "ops-alerts.sqlite") });
+    assert.equal(db.prepare("SELECT COUNT(*) AS count FROM in_app_notifications WHERE category='ops_alert'").get().count, 1);
+    assert.equal(db.prepare("SELECT COUNT(*) AS count FROM weixin_confirmation_outbox WHERE json_extract(payload_json, '$.kind')='ops_alert'").get().count, 0);
+    db.close();
     const status = await request("/api/integrations/ops-alerts/status", {
       headers: { Authorization: `Bearer ${opsToken}` },
     });
@@ -360,14 +363,14 @@ describe("ops alerts machine endpoint", () => {
     assert.equal(Object.hasOwn(status.body.item.weixinDelivery, "expiresAt"), false);
   });
 
-  it("delivers the rendered alert card to a ready worker lease", async () => {
+  it("does not lease an in-app alert to the bookkeeping worker", async () => {
     await startServer();
-    const queued = await request("/api/integrations/ops-alerts", {
+    const stored = await request("/api/integrations/ops-alerts", {
       method: "POST",
       headers: { Authorization: `Bearer ${opsToken}` },
       body: JSON.stringify(alertBody({ occurredAt: "2026-08-28T17:05:00.000Z" })),
     });
-    assert.equal(queued.response.status, 200);
+    assert.equal(stored.response.status, 200);
 
     const lease = await request("/api/integrations/weixin-agent/confirmation-outbox", {
       headers: {
@@ -376,14 +379,14 @@ describe("ops alerts machine endpoint", () => {
         "X-Weixin-Delivery-Scope": "weixin:multi:v1",
       },
     });
-    assert.equal(lease.response.status, 200);
-    assert.equal(lease.body.item.id, queued.body.item.id);
-    assert.equal(lease.body.item.targetSenderId, sender);
-    assert.equal(lease.body.item.deliveryScope, shortcutBookkeepingConversationId(owner, sender));
-    assert.match(lease.body.item.message, /【小小运维告警】/u);
-    assert.match(lease.body.item.message, /级别：严重/u);
-    assert.match(lease.body.item.message, /来源：systemd:sentelligent-frontend.service/u);
-    assert.match(lease.body.item.message, /时间：2026-08-29 01:05（\+08:00）/u);
-    assert.match(lease.body.item.message, /摘要：systemd 单元失败：sentelligent-frontend.service/u);
+    assert.equal(lease.response.status, 204);
+    const db = createConnection({ databaseUrl: join(tempDir, "ops-alerts.sqlite") });
+    const userNotice = db.prepare("SELECT id,body,owner FROM in_app_notifications WHERE category='ops_alert'").get();
+    assert.equal(userNotice.id, stored.body.item.id);
+    assert.equal(userNotice.owner, owner);
+    assert.match(userNotice.body, /级别：严重/u);
+    assert.match(userNotice.body, /来源：systemd:sentelligent-frontend.service/u);
+    assert.match(userNotice.body, /摘要：systemd 单元失败：sentelligent-frontend.service/u);
+    db.close();
   });
 });

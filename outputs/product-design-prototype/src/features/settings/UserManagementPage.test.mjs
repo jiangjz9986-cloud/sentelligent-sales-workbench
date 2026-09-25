@@ -70,17 +70,16 @@ test("error codes map to operator-friendly toasts and conflicts refresh the list
   assert.match(source, /reloadList\(\)/);
 });
 
-test("the weixin binding panel lists bindings with switches, unbind, and a one-time code drawer (v0.9.3)", async () => {
+test("the weixin binding panel keeps bookkeeping consent separate from in-app notices", async () => {
   const source = await readFile(pagePath, "utf8");
 
   assert.match(source, /data-testid="weixin-binding-panel"/);
   assert.match(source, /data-testid="weixin-binding-table"/);
-  for (const column of ["微信标识", "记账能力", "主动推送", "绑定时间"]) {
+  for (const column of ["微信标识", "记账能力", "其他通知", "绑定时间"]) {
     assert.match(source, new RegExp(column));
   }
   assert.match(source, /data-testid=\{`user-bindcode-\$\{user\.account\}`\}/);
   assert.match(source, /data-testid=\{`binding-financial-\$\{binding\.account\}`\}/);
-  assert.match(source, /data-testid=\{`binding-digest-\$\{binding\.account\}`\}/);
   assert.match(source, /data-testid=\{`binding-unbind-\$\{binding\.account\}`\}/);
   assert.match(source, /listWeixinBindings/);
   assert.match(source, /createWeixinBindingCode\(user\.account\)/);
@@ -92,6 +91,9 @@ test("the weixin binding panel lists bindings with switches, unbind, and a one-t
   assert.match(source, /10 分钟内有效、只可使用一次/);
   assert.match(source, /开通后该微信可直接写入财务流水/);
   assert.match(source, /未投递的消息会被静默作废/);
+  assert.match(source, /站内通知中心/);
+  assert.doesNotMatch(source, /binding-digest-/);
+  assert.doesNotMatch(source, /晨报等主动推送/);
   // 错误词表映射。
   assert.match(source, /ACCOUNT_ALREADY_BOUND/);
   assert.match(source, /USER_DISABLED/);

@@ -5,10 +5,14 @@ import { decryptSecret, encryptSecret, maskSecret } from "./secretBox.js";
 
 export const DEEPSEEK_SETTING_KEY = "deepseek_api_key";
 export const ASR_SETTING_KEY = "asr_api_key";
+export const HOSPITAL_TENDER_PUSHPLUS_TOKEN_SETTING_KEY = ["hospital", "tender", "pushplus", "token"].join("_");
+export const HOSPITAL_TENDER_PUSHPLUS_ACCESS_KEY_SETTING_KEY = "hospital_tender_pushplus_access_key";
 
 const ALLOWED_KEYS = new Set([
   DEEPSEEK_SETTING_KEY,
   ASR_SETTING_KEY,
+  HOSPITAL_TENDER_PUSHPLUS_TOKEN_SETTING_KEY,
+  HOSPITAL_TENDER_PUSHPLUS_ACCESS_KEY_SETTING_KEY,
 ]);
 const SYNC_STATES = new Set(["local", "pending", "synchronized", "degraded", "unknown"]);
 const OPERATION_STATES = new Set(["prepared", "platform_applied", "synchronized", "aborted", "compensated", "unknown"]);

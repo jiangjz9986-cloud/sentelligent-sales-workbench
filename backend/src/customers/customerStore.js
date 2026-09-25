@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { isIP } from "node:net";
 
 import { get, run } from "../db.js";
 import { withImmediateTransaction } from "../db/transaction.js";
@@ -32,6 +33,66 @@ function patchValue(body, field, currentValue) {
 
 function patchJsonValue(body, field, currentValue) {
   return Object.hasOwn(body, field) ? json(body[field]) : json(currentValue);
+}
+
+function normalizeTenderSources(value) {
+  if (value === undefined || value === null) return [];
+  if (!Array.isArray(value) || value.length > 20) {
+    throw new HttpError(422, "VALIDATION_ERROR", "客户公告来源配置无效", { tenderSources: "array" });
+  }
+  const seenIds = new Set();
+  const seenUrls = new Set();
+  return value.map((source, index) => {
+    const field = `tenderSources.${index}`;
+    if (!source || typeof source !== "object" || Array.isArray(source)) {
+      throw new HttpError(422, "VALIDATION_ERROR", "客户公告来源配置无效", { [field]: "object" });
+    }
+    const allowedKeys = new Set(["id", "type", "label", "url"]);
+    if (Object.keys(source).some((key) => !allowedKeys.has(key))) {
+      throw new HttpError(422, "VALIDATION_ERROR", "客户公告来源字段无效", { [field]: "unknown" });
+    }
+    const type = typeof source.type === "string" ? source.type.trim() : "";
+    const url = typeof source.url === "string" ? source.url.trim() : "";
+    const label = source.label === undefined ? "" : source.label;
+    if (typeof label !== "string") {
+      throw new HttpError(422, "VALIDATION_ERROR", "客户公告来源名称无效", { [`${field}.label`]: "string" });
+    }
+    if (!new Set(["hospital_official", "public_resource"]).has(type)) {
+      throw new HttpError(422, "VALIDATION_ERROR", "客户公告来源类型无效", { [`${field}.type`]: "enum" });
+    }
+    let parsed;
+    try {
+      parsed = new URL(url);
+    } catch {
+      parsed = null;
+    }
+    const hostname = parsed?.hostname?.replace(/^\[|\]$/gu, "").toLowerCase() ?? "";
+    if (
+      !parsed
+      || !["http:", "https:"].includes(parsed.protocol)
+      || parsed.username
+      || parsed.password
+      || !hostname
+      || hostname === "localhost"
+      || hostname.endsWith(".localhost")
+      || isIP(hostname)
+      || url.length > 2048
+      || label.length > 100
+    ) {
+      throw new HttpError(422, "VALIDATION_ERROR", "请输入有效的公开公告页地址", { [`${field}.url`]: "publicUrl" });
+    }
+    if (source.id !== undefined && (typeof source.id !== "string" || !source.id.trim())) {
+      throw new HttpError(422, "VALIDATION_ERROR", "客户公告来源编号无效", { [`${field}.id`]: "string" });
+    }
+    const id = typeof source.id === "string" ? source.id.trim() : randomUUID();
+    const urlKey = parsed.href;
+    if (id.length > 120 || seenIds.has(id) || seenUrls.has(urlKey)) {
+      throw new HttpError(422, "VALIDATION_ERROR", "公告来源不能重复", { [field]: "duplicate" });
+    }
+    seenIds.add(id);
+    seenUrls.add(urlKey);
+    return { id, type, label: label.trim(), url: parsed.href };
+  });
 }
 
 function notFound() {
@@ -70,6 +131,7 @@ export function customerFromRow(row) {
     opportunities: parseJson(row.opportunities),
     aliases: parseJson(row.aliases),
     tags: parseJson(row.tags),
+    tenderSources: parseJson(row.tender_sources),
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -93,12 +155,12 @@ export function createCustomer(db, body, { id = randomUUID() } = {}) {
       id, name, region, type, level, owner, contact, relation,
       stakeholders, decision_chain, history_projects, infrastructure,
       sync_preview, budget, summary, needs, risks, opportunities,
-      aliases, tags
+      aliases, tags, tender_sources
     ) VALUES (
       $id, $name, $region, $type, $level, $owner, $contact, $relation,
       $stakeholders, $decisionChain, $historyProjects, $infrastructure,
       $syncPreview, $budget, $summary, $needs, $risks, $opportunities,
-      $aliases, $tags
+      $aliases, $tags, $tenderSources
     )`,
     {
       $id: id,
@@ -121,6 +183,7 @@ export function createCustomer(db, body, { id = randomUUID() } = {}) {
       $opportunities: json(body.opportunities),
       $aliases: json(body.aliases),
       $tags: json(body.tags),
+      $tenderSources: json(normalizeTenderSources(body.tenderSources)),
     },
   );
   return customerFromRow(get(db, "SELECT * FROM customers WHERE id = $id", { $id: id }));
@@ -152,6 +215,7 @@ export function updateCustomer(db, id, body, expectedVersion, { owner = null } =
          opportunities = $opportunities,
          aliases = $aliases,
          tags = $tags,
+         tender_sources = $tenderSources,
          version = version + 1,
          updated_at = CURRENT_TIMESTAMP
        WHERE id = $id
@@ -179,6 +243,7 @@ export function updateCustomer(db, id, body, expectedVersion, { owner = null } =
       $opportunities: patchJsonValue(body, "opportunities", current.opportunities),
       $aliases: patchJsonValue(body, "aliases", current.aliases),
       $tags: patchJsonValue(body, "tags", current.tags),
+      $tenderSources: json(normalizeTenderSources(patchValue(body, "tenderSources", current.tenderSources))),
     },
   );
   if (result.changes !== 1) {

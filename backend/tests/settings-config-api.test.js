@@ -12,6 +12,8 @@ import {
   ASR_SETTING_KEY,
   createSecureSettingsRepository,
   DEEPSEEK_SETTING_KEY,
+  HOSPITAL_TENDER_PUSHPLUS_ACCESS_KEY_SETTING_KEY,
+  HOSPITAL_TENDER_PUSHPLUS_TOKEN_SETTING_KEY,
 } from "../src/settings/repository.js";
 import { maskSecret } from "../src/settings/secretBox.js";
 
@@ -109,6 +111,20 @@ function readSecureSettingState(key) {
         ORDER BY rowid
       `).all({ $key: key }).map((row) => ({ ...row })),
     };
+  } finally {
+    db.close();
+  }
+}
+
+function readPushplusAudit() {
+  const db = createConnection({ databaseUrl });
+  try {
+    return db.prepare(`
+      SELECT action, entity_type, entity_id, actor, metadata_json, before_json, after_json
+      FROM audit_logs
+      WHERE entity_type = 'secure_setting' AND entity_id = 'hospital_tender_pushplus'
+      ORDER BY rowid
+    `).all().map((row) => ({ ...row }));
   } finally {
     db.close();
   }
@@ -499,7 +515,7 @@ describe("secure system settings API", () => {
       headers,
       body: JSON.stringify({ [apiKeyField]: value }),
     });
-    assert.equal(saved.response.status, 200);
+    assert.equal(saved.response.status, 200, JSON.stringify(saved.body));
     assert.equal(saved.body.item.source, "ai-platform");
     assert.equal(saved.body.item.syncState, "synchronized");
     assert.equal(saved.body.item.platformRevision, 1);
@@ -591,7 +607,7 @@ describe("secure system settings API", () => {
       headers,
       body: JSON.stringify({ [apiKeyField]: value }),
     });
-    assert.equal(saved.response.status, 200);
+    assert.equal(saved.response.status, 200, JSON.stringify(saved.body));
     assert.equal(saved.body.item.syncState, "synchronized");
     assert.equal(saved.body.item.platformRevision, 1);
     assert.equal(platform.value, value);
@@ -1145,5 +1161,155 @@ describe("secure system settings API", () => {
       assert.doesNotMatch(responseDump, new RegExp(value, "u"));
     }
     assert.deepEqual(readSettingsState(), { asr: null, audit: [] });
+  });
+});
+
+describe("hospital tender PushPlus secure settings API", () => {
+  it("stores credentials encrypted, updates the live notifier, and never returns secret text", async () => {
+    const environmentToken = ["fixture", "environment", "pushplus", "token"].join("-");
+    const environmentAccessKey = ["fixture", "environment", "pushplus", "access"].join("-");
+    const token = ["fixture", "web", "pushplus", "token"].join("-");
+    const accessKey = ["fixture", "web", "pushplus", "access", "key"].join("-");
+    const providerCalls = [];
+    let fakeNow = new Date("2026-09-25T03:00:00.000Z");
+    await startServer({
+      hospitalTenderAutoRun: true,
+      hospitalTenderPushplusToken: environmentToken,
+      hospitalTenderPushplusAccessKey: environmentAccessKey,
+      hospitalTenderPushplusClock: () => new Date(fakeNow),
+      pushplusFetchImpl: async (url, init = {}) => {
+        const parsed = new URL(url);
+        if (parsed.pathname.endsWith("/send")) {
+          const body = JSON.parse(String(init.body ?? "{}"));
+          providerCalls.push({ path: parsed.pathname, token: body.token });
+          return new Response(JSON.stringify({ code: 200, data: "fixture-short-code" }), { status: 200 });
+        }
+        providerCalls.push({ path: parsed.pathname, accessKey: init.headers?.["access-key"] });
+        return new Response(JSON.stringify({ code: 200, data: { status: 2 } }), { status: 200 });
+      },
+    });
+    const auth = await login();
+    const headers = { Cookie: auth.cookie, "X-CSRF-Token": auth.csrf };
+
+    const initial = await request("/api/settings/pushplus-credentials", { headers });
+    assert.equal(initial.response.status, 200);
+    assert.equal(initial.response.headers.get("cache-control"), "no-store");
+    assert.equal(initial.body.item.token.source, "environment");
+    assert.equal(initial.body.item.accessKey.source, "environment");
+    assert.doesNotMatch(JSON.stringify(initial.body), new RegExp(environmentToken, "u"));
+    assert.doesNotMatch(JSON.stringify(initial.body), new RegExp(environmentAccessKey, "u"));
+
+    server.hospitalTenderSchedulerRepository.updateState({ enabled: true });
+    const saved = await request("/api/settings/pushplus-credentials", {
+      method: "PUT",
+      headers,
+      body: JSON.stringify({ token, accessKey }),
+    });
+    assert.equal(saved.response.status, 200, JSON.stringify(saved.body));
+    assert.equal(saved.body.item.token.source, "settings");
+    assert.equal(saved.body.item.accessKey.source, "settings");
+    assert.equal(server.hospitalTenderScheduler.isStarted(), true);
+    const responseDump = JSON.stringify(saved.body);
+    for (const secret of [token, accessKey, environmentToken, environmentAccessKey]) {
+      assert.doesNotMatch(responseDump, new RegExp(secret, "u"));
+    }
+
+    for (const [key, secret] of [
+      [HOSPITAL_TENDER_PUSHPLUS_TOKEN_SETTING_KEY, token],
+      [HOSPITAL_TENDER_PUSHPLUS_ACCESS_KEY_SETTING_KEY, accessKey],
+    ]) {
+      const state = readSecureSettingState(key);
+      assert.equal(readSecureSecret(key), secret);
+      assert.equal(state.setting.status, "active");
+      assert.notEqual(state.setting.ciphertext, secret);
+      assert.doesNotMatch(state.setting.ciphertext, new RegExp(secret, "u"));
+    }
+    const auditDump = JSON.stringify(readPushplusAudit());
+    for (const secret of [token, accessKey, environmentToken, environmentAccessKey]) {
+      assert.doesNotMatch(auditDump, new RegExp(secret, "u"));
+    }
+
+    assert.equal(await server.hospitalTenderPushplusNotifier.notify({
+      cycleNumber: 1,
+      batchCustomerIds: ["customer-1"],
+      notices: [{ title: "公开招标", sourceName: "医院官网", publishedAt: "2026-09-25", url: "https://example.test/tender/1" }],
+    }), 1);
+    assert.equal(providerCalls[0].token, token);
+    fakeNow = new Date(fakeNow.getTime() + 60_000);
+    assert.deepEqual(await server.hospitalTenderPushplusNotifier.pollPending(), { checked: 1, sent: 1, failed: 0 });
+    assert.equal(providerCalls[1].accessKey, accessKey);
+
+    const cleared = await request("/api/settings/pushplus-credentials", {
+      method: "DELETE",
+      headers,
+      body: JSON.stringify({ confirmation: "CLEAR" }),
+    });
+    assert.equal(cleared.response.status, 200);
+    assert.equal(cleared.body.item.token.status, "cleared");
+    assert.equal(cleared.body.item.accessKey.status, "cleared");
+    assert.equal(server.hospitalTenderScheduler.isStarted(), false);
+    assert.equal(server.hospitalTenderScheduler.getState().enabled, false);
+    await assert.rejects(
+      () => server.hospitalTenderPushplusNotifier.notify({ notices: [{ title: "公告" }] }),
+      /PUSHPLUS_TOKEN_NOT_CONFIGURED/u,
+    );
+    assert.deepEqual(readPushplusAudit().map((row) => row.action), [
+      "settings.hospital_tender_pushplus.save",
+      "settings.hospital_tender_pushplus.clear",
+    ]);
+  });
+
+  it("keeps auto-run and manual monitoring stopped until both web credentials exist", async () => {
+    await startServer({ hospitalTenderAutoRun: true });
+    server.hospitalTenderSchedulerRepository.updateState({ enabled: true });
+    assert.equal(server.hospitalTenderScheduler.isStarted(), false);
+    const auth = await login();
+    const headers = { Cookie: auth.cookie, "X-CSRF-Token": auth.csrf };
+    const manual = await request("/api/hospital-tenders/scheduler/run-next", {
+      method: "POST",
+      headers,
+      body: "{}",
+    });
+    assert.equal(manual.response.status, 200);
+    assert.equal(manual.body.item.status, "success");
+    assert.equal(manual.body.item.notification.configured, false);
+    const enabled = await request("/api/hospital-tenders/scheduler", {
+      method: "PATCH",
+      headers,
+      body: JSON.stringify({ enabled: true }),
+    });
+    assert.equal(enabled.response.status, 409);
+    assert.equal(enabled.body.error.code, "PUSHPLUS_CREDENTIALS_REQUIRED");
+    assert.equal(server.hospitalTenderScheduler.isStarted(), false);
+  });
+
+  it("requires an active admin, CSRF-protected writes, and nonempty credential input", async () => {
+    await startServer();
+    assert.equal((await request("/api/settings/pushplus-credentials")).response.status, 401);
+    const auth = await login();
+    const badCsrf = await request("/api/settings/pushplus-credentials", {
+      method: "PUT",
+      headers: { Cookie: auth.cookie },
+      body: JSON.stringify({ token: ["synthetic", "csrf", "pushplus"].join("-") }),
+    });
+    assert.equal(badCsrf.response.status, 403);
+    assert.equal(badCsrf.body.error.code, "CSRF_INVALID");
+    const db = createConnection({ databaseUrl });
+    try {
+      db.prepare("UPDATE users SET role = 'member' WHERE account = $account").run({ $account: account });
+    } finally {
+      db.close();
+    }
+    const headers = { Cookie: auth.cookie, "X-CSRF-Token": auth.csrf };
+    for (const [method, body] of [
+      ["GET", undefined],
+      ["PUT", JSON.stringify({ token: ["synthetic", "member", "pushplus"].join("-") })],
+      ["DELETE", JSON.stringify({ confirmation: "CLEAR" })],
+    ]) {
+      const result = await request("/api/settings/pushplus-credentials", { method, headers, body });
+      assert.equal(result.response.status, 403, method);
+      assert.equal(result.body.error.code, "ADMIN_ROLE_REQUIRED", method);
+    }
+    assert.deepEqual(readPushplusAudit(), []);
   });
 });

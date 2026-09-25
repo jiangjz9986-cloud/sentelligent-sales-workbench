@@ -5,6 +5,7 @@ import {
   BriefcaseBusiness,
   CalendarClock,
   Command,
+  Bell,
   FileText,
   Mic,
   MapPinned,
@@ -29,6 +30,7 @@ export const statusTone = {
 
 export const navItems = [
   { id: "overview", label: "战情总览", icon: Command },
+  { id: "notifications", label: "通知中心", icon: Bell },
   { id: "quick", label: "快速记录", icon: Mic },
   { id: "customer", label: "客户画像", icon: UsersRound },
   { id: "opportunity", label: "商机", icon: BriefcaseBusiness },

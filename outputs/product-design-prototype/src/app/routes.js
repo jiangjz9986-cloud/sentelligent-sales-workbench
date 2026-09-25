@@ -9,6 +9,7 @@ const CONTROL_CHARACTER_PATTERN = /[\u0000-\u001f\u007f-\u009f]/;
 
 const PAGE_META = Object.freeze({
   overview: Object.freeze({ active: "overview", defaultMode: "index", readOnly: false }),
+  notifications: Object.freeze({ active: "notifications", defaultMode: "index", readOnly: false }),
   "quick-records": Object.freeze({ active: "quick", defaultMode: "new", readOnly: false }),
   customers: Object.freeze({ active: "customer", defaultMode: "list", readOnly: false }),
   opportunities: Object.freeze({ active: "opportunity", defaultMode: "list", readOnly: false }),
@@ -145,6 +146,9 @@ function matchRoute(segments) {
   const [page] = segments;
   if (page === "overview" && segments.length === 1) {
     return routeState("overview", "index");
+  }
+  if (page === "notifications" && segments.length === 1) {
+    return routeState("notifications", "index");
   }
   if (page === "quick-records") {
     if (segments.length === 1) return routeState(page, "new");
@@ -562,6 +566,10 @@ function pathForRoute(route) {
   if (page === "overview" && mode === "index") {
     assertNoEntityId(route);
     return "overview";
+  }
+  if (page === "notifications" && mode === "index") {
+    assertNoEntityId(route);
+    return "notifications";
   }
   if (page === "quick-records") {
     if (mode === "new") {

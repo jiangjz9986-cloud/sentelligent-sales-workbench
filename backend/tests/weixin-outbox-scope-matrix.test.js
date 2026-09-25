@@ -13,7 +13,7 @@ import { createServer } from "../src/server.js";
 import { createActionReminderScheduler } from "../src/actionReminders/reminderScheduler.js";
 import { createDailyDigestScheduler } from "../src/dailyDigest/digestScheduler.js";
 import { shanghaiDateParts } from "../src/dailyDigest/digestContent.js";
-import { createHospitalTenderWeixinNotifier } from "../src/hospitalTender/weixinNotifier.js";
+import { createInAppDeliveryAdapter } from "../src/notifications/inAppDelivery.js";
 import { createOpsAlertService } from "../src/ops/opsAlertService.js";
 import { shortcutBookkeepingConversationId } from "../src/weixin/bookkeepingDeliveryScope.js";
 import { createWeixinBindingsRepository } from "../src/weixin/bindingsRepository.js";
@@ -43,6 +43,7 @@ let bindings;
 let outbox;
 let outboxSequence;
 let fixedNow;
+let pushplusCalls;
 
 function clock() {
   return new Date(fixedNow);
@@ -196,24 +197,6 @@ function reminderStoreStub(itemsByOwner) {
   };
 }
 
-function makeTenderNotifier(overrides = {}) {
-  return createHospitalTenderWeixinNotifier({
-    outboxRepository: outbox,
-    resolveDigestDeliveries: () => bindings.listDigestTargets(),
-    resolveAdminDeliveries: () => bindings.listAdminTargets()
-      .filter((target) => bindings.activeByAccount(target.account)?.digestEnabled === true),
-    resolveCustomerOwners: (customerIds) => {
-      const map = new Map();
-      for (const id of customerIds) {
-        if (id === "cust-a") map.set(id, OWNER_A);
-        if (id === "cust-b") map.set(id, OWNER_B);
-      }
-      return map;
-    },
-    ...overrides,
-  });
-}
-
 function tenderNotice(title, customerIds) {
   return {
     title,
@@ -228,6 +211,7 @@ beforeEach(async () => {
   tempDir = await mkdtemp(join(tmpdir(), "sent-weixin-scope-matrix-"));
   databaseUrl = join(tempDir, "scope-matrix.sqlite");
   outboxSequence = 0;
+  pushplusCalls = [];
   fixedNow = "2026-08-28T09:00:00.000Z"; // 周五 17:00 Asia/Shanghai：晨报与周五收尾同 tick 补发
   server = createServer({
     databaseUrl,
@@ -242,6 +226,11 @@ beforeEach(async () => {
     weixinAgentApiToken: machineToken,
     weixinAgentOwner: OWNER_A,
     weixinBookkeepingConfirmationEnabled: true,
+    hospitalTenderPushplusToken: ["fixture", "pushplus", "token"].join("-"),
+    pushplusFetchImpl: async (url, options) => {
+      pushplusCalls.push({ url: String(url), options });
+      return { ok: true, status: 200, json: async () => ({ code: 200, data: `fixture-${pushplusCalls.length}` }) };
+    },
     assistantConfirmationSecret: confirmationSecret,
     assistantClock: clock,
     weixinConfirmationOutboxClock: clock,
@@ -281,6 +270,21 @@ beforeEach(async () => {
   });
 });
 
+async function createBookkeepingOutboxRow({
+  senderId = SENDER_A,
+  owner = senderId === SENDER_B ? OWNER_B : OWNER_A,
+  messageId = "scope-matrix-bookkeeping",
+} = {}) {
+  const existingIds = new Set(outboxRows().map((candidate) => candidate.id));
+  const result = await postEvent(senderId, `支出 2026-08-26 打车 18.80元 ${messageId}`, messageId);
+  assert.equal(result.response.status, 200);
+  const row = outboxRows().find((candidate) => candidate.owner === owner
+    && candidate.status === "queued"
+    && !existingIds.has(candidate.id));
+  assert.ok(row, "bookkeeping should create a queued WeChat confirmation");
+  return row;
+}
+
 afterEach(async () => {
   if (server) await new Promise((resolve) => server.close(resolve));
   server = null;
@@ -290,7 +294,7 @@ afterEach(async () => {
 });
 
 describe("weixin outbox scope matrix", () => {
-  it("delivers all five producers strictly to each owner's bound sender with zero crossover", async () => {
+  it("keeps Clawbot bookkeeping-only and stores every other notice in its dedicated channel", async () => {
     // 1) 记账确认卡（A，financial=1，经真实事件入口）。
     const card = await postEvent(SENDER_A, "支出 2026-08-26 打车 18.80元 matrix 交通", "matrix-card-a");
     assert.equal(card.response.status, 200);
@@ -305,13 +309,19 @@ describe("weixin outbox scope matrix", () => {
       "a financial-disabled binding must not enqueue bookkeeping confirmations",
     );
 
-    // 2) 晨报 + 周五收尾多播（双 owner 各自内容）。
+    const inAppDelivery = createInAppDeliveryAdapter({
+      repository: server.inAppNotificationRepository,
+      renderMessage: (payload) => `${payload.kind}:${payload.summary ?? payload.title ?? payload.digestDate ?? ""}`,
+    });
+    const activeUsers = () => [OWNER_A, OWNER_B].map((account) => ({ account, owner: account, conversationId: "in-app" }));
+
+    // 2) 晨报 + 周五收尾多播（双 owner 各自进入站内通知）。
     const digestScheduler = createDailyDigestScheduler({
       db,
-      outboxRepository: outbox,
+      outboxRepository: inAppDelivery,
       buildDailyDigest: digestBuilderStub("daily"),
       buildFridayCloseout: digestBuilderStub("friday"),
-      resolveDeliveries: () => bindings.listDigestTargets(),
+      resolveDeliveries: activeUsers,
       deliveryReady: () => true,
       clock,
       pollMs: 60_000,
@@ -320,24 +330,23 @@ describe("weixin outbox scope matrix", () => {
     });
     await digestScheduler.runOnce();
 
-    // 3) 待办提醒多播。
+    // 3) 待办提醒进入站内通知中心，不受微信 digest 开关影响。
     const reminderScheduler = createActionReminderScheduler({
       db,
       store: reminderStoreStub(new Map([
         [OWNER_A, [{ id: "act-a-1", title: "matrix-reminder-A", remindAt: "2026-08-27T00:00:00.000Z", priority: "高", customerName: null, reason: null }]],
         [OWNER_B, [{ id: "act-b-1", title: "matrix-reminder-B", remindAt: "2026-08-27T00:00:00.000Z", priority: "中", customerName: null, reason: null }]],
       ])),
-      outboxRepository: outbox,
-      resolveDeliveries: () => bindings.listDigestTargets(),
+      outboxRepository: inAppDelivery,
+      resolveDeliveries: activeUsers,
       deliveryReady: () => true,
       clock,
       pollMs: 60_000,
     });
     await reminderScheduler.runOnce();
 
-    // 4) 招标按客户 owner 分组推送。
-    const notifier = makeTenderNotifier();
-    const notified = await notifier({
+    // 4) 招标通过 PushPlus；transport 是 stub，不访问真实 provider。
+    const notified = await server.hospitalTenderPushplusNotifier.notify({
       cycleNumber: 3,
       batchCustomerIds: ["cust-a", "cust-b"],
       notices: [
@@ -346,12 +355,13 @@ describe("weixin outbox scope matrix", () => {
       ],
     });
     assert.equal(notified, 2);
+    assert.equal(pushplusCalls.length, 1);
 
-    // 5) 运维告警：只投 active admin 绑定（A），member 绑定 B 不收。
+    // 5) 运维告警进入管理员的站内通知。
     const opsAlerts = createOpsAlertService({
-      outboxRepository: outbox,
-      resolveDeliveries: () => bindings.listAdminTargets(),
-      weixinDeliveryReady: () => true,
+      outboxRepository: inAppDelivery,
+      deliveryMode: "in_app",
+      resolveDeliveries: () => [{ account: OWNER_A, owner: OWNER_A, conversationId: "in-app" }],
       clock,
     });
     await opsAlerts.receive(
@@ -360,31 +370,25 @@ describe("weixin outbox scope matrix", () => {
     );
 
     const rows = outboxRows();
-    const rowsA = rows.filter((row) => row.owner === OWNER_A);
-    const rowsB = rows.filter((row) => row.owner === OWNER_B);
-    assert.equal(rowsA.length, 6, "A: card + daily + friday + reminder + tender + alert");
-    assert.equal(rowsB.length, 4, "B: daily + friday + reminder + tender");
-    assert.ok(rowsA.every((row) => row.conversation_id === convA), "invariant: A rows carry hash(A, senderA)");
-    assert.ok(rowsB.every((row) => row.conversation_id === convB), "invariant: B rows carry hash(B, senderB)");
+    assert.equal(rows.length, 1, "only a bookkeeping confirmation may enter the WeChat outbox");
+    assert.equal(rows[0].owner, OWNER_A);
+    assert.equal(rows[0].conversation_id, convA);
+    assert.notEqual(JSON.parse(rows[0].payload_json).kind, "ops_alert");
+    assert.equal(server.inAppNotificationRepository.count({ owner: OWNER_A }), 4);
+    assert.equal(server.inAppNotificationRepository.count({ owner: OWNER_B }), 3);
+    assert.equal(server.hospitalTenderPushplusDeliveryRepository.statusCounts().accepted, 1);
 
     const bot = makeBot();
     await drainOutbox({ bot });
 
     const sentByTarget = new Map([[SENDER_A, []], [SENDER_B, []]]);
     for (const call of bot.calls) sentByTarget.get(call.target)?.push(call.message);
-    assert.equal(sentByTarget.get(SENDER_A).length, 6);
-    assert.equal(sentByTarget.get(SENDER_B).length, 4);
+    assert.equal(sentByTarget.get(SENDER_A).length, 1);
+    assert.equal(sentByTarget.get(SENDER_B).length, 0);
     const joinedA = sentByTarget.get(SENDER_A).join("\n---\n");
     const joinedB = sentByTarget.get(SENDER_B).join("\n---\n");
-    assert.match(joinedA, /matrix-daily-jiangjz/);
-    assert.match(joinedA, /matrix-reminder-A/);
-    assert.match(joinedA, /matrix-tender-A 公告/);
-    assert.match(joinedA, /matrix-alert 摘要/);
-    assert.doesNotMatch(joinedA, /matrix-daily-testb|matrix-reminder-B|matrix-tender-B/);
-    assert.match(joinedB, /matrix-daily-testb/);
-    assert.match(joinedB, /matrix-reminder-B/);
-    assert.match(joinedB, /matrix-tender-B 公告/);
-    assert.doesNotMatch(joinedB, /matrix-daily-jiangjz|matrix-reminder-A|matrix-tender-A|matrix-alert/);
+    assert.doesNotMatch(joinedA, /matrix-daily|matrix-reminder|matrix-tender|matrix-alert/u);
+    assert.equal(joinedB, "");
 
     // 逐行核销：每一次实际投递的目标 sender 必须与该行 owner 的绑定一致。
     const expectedTarget = new Map([[OWNER_A, SENDER_A], [OWNER_B, SENDER_B]]);
@@ -397,52 +401,57 @@ describe("weixin outbox scope matrix", () => {
 
   it("fails closed on forged, mismatched, and ghost-owner rows at the lease gate", async () => {
     // owner=A 但会话被指向 B：lease 闸判废。
-    outbox.enqueue({
+    const original = await createBookkeepingOutboxRow({ messageId: "matrix-forged-cross" });
+    const originalLease = await leaseOnce();
+    assert.equal(originalLease.response.status, 200);
+    await read(await fetch(`${baseUrl}/api/integrations/weixin-agent/confirmation-outbox`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${machineToken}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ id: originalLease.body.item.id, leaseToken: originalLease.body.leaseToken, ok: true }),
+    }));
+    const forgedRow = outbox.enqueue({
       owner: OWNER_A,
       conversationId: convB,
-      idempotencyKey: "matrix-forged-cross",
-      payload: { kind: "ops_alert", origin: "backend", severity: "warning", summary: "forged", occurredAt: fixedNow },
+      idempotencyKey: "matrix-forged-cross-conversation",
+      payload: JSON.parse(original.payload_json),
+      availableAt: new Date(Date.parse(fixedNow) - 1_000),
     });
     const forged = await leaseOnce();
     assert.equal(forged.response.status, 204);
-    let row = outboxRows().find((item) => item.idempotency_key_hash && JSON.parse(item.payload_json).summary === "forged");
+    let row = outboxRows().find((item) => item.id === forgedRow.id);
     assert.equal(row.status, "failed");
     assert.equal(row.last_error_code, "WEIXIN_DELIVERY_SCOPE_MISMATCH");
 
     // 无绑定 ghost owner：判废。
-    outbox.enqueue({
+    const ghostRow = outbox.enqueue({
       owner: "ghostacct",
       conversationId: shortcutBookkeepingConversationId("ghostacct", "sender-ghost"),
       idempotencyKey: "matrix-ghost-owner",
-      payload: { kind: "ops_alert", origin: "backend", severity: "warning", summary: "ghost", occurredAt: fixedNow },
+      payload: JSON.parse(original.payload_json),
     });
     const ghost = await leaseOnce();
-    assert.equal(ghost.response.status, 204);
-    row = outboxRows().find((item) => JSON.parse(item.payload_json).summary === "ghost");
+    assert.equal(ghost.response.status, 204, JSON.stringify(ghost.body));
+    row = outboxRows().find((item) => item.id === ghostRow.id);
     assert.equal(row.status, "failed");
     assert.equal(row.last_error_code, "WEIXIN_DELIVERY_SCOPE_MISMATCH");
 
     // 合法行：lease 响应携带 targetSenderId 且 deliveryScope ≡ conversationId。
-    outbox.enqueue({
+    const legitimate = outbox.enqueue({
       owner: OWNER_A,
       conversationId: convA,
       idempotencyKey: "matrix-legit-a",
-      payload: { kind: "ops_alert", origin: "backend", severity: "warning", summary: "legit", occurredAt: fixedNow },
+      payload: JSON.parse(original.payload_json),
     });
     const legit = await leaseOnce();
     assert.equal(legit.response.status, 200);
+    assert.equal(legit.body.item.id, legitimate.id);
     assert.equal(legit.body.item.targetSenderId, SENDER_A);
     assert.equal(legit.body.item.deliveryScope, legit.body.item.conversationId);
     assert.equal(legit.body.item.conversationId, convA);
   });
 
   it("re-verifies the hash on the worker and terminally rejects tampered lease targets", async () => {
-    outbox.enqueue({
-      owner: OWNER_A,
-      conversationId: convA,
-      idempotencyKey: "matrix-tampered",
-      payload: { kind: "ops_alert", origin: "backend", severity: "warning", summary: "tampered", occurredAt: fixedNow },
-    });
+    const tampered = await createBookkeepingOutboxRow({ messageId: "matrix-tampered" });
     const bot = makeBot();
     await drainOutbox({
       bot,
@@ -452,7 +461,7 @@ describe("weixin outbox scope matrix", () => {
       }),
     });
     assert.equal(bot.calls.length, 0, "a tampered target must never reach the SDK send path");
-    const row = outboxRows().find((item) => JSON.parse(item.payload_json).summary === "tampered");
+    const row = outboxRows().find((item) => item.id === tampered.id);
     assert.equal(row.status, "failed");
     assert.equal(row.last_error_code, "WEIXIN_DELIVERY_SCOPE_MISMATCH");
 
@@ -472,13 +481,8 @@ describe("weixin outbox scope matrix", () => {
   });
 
   it("acks an unreachable delivery target as retryable context-not-ready instead of terminal", async () => {
-    outbox.enqueue({
-      owner: OWNER_B,
-      conversationId: convB,
-      idempotencyKey: "matrix-unreachable",
-      payload: { kind: "ops_alert", origin: "backend", severity: "warning", summary: "unreachable", occurredAt: fixedNow },
-    });
-    const bot = makeBot({ deliverable: [SENDER_A] });
+    const unreachable = await createBookkeepingOutboxRow({ messageId: "matrix-unreachable" });
+    const bot = makeBot({ deliverable: [SENDER_B] });
     const client = createWeixinOutboxHttpClient({ backendUrl: baseUrl, apiToken: machineToken, workerId: "matrix-worker" });
     const abort = new AbortController();
     const pump = runWeixinOutboxPump({
@@ -490,115 +494,91 @@ describe("weixin outbox scope matrix", () => {
     });
     const startedAt = Date.now();
     while (Date.now() - startedAt < 5_000) {
-      const row = outboxRows().find((item) => JSON.parse(item.payload_json).summary === "unreachable");
+      const row = outboxRows().find((item) => item.id === unreachable.id);
       if (row && row.attempt_count >= 1 && row.status === "queued") break;
       await new Promise((resolve) => setTimeout(resolve, 40));
     }
     abort.abort();
     await pump;
-    const row = outboxRows().find((item) => JSON.parse(item.payload_json).summary === "unreachable");
+    const row = outboxRows().find((item) => item.id === unreachable.id);
     assert.equal(row.status, "queued", "context-not-ready must stay retryable");
     assert.equal(row.attempt_count, 1);
     assert.equal(row.last_error_code, "WEIXIN_CONTEXT_NOT_READY");
   });
 
   it("discards in-flight rows after unbind and rebind while newly bound senders receive fresh rows", async () => {
-    outbox.enqueue({
-      owner: OWNER_A,
-      conversationId: convA,
-      idempotencyKey: "matrix-lifecycle-a",
-      payload: { kind: "ops_alert", origin: "backend", severity: "warning", summary: "lifecycle-a", occurredAt: fixedNow },
-    });
-    outbox.enqueue({
-      owner: OWNER_B,
-      conversationId: convB,
-      idempotencyKey: "matrix-lifecycle-b",
-      payload: { kind: "ops_alert", origin: "backend", severity: "warning", summary: "lifecycle-b", occurredAt: fixedNow },
-    });
+    db.prepare("UPDATE weixin_bindings SET financial_enabled=1 WHERE sender_id=$sender").run({ $sender: SENDER_B });
+    const lifecycleA = await createBookkeepingOutboxRow({ messageId: "matrix-lifecycle-a" });
+    const lifecycleB = await createBookkeepingOutboxRow({ senderId: SENDER_B, messageId: "matrix-lifecycle-b" });
 
     // 解绑 B：其在途行判废、A 不受影响。
     bindings.disable(SENDER_B, { by: "unit-fixture" });
     // 一账号至多一条 active：B 未解绑前重复绑定新 sender 必须 409（此处已解绑，先验证换绑成功后再验证冲突）。
     const bot = makeBot({ deliverable: [SENDER_A, "sender-b2"] });
     await drainOutbox({ bot });
-    const rowA = outboxRows().find((item) => JSON.parse(item.payload_json).summary === "lifecycle-a");
-    const rowB = outboxRows().find((item) => JSON.parse(item.payload_json).summary === "lifecycle-b");
-    assert.equal(rowA.status, "sent");
+    const rowA = outboxRows().find((item) => item.id === lifecycleA.id);
+    const rowB = outboxRows().find((item) => item.id === lifecycleB.id);
+    assert.equal(rowA.status, "sent", JSON.stringify({ status: rowA.status, code: rowA.last_error_code, payload: JSON.parse(rowA.payload_json) }));
     assert.equal(bot.calls.filter((call) => call.target === SENDER_A).length, 1);
     assert.equal(rowB.status, "failed");
     assert.equal(rowB.last_error_code, "WEIXIN_DELIVERY_SCOPE_MISMATCH");
     assert.equal(bot.calls.filter((call) => call.target === SENDER_B).length, 0);
 
     // 换绑 senderB2：旧会话行判废、新行到达新 sender。
-    bindings.bind({ senderId: "sender-b2", account: OWNER_B, boundBy: "unit-fixture", financialEnabled: false });
+    bindings.bind({ senderId: "sender-b2", account: OWNER_B, boundBy: "unit-fixture", financialEnabled: true });
     assert.throws(
       () => bindings.bind({ senderId: "sender-b3", account: OWNER_B, boundBy: "unit-fixture" }),
       (error) => error?.code === "ACCOUNT_ALREADY_BOUND",
       "one active binding per account is enforced",
     );
-    outbox.enqueue({
+    const stale = outbox.enqueue({
       owner: OWNER_B,
       conversationId: convB,
       idempotencyKey: "matrix-lifecycle-stale",
-      payload: { kind: "ops_alert", origin: "backend", severity: "warning", summary: "lifecycle-stale", occurredAt: fixedNow },
+      payload: JSON.parse(lifecycleB.payload_json),
     });
-    outbox.enqueue({
+    const fresh = outbox.enqueue({
       owner: OWNER_B,
       conversationId: shortcutBookkeepingConversationId(OWNER_B, "sender-b2"),
       idempotencyKey: "matrix-lifecycle-fresh",
-      payload: { kind: "ops_alert", origin: "backend", severity: "warning", summary: "lifecycle-fresh", occurredAt: fixedNow },
+      payload: JSON.parse(lifecycleB.payload_json),
     });
     const rebindBot = makeBot({ deliverable: [SENDER_A, "sender-b2"] });
     await drainOutbox({ bot: rebindBot });
-    const stale = outboxRows().find((item) => JSON.parse(item.payload_json).summary === "lifecycle-stale");
-    const fresh = outboxRows().find((item) => JSON.parse(item.payload_json).summary === "lifecycle-fresh");
-    assert.equal(stale.status, "failed", "pre-rebind rows must never chase the new sender");
-    assert.equal(fresh.status, "sent");
+    const staleRow = outboxRows().find((item) => item.id === stale.id);
+    const freshRow = outboxRows().find((item) => item.id === fresh.id);
+    assert.equal(staleRow.status, "failed", "pre-rebind rows must never chase the new sender");
+    assert.equal(freshRow.status, "sent", JSON.stringify({ code: freshRow.last_error_code, payload: JSON.parse(freshRow.payload_json), conversation: freshRow.conversation_id }));
     assert.deepEqual(rebindBot.calls.map((call) => call.target), ["sender-b2"]);
   });
 
-  it("routes unowned tender notices to digest-enabled admin bindings and audits pushless leftovers", async () => {
-    const unroutedEvents = [];
-    const notifier = makeTenderNotifier({
-      resolveCustomerOwners: () => new Map(),
-      recordUnrouted: (event) => unroutedEvents.push(event),
-    });
-    const count = await notifier({
+  it("routes every tender notice through PushPlus independently of WeChat bindings", async () => {
+    const count = await server.hospitalTenderPushplusNotifier.notify({
       cycleNumber: 7,
       batchCustomerIds: ["cust-x"],
       notices: [tenderNotice("matrix-unrouted 公告", ["cust-x"])],
     });
     assert.equal(count, 1);
-    const adminRows = outboxRows().filter((row) => JSON.parse(row.payload_json).kind === "hospital_tender_notice");
-    assert.equal(adminRows.length, 1, "unrouted notices fall back to the admin digest binding");
-    assert.equal(adminRows[0].owner, OWNER_A);
-    assert.equal(adminRows[0].conversation_id, convA);
-    assert.equal(unroutedEvents.length, 0);
+    assert.equal(pushplusCalls.length, 1);
+    assert.equal(server.hospitalTenderPushplusDeliveryRepository.statusCounts().accepted, 1);
+    assert.equal(outboxRows().length, 0);
 
-    // admin 绑定也不在（B 停用 + A 停用）→ 审计 unrouted 后视为已处理。
+    // 停用全部微信绑定不影响医院招标的 PushPlus 投递。
     bindings.disable(SENDER_A, { by: "unit-fixture" });
     bindings.disable(SENDER_B, { by: "unit-fixture" });
-    const orphanNotifier = makeTenderNotifier({
-      resolveCustomerOwners: () => new Map(),
-      recordUnrouted: (event) => unroutedEvents.push(event),
-    });
-    const orphanCount = await orphanNotifier({
+    const secondCount = await server.hospitalTenderPushplusNotifier.notify({
       cycleNumber: 8,
       batchCustomerIds: ["cust-x"],
       notices: [tenderNotice("matrix-orphan 公告", ["cust-x"])],
     });
-    assert.equal(orphanCount, 1, "audited unrouted notices count as handled for the scheduler contract");
-    assert.equal(unroutedEvents.length, 1);
-    assert.equal(unroutedEvents[0].count, 1);
+    assert.equal(secondCount, 1);
+    assert.equal(pushplusCalls.length, 2);
+    assert.equal(server.hospitalTenderPushplusDeliveryRepository.statusCounts().accepted, 2);
+    assert.equal(outboxRows().length, 0);
   });
 
   it("upgrades the readiness protocol to the multi sentinel and fails closed for stale workers", async () => {
-    outbox.enqueue({
-      owner: OWNER_A,
-      conversationId: convA,
-      idempotencyKey: "matrix-protocol",
-      payload: { kind: "ops_alert", origin: "backend", severity: "warning", summary: "protocol", occurredAt: fixedNow },
-    });
+    const protocol = await createBookkeepingOutboxRow({ messageId: "matrix-protocol" });
 
     // 旧 worker 报旧 scope：不放租约、行保持 queued。
     const legacy = await leaseOnce(convA);
@@ -613,6 +593,7 @@ describe("weixin outbox scope matrix", () => {
     // multi:v1 哨兵：放租约。
     const granted = await leaseOnce(MULTI_SCOPE);
     assert.equal(granted.response.status, 200);
+    assert.equal(granted.body.item.id, protocol.id);
     assert.equal(granted.body.item.targetSenderId, SENDER_A);
 
     // hasActive()=false → configuration_incomplete，不再发租约也不判废行。
@@ -621,17 +602,17 @@ describe("weixin outbox scope matrix", () => {
       headers: { Authorization: `Bearer ${machineToken}`, "Content-Type": "application/json" },
       body: JSON.stringify({ id: granted.body.item.id, leaseToken: granted.body.leaseToken, ok: true }),
     }));
-    outbox.enqueue({
+    const protocol2 = outbox.enqueue({
       owner: OWNER_A,
       conversationId: convA,
       idempotencyKey: "matrix-protocol-2",
-      payload: { kind: "ops_alert", origin: "backend", severity: "warning", summary: "protocol-2", occurredAt: fixedNow },
+      payload: JSON.parse(protocol.payload_json),
     });
     bindings.disable(SENDER_A, { by: "unit-fixture" });
     bindings.disable(SENDER_B, { by: "unit-fixture" });
     const unconfigured = await leaseOnce(MULTI_SCOPE);
     assert.equal(unconfigured.response.status, 204);
-    const untouched = outboxRows().find((item) => JSON.parse(item.payload_json).summary === "protocol-2");
+    const untouched = outboxRows().find((item) => item.id === protocol2.id);
     assert.equal(untouched.status, "queued", "configuration_incomplete must not burn rows");
   });
 });

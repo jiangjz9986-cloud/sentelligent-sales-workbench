@@ -158,13 +158,19 @@ function confirmNoInvoice(db, { id, owner, cents = 12_800 } = {}) {
 
 function outboxRows() {
   return withDb((db) => db.prepare(`
-    SELECT owner, conversation_id, payload_json, status, last_error_code
-    FROM weixin_confirmation_outbox
-    ORDER BY created_at, id
-  `).all().map((row) => ({
-    ...row,
-    payload: JSON.parse(row.payload_json),
-  })));
+    SELECT owner, idempotency_key, title, body, href, read_at
+    FROM in_app_notifications
+    WHERE category = 'invoice_escalation'
+    ORDER BY created_at, rowid
+  `).all().map((row) => {
+    const level = Number(/:level-(\d+)$/u.exec(row.idempotency_key)?.[1] ?? 0);
+    const expenseReference = /^费用：([^\n]+)/mu.exec(row.body)?.[1] ?? null;
+    return {
+      ...row,
+      status: row.read_at === null ? "unread" : "read",
+      payload: { level, expenseReference },
+    };
+  }));
 }
 
 function financialSnapshot() {
@@ -286,10 +292,10 @@ describe("invoice escalation real server wiring", () => {
     assert.equal(first.enqueuedCount, 2);
     assert.equal(repeated.alreadyEnqueuedCount, 2);
     assert.deepEqual(outboxRows()
-      .map((row) => [row.owner, row.payload.expenseId, row.payload.level])
+      .map((row) => [row.owner, row.payload.expenseReference, row.payload.level])
       .toSorted((left, right) => left[0].localeCompare(right[0])), [
-      [OWNER_A, "expense-a", 1],
-      [OWNER_B, "expense-b", 1],
+      [OWNER_A, "EXP-20260825-EXPENSE-A", 1],
+      [OWNER_B, "EXP-20260825-EXPENSE-B", 1],
     ]);
     assert.deepEqual(financialSnapshot(), before);
     assert.equal(server.invoiceEscalationScheduler.status().running, false);
@@ -299,7 +305,7 @@ describe("invoice escalation real server wiring", () => {
     assert.equal(server.invoiceEscalationScheduler.status().running, false);
   });
 
-  it("uses the durable outbox across a real server restart", async () => {
+  it("uses durable in-app notices across a real server restart", async () => {
     withDb((db) => seedExpense(db, { id: "expense-restart", owner: OWNER_A }));
     await startServer();
     assert.equal((await server.invoiceEscalationScheduler.runOnce()).enqueuedCount, 1);
@@ -325,7 +331,7 @@ describe("invoice escalation real server wiring", () => {
 
     await closeServer();
     withDb((db) => {
-      db.prepare("DELETE FROM weixin_confirmation_outbox").run();
+      db.prepare("DELETE FROM in_app_notifications WHERE category = 'invoice_escalation'").run();
       db.prepare("DELETE FROM travel_expense_payments WHERE expense_id = 'expense-levels'").run();
       db.prepare("DELETE FROM travel_expenses WHERE id = 'expense-levels'").run();
       seedExpense(db, { id: "expense-offline", owner: OWNER_A });
@@ -450,7 +456,7 @@ describe("invoice escalation real server wiring", () => {
     assert.equal(outboxRows().length, 0);
   });
 
-  it("rechecks the live gap before worker delivery and terminally discards a repaired queued row", async () => {
+  it("keeps the in-app invoice reminder history after the expense is later covered", async () => {
     withDb((db) => seedExpense(db, { id: "expense-stale", owner: OWNER_A }));
     await startServer();
     assert.equal((await server.invoiceEscalationScheduler.runOnce()).enqueuedCount, 1);
@@ -460,11 +466,12 @@ describe("invoice escalation real server wiring", () => {
     assert.equal(leased.response.status, 204);
     assert.equal(leased.body, null);
     const [row] = outboxRows();
-    assert.equal(row.status, "failed");
-    assert.equal(row.last_error_code, "WEIXIN_OUTBOX_STALE");
+    assert.equal(row.owner, OWNER_A);
+    assert.equal(row.status, "unread");
+    assert.match(row.body, /EXP-20260825-EXPENSE-STALE/u);
   });
 
-  it("rechecks a queued row and discards it after the owner explicitly confirms no-invoice", async () => {
+  it("keeps the in-app invoice reminder history after no-invoice is confirmed", async () => {
     withDb((db) => seedExpense(db, { id: "expense-stale-no-invoice", owner: OWNER_A }));
     await startServer();
     assert.equal((await server.invoiceEscalationScheduler.runOnce()).enqueuedCount, 1);
@@ -473,11 +480,12 @@ describe("invoice escalation real server wiring", () => {
     const leased = await leaseFromWorker();
     assert.equal(leased.response.status, 204);
     const [row] = outboxRows();
-    assert.equal(row.status, "failed");
-    assert.equal(row.last_error_code, "WEIXIN_OUTBOX_STALE");
+    assert.equal(row.owner, OWNER_A);
+    assert.equal(row.status, "unread");
+    assert.match(row.body, /人工补充并匹配发票/u);
   });
 
-  it("discards a lower queued level after the live clock advances and delivers only the new highest level", async () => {
+  it("records each invoice escalation level in-app without using the WeChat worker", async () => {
     withDb((db) => seedExpense(db, { id: "expense-level-stale", owner: OWNER_A }));
     await startServer();
     assert.equal((await server.invoiceEscalationScheduler.runOnce()).enqueuedCount, 1);
@@ -485,19 +493,17 @@ describe("invoice escalation real server wiring", () => {
     nowMs = Date.parse("2026-09-01T01:00:00.000Z"); // day seven
     const staleLease = await leaseFromWorker();
     assert.equal(staleLease.response.status, 204);
-    assert.deepEqual(outboxRows().map((row) => [row.payload.level, row.status, row.last_error_code]), [
-      [1, "failed", "WEIXIN_OUTBOX_STALE"],
-    ]);
+    assert.deepEqual(outboxRows().map((row) => [row.payload.level, row.status]), [[1, "unread"]]);
 
     assert.equal((await server.invoiceEscalationScheduler.runOnce()).enqueuedCount, 1);
     const currentLease = await leaseFromWorker();
-    assert.equal(currentLease.response.status, 200);
-    assert.equal(currentLease.body.item.owner, OWNER_A);
-    assert.match(currentLease.body.item.message, /第 2 级/u);
-    assert.match(currentLease.body.item.message, /持续 7 天/u);
+    assert.equal(currentLease.response.status, 204);
+    assert.deepEqual(outboxRows().map((row) => row.payload.level), [1, 2]);
+    assert.match(outboxRows()[1].body, /第 2 级/u);
+    assert.match(outboxRows()[1].body, /持续 7 天/u);
   });
 
-  it("terminally discards a queued row after its owner binding is removed", async () => {
+  it("keeps owner-scoped invoice reminders in-app when a WeChat binding is removed", async () => {
     withDb((db) => seedExpense(db, { id: "expense-unbound", owner: OWNER_A }));
     await startServer();
     assert.equal((await server.invoiceEscalationScheduler.runOnce()).enqueuedCount, 1);
@@ -509,8 +515,10 @@ describe("invoice escalation real server wiring", () => {
     const leased = await leaseFromWorker();
     assert.equal(leased.response.status, 204);
     const [row] = outboxRows();
-    assert.equal(row.status, "failed");
-    assert.equal(row.last_error_code, "WEIXIN_DELIVERY_SCOPE_MISMATCH");
+    assert.equal(row.owner, OWNER_A);
+    assert.equal(row.status, "unread");
+    assert.match(row.body, /人工补充并匹配发票/u);
+    assert.equal(row.href, "/travel-expenses");
   });
 
   it("keeps the scheduler status admin-only and rejects anonymous, machine, and member identities", async () => {

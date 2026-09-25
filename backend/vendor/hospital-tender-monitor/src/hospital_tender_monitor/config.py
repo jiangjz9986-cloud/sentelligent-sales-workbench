@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import ipaddress
 import json
 from dataclasses import dataclass
@@ -152,6 +153,36 @@ def _load_customer_hospitals(path: Path) -> tuple[Mapping[str, Any], ...]:
             or len({value.strip() for value in source_ids}) != len(source_ids)
         ):
             raise ValueError("customer hospital source_ids must be unique strings")
+        announcement_sources = item.get("announcement_sources", [])
+        if not isinstance(announcement_sources, list) or len(announcement_sources) > 20:
+            raise ValueError("customer announcement sources must be a bounded list")
+        normalized_sources: list[dict[str, str]] = []
+        seen_source_urls: set[str] = set()
+        for source in announcement_sources:
+            if not isinstance(source, dict):
+                raise ValueError("customer announcement source must be an object")
+            source_type = source.get("type")
+            if not isinstance(source_type, str) or source_type not in {"hospital_official", "public_resource"}:
+                raise ValueError("customer announcement source type is invalid")
+            url = validate_public_url(source.get("url"))
+            label = source.get("label", "")
+            source_id = source.get("id", "")
+            if (
+                not isinstance(label, str)
+                or len(label) > 100
+                or not isinstance(source_id, str)
+                or len(source_id) > 120
+            ):
+                raise ValueError("customer announcement source metadata is invalid")
+            if url in seen_source_urls:
+                raise ValueError("customer announcement sources must be unique")
+            seen_source_urls.add(url)
+            normalized_sources.append({
+                "id": source_id,
+                "type": source_type,
+                "label": label.strip(),
+                "url": url,
+            })
         normalized = dict(item)
         normalized.update(
             {
@@ -162,12 +193,47 @@ def _load_customer_hospitals(path: Path) -> tuple[Mapping[str, Any], ...]:
                 "status": status,
                 "aliases": [value.strip() for value in aliases],
                 "source_ids": [value.strip() for value in source_ids],
+                "announcement_sources": normalized_sources,
             }
         )
         seen_ids.add(target_id)
         seen_names.add(name)
         result.append(_freeze(normalized))
     return tuple(result)
+
+
+def _customer_sources(sources: list[Mapping[str, Any]], hospitals: tuple[Mapping[str, Any], ...]) -> list[Mapping[str, Any]]:
+    output = [dict(source) for source in sources]
+    configured: dict[str, dict[str, Any]] = {}
+    for hospital in hospitals:
+        name = str(hospital.get("name", "")).strip()
+        if not name:
+            continue
+        city = str(hospital.get("city", "")).strip()
+        names = [name, *(hospital.get("aliases", ()) or ())]
+        for source in hospital.get("announcement_sources", ()):
+            key = str(source["url"])
+            row = configured.get(key)
+            if row is None:
+                digest = hashlib.sha256(key.encode("utf-8")).hexdigest()[:24]
+                row = {
+                    "id": f"customer-url-{digest}",
+                    "name": source["label"] or f"{name}公告页",
+                    "city": city,
+                    "adapter": "hospital_html",
+                    "url": key,
+                    "enabled": True,
+                    "coverage": "direct",
+                    "hospital_names": [],
+                }
+                configured[key] = row
+            for hospital_name in names:
+                if isinstance(hospital_name, str):
+                    value = hospital_name.strip()
+                    if value and value not in row["hospital_names"]:
+                        row["hospital_names"].append(value[:200])
+    output.extend(configured.values())
+    return output
 
 
 def _positive_int(env: Mapping[str, str], name: str, default: int) -> int:
@@ -271,6 +337,7 @@ def load_config(env: Mapping[str, str], project_root: Path) -> AppConfig:
             ):
                 raise ValueError("hospital source hospital_names are required")
         sources.append(_freeze(source))
+    sources = [_freeze(source) for source in _customer_sources(sources, customer_hospitals)]
     data_dir = Path(env.get("HOSPITAL_TENDER_MONITOR_DATA_DIR", root / "data"))
     database_path = Path(
         env.get("HOSPITAL_TENDER_MONITOR_DATABASE_PATH", data_dir / "hospital-tender-monitor.sqlite3")

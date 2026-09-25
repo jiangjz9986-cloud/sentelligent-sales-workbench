@@ -12,7 +12,9 @@ from hospital_tender_monitor.models import NoticeType, TenderNotice, canonicaliz
 from .base import SourceAdapter, SourceResult, parse_published_at, public_link, source_text, strip_html
 
 
-_DATE = re.compile(r"(?<!\d)(\d{4}[-/]\d{2}[-/]\d{2})(?!\d)")
+_DATE = re.compile(
+    r"(?<!\d)(\d{4}(?:[-/.]\d{1,2}[-/.]\d{1,2}|年\d{1,2}月\d{1,2}日?|\d{4})(?!\d))"
+)
 _DEFAULT_TERMS = ("采购", "招标", "议价", "成交", "中标", "调研", "需求", "咨询", "公示", "磋商", "谈判", "询价")
 
 

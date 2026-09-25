@@ -101,6 +101,26 @@ describe("strict business request validation", () => {
     }
   });
 
+  it("validates customer tender source URLs and rejects local destinations", async () => {
+    const result = await post("/api/customers", {
+      name: "Source validation hospital",
+      tenderSources: [
+        { id: "local-source", type: "hospital_official", url: "http://127.0.0.1/private" },
+      ],
+    });
+    assertValidation(result, "tenderSources.0.url");
+
+    const duplicate = await post("/api/customers", {
+      name: "Duplicate source hospital",
+      tenderSources: [
+        { id: "official", type: "hospital_official", url: "https://hospital.example.test/notices" },
+        { id: "platform", type: "public_resource", url: "https://hospital.example.test/notices" },
+      ],
+    });
+    assert.equal(duplicate.response.status, 422);
+    assert.equal(duplicate.body.error.code, "VALIDATION_ERROR");
+  });
+
   it("requires opportunities to reference an existing customer and validates numeric bounds", async () => {
     const base = {
       customerId: "missing-customer",

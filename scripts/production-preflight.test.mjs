@@ -101,6 +101,8 @@ function validEnvironment(origin, databaseUrl) {
   const assistantConfirmationSecret = Buffer.alloc(32, 5).toString("base64url");
   const settingsEncryptionKey = Buffer.alloc(32, 6).toString("base64url");
   const hospitalTenderSyncToken = Buffer.alloc(32, 7).toString("base64url");
+  const hospitalTenderPushplusToken = Buffer.alloc(32, 8).toString("base64url");
+  const hospitalTenderPushplusAccessKey = Buffer.alloc(32, 9).toString("base64url");
   const fixtureOwner = "fixture-owner";
   const invoiceOcrCommand = "/opt/sentelligent-tools/tesseract-fixture";
   const invoicePdfTextCommand = "/opt/sentelligent-tools/pdftotext-fixture";
@@ -130,6 +132,8 @@ function validEnvironment(origin, databaseUrl) {
       "HOSPITAL_TENDER_AUTO_RUN=true",
       "HOSPITAL_TENDER_INTERVAL_MINUTES=60",
       "HOSPITAL_TENDER_BATCH_SIZE=10",
+      `HOSPITAL_TENDER_PUSHPLUS_TOKEN=${hospitalTenderPushplusToken}`,
+      `HOSPITAL_TENDER_PUSHPLUS_ACCESS_KEY=${hospitalTenderPushplusAccessKey}`,
       `HOSPITAL_TENDER_SYNC_TOKEN=${hospitalTenderSyncToken}`,
       `WEIXIN_AGENT_API_TOKEN=${weixinAgentApiToken}`,
       "WEIXIN_AGENT_OWNER=fixture-owner",
@@ -154,6 +158,8 @@ function validEnvironment(origin, databaseUrl) {
     assistantConfirmationSecret,
     settingsEncryptionKey,
     hospitalTenderSyncToken,
+    hospitalTenderPushplusToken,
+    hospitalTenderPushplusAccessKey,
     fixtureOwner,
     invoiceOcrCommand,
     invoicePdfTextCommand,
@@ -805,6 +811,8 @@ describe("production preflight", () => {
         environment.invoiceOcrLanguages,
         environment.settingsEncryptionKey,
         environment.hospitalTenderSyncToken,
+        environment.hospitalTenderPushplusToken,
+        environment.hospitalTenderPushplusAccessKey,
       ]) {
         assert.ok(!serialized.includes(value), "preflight report must not expose environment values");
       }
@@ -951,7 +959,6 @@ describe("production preflight", () => {
         ["iCost owner", "ICOST_WEBHOOK_OWNER", "fixture-owner"],
         ["Shortcut token", "SHORTCUT_WEBHOOK_TOKEN", "retired-token"],
         ["Shortcut confirmation alias", "SHORTCUT_WEIXIN_CONFIRMATION_ENABLED", "retired-alias"],
-        ["PushPlus token", "HOSPITAL_TENDER_PUSHPLUS_TOKEN", "retired-token"],
       ];
       const extractionCases = [
         ["missing OCR command", "INVOICE_OCR_COMMAND", "", "env.invoiceExtraction"],
@@ -1163,7 +1170,41 @@ describe("production preflight", () => {
     }
   });
 
-  it("ignores a historical PushPlus secure-setting row while requiring its retired environment variable to stay absent", async () => {
+  it("allows PushPlus credentials to be configured through encrypted settings after deployment", async () => {
+    const workspace = makeWorkspace();
+    try {
+      const origin = "https://sales.example.test";
+      const databasePath = join(workspace.root, "sales-workbench.sqlite");
+      const environment = validEnvironment(origin, databasePath);
+      const source = environment.source
+        .replace(/^HOSPITAL_TENDER_PUSHPLUS_TOKEN=.*\n?/m, "")
+        .replace(/^HOSPITAL_TENDER_PUSHPLUS_ACCESS_KEY=.*\n?/m, "");
+      const envFile = workspace.write("web-managed-pushplus.env", source);
+      const backupPath = join(workspace.root, "backups", "sales-workbench.sqlite");
+      makeDatabase(databasePath);
+      mkdirSync(dirname(backupPath), { recursive: true });
+      copyFileSync(databasePath, backupPath);
+      const servicePlanPath = workspace.write(
+        "service-plan-web-managed-pushplus.json",
+        JSON.stringify(bindBackendEnvironment(validLegacyServiceSnapshot(), envFile), null, 2),
+      );
+      const { runProductionPreflight } = await loadPreflightModule();
+      const report = await runProductionPreflight({
+        envFile,
+        databasePath,
+        backupPath,
+        expectedBackupSha256: fileSha256(backupPath),
+        expectedOrigins: [origin],
+        servicePlanPath,
+        nodeVersion: "24.14.1",
+      });
+      assert.equal(report.checks.find((check) => check.id === "env.production")?.status, "passed");
+    } finally {
+      workspace.cleanup();
+    }
+  });
+
+  it("ignores a historical PushPlus secure-setting row while accepting tender-only environment credentials", async () => {
     const workspace = makeWorkspace();
     try {
       const origin = "https://sales.example.test";
@@ -1213,6 +1254,8 @@ describe("production preflight", () => {
       });
       assert.equal(report.checks.find((check) => check.id === "env.production")?.status, "passed");
       assert.equal(report.checks.find((check) => check.id === "env.retiredBookkeepingIntegrations")?.status, "passed");
+      assert.ok(!JSON.stringify(report).includes(environment.hospitalTenderPushplusToken));
+      assert.ok(!JSON.stringify(report).includes(environment.hospitalTenderPushplusAccessKey));
     } finally {
       workspace.cleanup();
     }

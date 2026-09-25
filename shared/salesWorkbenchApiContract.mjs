@@ -24,6 +24,7 @@ export const SALES_WORKBENCH_API_SCHEMAS = {
     opportunities: "array",
     aliases: "optional:stringArray",
     tags: "optional:stringArray",
+    tenderSources: "optional:array",
     createdAt: "optional:nullableString",
     updatedAt: "optional:nullableString",
   },

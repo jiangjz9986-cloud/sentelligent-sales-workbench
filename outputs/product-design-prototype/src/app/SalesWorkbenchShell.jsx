@@ -1,4 +1,5 @@
 import {
+  Bell,
   CircleAlert,
   Database,
   FileText,
@@ -44,6 +45,7 @@ import { PARENT_NAV_BY_ACTIVE, SETTINGS_SECTION_BY_ACTIVE } from "./navRoutes.js
 import { parseWorkbenchRoute } from "./routes.js";
 
 const QuickRecord = lazy(() => import("../features/salesWorkbench/pages/QuickRecordPage.jsx").then((m) => ({ default: m.QuickRecord })));
+const NotificationsPage = lazy(() => import("../features/notifications/NotificationsPage.jsx").then((m) => ({ default: m.NotificationsPage })));
 const CustomerPage = lazy(() => import("../features/salesWorkbench/pages/CustomerPage.jsx").then((m) => ({ default: m.CustomerPage })));
 const OpportunityPage = lazy(() => import("../features/salesWorkbench/pages/OpportunityPage.jsx").then((m) => ({ default: m.OpportunityPage })));
 const ActionsPage = lazy(() => import("../features/salesWorkbench/pages/ActionsPage.jsx").then((m) => ({ default: m.ActionsPage })));
@@ -255,6 +257,8 @@ function resolveHeadingContext({
   if (active === "hospital-tenders") {
     return { title: "医院招标监测" };
   }
+
+  if (active === "notifications") return { title: "通知中心" };
 
   if (active === "settings") {
     return { title: "系统配置" };
@@ -615,7 +619,7 @@ function WorkbenchShellBody({
   );
   const settingsSection = SETTINGS_SECTION_BY_ACTIVE[active] ?? "";
 
-  const blockedByBootstrap = activeParent !== "settings" && (
+  const blockedByBootstrap = activeParent !== "settings" && active !== "notifications" && (
     bootstrapStatus === "loading" ||
     bootstrapStatus === "error" ||
     (bootstrapStatus === "empty" && active === "overview")
@@ -678,6 +682,17 @@ function WorkbenchShellBody({
               <Mic size={16} />
               快速记录
             </button>
+            <button
+              className="icon-button topbar-notifications"
+              type="button"
+              aria-label={`通知中心，${badges.inAppUnread} 条未读`}
+              title={`通知中心，${badges.inAppUnread} 条未读`}
+              data-testid="topbar-notifications"
+              onClick={() => navigateTo("notifications")}
+            >
+              <Bell size={18} />
+              {badges.inAppUnread > 0 ? <span className="notification-count">{badges.inAppUnread > 99 ? "99+" : badges.inAppUnread}</span> : null}
+            </button>
             {mobileShell ? (
               <button
                 className="icon-button"
@@ -723,6 +738,11 @@ function WorkbenchShellBody({
                 >
                   <Icon size={18} />
                   <span>{item.label}</span>
+                  {item.id === "notifications" && badges.inAppUnread > 0 ? (
+                    <span className="nav-item-count" aria-label={`${badges.inAppUnread} 条未读`}>
+                      {badges.inAppUnread > 99 ? "99+" : badges.inAppUnread}
+                    </span>
+                  ) : null}
                 </button>
               );
             })}
@@ -788,6 +808,9 @@ function WorkbenchShellBody({
             )}
             {active === "overview" && (
               <Overview />
+            )}
+            {active === "notifications" && (
+              <NotificationsPage apiClient={apiClient} backendStatus={backendStatus} />
             )}
             {active === "quick" && (
               <QuickRecord />

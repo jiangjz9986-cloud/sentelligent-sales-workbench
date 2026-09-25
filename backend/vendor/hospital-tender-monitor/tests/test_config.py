@@ -68,3 +68,69 @@ class ConfigGateTests(TestCase):
             }, root)
             self.assertFalse(hasattr(config, "pushplus_token"))
             self.assertNotIn(retired_value, repr(config))
+
+    def test_customer_announcement_urls_become_direct_collector_sources(self) -> None:
+        with TemporaryDirectory(prefix="hospital-tender-customer-sources-") as raw_root:
+            root = Path(raw_root)
+            self._write_config(root, [])
+            registry_path = root / "config" / "customer_hospitals.json"
+            registry_path.write_text(json.dumps({"hospitals": [
+                {
+                    "id": "hospital-a", "name": "示例医院甲", "city": "济宁", "region": "嘉祥县",
+                    "status": "direct", "source_ids": [], "aliases": ["甲医院"],
+                    "announcement_sources": [
+                        {"id": "official-a", "type": "hospital_official", "label": "医院官网", "url": "https://hospital-a.example.test/notices"},
+                        {"id": "platform-a", "type": "public_resource", "label": "嘉祥县平台", "url": "https://trade.example.test/jiaxiang"},
+                    ],
+                },
+                {
+                    "id": "hospital-b", "name": "示例医院乙", "city": "济宁", "region": "嘉祥县",
+                    "status": "direct", "source_ids": [], "aliases": [],
+                    "announcement_sources": [
+                        {"id": "platform-b", "type": "public_resource", "label": "嘉祥县平台", "url": "https://trade.example.test/jiaxiang"},
+                    ],
+                },
+            ]}), encoding="utf-8")
+
+            config = load_config({}, root)
+
+            self.assertEqual(len(config.sources), 2)
+            shared_platform = next(source for source in config.sources if source["url"].endswith("/jiaxiang"))
+            self.assertEqual(shared_platform["adapter"], "hospital_html")
+            self.assertEqual(shared_platform["coverage"], "direct")
+            self.assertEqual(set(shared_platform["hospital_names"]), {"示例医院甲", "甲医院", "示例医院乙"})
+
+    def test_customer_announcement_sources_reject_private_or_unknown_urls(self) -> None:
+        with TemporaryDirectory(prefix="hospital-tender-customer-source-invalid-") as raw_root:
+            root = Path(raw_root)
+            self._write_config(root, [])
+            registry_path = root / "config" / "customer_hospitals.json"
+            hospital = {
+                "id": "hospital-a", "name": "示例医院", "city": "济宁", "region": "济宁",
+                "status": "direct", "source_ids": [], "aliases": [],
+                "announcement_sources": [
+                    {"type": "hospital_official", "url": "http://127.0.0.1/notices"},
+                ],
+            }
+            registry_path.write_text(json.dumps({"hospitals": [hospital]}), encoding="utf-8")
+
+            with self.assertRaises(ValueError):
+                load_config({}, root)
+
+    def test_customer_sources_reject_duplicate_urls_even_with_different_types(self) -> None:
+        with TemporaryDirectory(prefix="hospital-tender-customer-source-duplicate-") as raw_root:
+            root = Path(raw_root)
+            self._write_config(root, [])
+            registry_path = root / "config" / "customer_hospitals.json"
+            hospital = {
+                "id": "hospital-a", "name": "示例医院", "city": "济宁", "region": "济宁",
+                "status": "direct", "source_ids": [], "aliases": [],
+                "announcement_sources": [
+                    {"type": "hospital_official", "url": "https://example.test/notices"},
+                    {"type": "public_resource", "url": "https://example.test/notices"},
+                ],
+            }
+            registry_path.write_text(json.dumps({"hospitals": [hospital]}), encoding="utf-8")
+
+            with self.assertRaises(ValueError):
+                load_config({}, root)

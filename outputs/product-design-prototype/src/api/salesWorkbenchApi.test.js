@@ -2139,7 +2139,7 @@ describe("sales workbench API client", () => {
         const body = options.body ? JSON.parse(options.body) : null;
         calls.push({ url, method: options.method ?? "GET", body });
         if (url.endsWith("/api/customers") && options.method === "POST") {
-          return jsonResponse({ item: sampleCustomer({ id: "jiaozhou", name: body.name, level: body.level }) }, 201);
+          return jsonResponse({ item: sampleCustomer({ id: "jiaozhou", name: body.name, level: body.level, tenderSources: body.tenderSources }) }, 201);
         }
         if (url.endsWith("/api/customers/jiaozhou") && options.method === "PATCH") {
           return jsonResponse({ item: sampleCustomer({ id: "jiaozhou", name: "胶州中医医院", level: body.level, relation: body.relation }) });
@@ -2158,6 +2158,10 @@ describe("sales workbench API client", () => {
       name: "胶州中医医院",
       level: "新建线索",
       relation: 35,
+      tenderSources: [
+        { id: "official", type: "hospital_official", url: "https://hospital.example.test/notices" },
+        { id: "platform", type: "public_resource", url: "https://procurement.example.test/city" },
+      ],
     });
     const updatedCustomer = await api.saveCustomer({
       id: "jiaozhou",
@@ -2182,6 +2186,10 @@ describe("sales workbench API client", () => {
     assertApiEntity("opportunity", createdOpportunity);
     assertApiEntity("opportunity", updatedOpportunity);
     assert.equal(updatedCustomer.level, "重点培育");
+    assert.deepEqual(calls[0].body.tenderSources, [
+      { id: "official", type: "hospital_official", url: "https://hospital.example.test/notices" },
+      { id: "platform", type: "public_resource", url: "https://procurement.example.test/city" },
+    ]);
     assert.equal(updatedOpportunity.stage, "初步沟通");
     assert.deepEqual(calls.map((call) => [call.method, call.url]), [
       ["POST", "http://127.0.0.1:8787/api/customers"],
@@ -4238,8 +4246,41 @@ describe("sales workbench API client", () => {
     await assert.rejects(() => unknownApi.getProactiveNotifications(), /channel: invalid channel/u);
   });
 
+  it("lists, reads, and clears owner-scoped in-app notifications", async () => {
+    const calls = [];
+    const unread = {
+      id: "notice-1", category: "proactive_assistant", title: "主动建议：补充下一步",
+      body: "补充下一步跟进", href: "/", priority: 60,
+      createdAt: "2026-09-25T10:00:00.000Z", readAt: null, unread: true,
+    };
+    const read = { ...unread, readAt: "2026-09-25T10:05:00.000Z", unread: false };
+    const api = createSalesWorkbenchApi({
+      baseUrl: "https://example.test",
+      fetchImpl: async (url, options = {}) => {
+        calls.push({ url: String(url), options });
+        if (String(url).includes("/api/notifications?") || String(url).endsWith("/api/notifications")) {
+          return jsonResponse({ items: [unread], total: 1, unreadCount: 1 });
+        }
+        if (String(url).endsWith("/api/notifications/notice-1/read")) return jsonResponse({ item: read });
+        if (String(url).endsWith("/api/notifications/read-all")) return jsonResponse({ item: { updatedCount: 1, unreadCount: 0 } });
+        return jsonResponse({ error: "not_found" }, 404);
+      },
+    });
+    api.setSession({ csrfToken: "fixture-csrf-token" });
+
+    const page = await api.getInAppNotifications({ limit: 20, unreadOnly: true });
+    assert.equal(page.items[0].category, "proactive_assistant");
+    assert.match(calls[0].url, /unreadOnly=true/u);
+    assert.equal((await api.markInAppNotificationRead("notice-1")).unread, false);
+    assert.deepEqual(await api.markAllInAppNotificationsRead(), { updatedCount: 1, unreadCount: 0 });
+    assert.equal(calls[1].options.method, "POST");
+    assert.equal(calls[2].options.method, "POST");
+  });
+
   it("keeps secure settings writes on the authenticated CSRF boundary and never normalizes secrets into storage", async () => {
     const calls = [];
+    const pushplusToken = ["synthetic", "pushplus", "token"].join("-");
+    const pushplusAccessKey = ["synthetic", "pushplus", "access", "key"].join("-");
     const api = createSalesWorkbenchApi({
       baseUrl: "https://example.test",
       fetchImpl: async (url, options = {}) => {
@@ -4247,11 +4288,20 @@ describe("sales workbench API client", () => {
         if (url.endsWith("/api/settings/security")) {
           return jsonResponse({ item: { deepseek: { configured: false } } });
         }
+        if (url.endsWith("/api/settings/pushplus-credentials") && options.method === "GET") {
+          return jsonResponse({ item: { token: { configured: false }, accessKey: { configured: false } } });
+        }
         if (url.endsWith("/api/settings/deepseek-key") && options.method === "PUT") {
           return jsonResponse({ item: { configured: true, masked: "synt••••test", status: "active" } });
         }
         if (url.endsWith("/api/settings/deepseek-key") && options.method === "DELETE") {
           return jsonResponse({ item: { configured: false, masked: null, status: "cleared" } });
+        }
+        if (url.endsWith("/api/settings/pushplus-credentials") && options.method === "PUT") {
+          return jsonResponse({ item: { token: { configured: true }, accessKey: { configured: true } } });
+        }
+        if (url.endsWith("/api/settings/pushplus-credentials") && options.method === "DELETE") {
+          return jsonResponse({ item: { token: { configured: false }, accessKey: { configured: false } } });
         }
         return jsonResponse({ error: "not_found" }, 404);
       },
@@ -4259,14 +4309,17 @@ describe("sales workbench API client", () => {
     api.setSession({ csrfToken: "fixture-csrf-token" });
 
     assert.equal((await api.getSecuritySettings()).deepseek.configured, false);
+    assert.equal((await api.requestHospitalTenderPushplusCredentials()).token.configured, false);
     await api.saveDeepSeekApiKey(syntheticKey);
     await api.clearDeepSeekApiKey();
-    assert.equal(api.savePushplusToken, undefined);
-    assert.equal(api.clearPushplusToken, undefined);
-    assert.equal(api.testPushplusToken, undefined);
-    assert.equal(calls.length, 3);
-    assert.equal(calls[1].options.body, JSON.stringify({ apiKey: syntheticKey }));
-    assert.equal(calls[1].options.headers["X-CSRF-Token"], "fixture-csrf-token");
-    assert.equal(calls[2].options.body, JSON.stringify({ confirmation: "CLEAR" }));
+    await api.requestHospitalTenderPushplusCredentials("PUT", { token: pushplusToken, accessKey: pushplusAccessKey });
+    await api.requestHospitalTenderPushplusCredentials("DELETE", { confirmation: "CLEAR" });
+    assert.equal(calls.length, 6);
+    assert.equal(calls[2].options.body, JSON.stringify({ apiKey: syntheticKey }));
+    assert.equal(calls[2].options.headers["X-CSRF-Token"], "fixture-csrf-token");
+    assert.equal(calls[3].options.body, JSON.stringify({ confirmation: "CLEAR" }));
+    assert.equal(calls[4].options.body, JSON.stringify({ token: pushplusToken, accessKey: pushplusAccessKey }));
+    assert.equal(calls[4].options.headers["X-CSRF-Token"], "fixture-csrf-token");
+    assert.equal(calls[5].options.body, JSON.stringify({ confirmation: "CLEAR" }));
   });
 });

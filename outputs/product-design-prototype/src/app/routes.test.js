@@ -24,6 +24,7 @@ function expectedRoute(overrides = {}) {
 
 const routeCases = [
   ["/overview", expectedRoute(), "/overview"],
+  ["/notifications", expectedRoute({ page: "notifications", active: "notifications" }), "/notifications"],
   [
     "/quick-records",
     expectedRoute({ page: "quick-records", active: "quick", mode: "new" }),
