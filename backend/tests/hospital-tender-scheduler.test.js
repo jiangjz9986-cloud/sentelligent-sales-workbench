@@ -563,6 +563,34 @@ describe("hospital tender scheduler", () => {
     });
   });
 
+  it("keeps ingestion failures aligned to the next fixed polling slot", async () => {
+    await withDb(async (db) => {
+      const clock = () => new Date("2026-09-26T01:30:00.000Z");
+      const { scheduler, schedulerRepository } = setup(db, {
+        clock,
+        tenderRepository: (base) => ({
+          ...base,
+          recordRun() {
+            throw new Error("synthetic aggregate persistence failure");
+          },
+        }),
+      });
+      schedulerRepository.updateState({
+        intervalMinutes: 120,
+        batchSize: 200,
+        activeStartHour: 8,
+        activeEndHour: 21,
+      });
+      await assert.rejects(
+        () => scheduler.runNext({ force: true }),
+        /synthetic aggregate persistence failure/,
+      );
+      const state = schedulerRepository.getState();
+      assert.equal(state.lastStatus, "failed");
+      assert.equal(state.nextRunAt, "2026-09-26T02:00:00.000Z");
+    });
+  });
+
   it("persists a bounded collector stage instead of a raw internal error", async () => {
     await withDb(async (db) => {
       const internalError = Object.assign(new Error("private collector detail"), {
