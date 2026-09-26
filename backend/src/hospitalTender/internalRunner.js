@@ -36,6 +36,7 @@ function commandEnvironment({ collectorRoot, dataDir, customerHospitalsPath, env
     PATH: path,
     PYTHONPATH: pythonPath,
     PYTHONIOENCODING: "utf-8",
+    PYTHONDONTWRITEBYTECODE: "1",
     HOSPITAL_TENDER_MONITOR_DATA_DIR: dataDir,
     // Python's macOS urllib otherwise discovers and silently uses the host's
     // system proxy even though proxy URLs were excluded from this allowlist.

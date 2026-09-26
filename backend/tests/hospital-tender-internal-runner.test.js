@@ -69,6 +69,7 @@ describe("internal hospital tender runner", () => {
     ]);
     assert.equal(invocation.options.env.NO_PROXY, "*");
     assert.equal(invocation.options.env.no_proxy, "*");
+    assert.equal(invocation.options.env.PYTHONDONTWRITEBYTECODE, "1");
     assert.equal("HTTPS_PROXY" in invocation.options.env, false);
     assert.equal("ALL_PROXY" in invocation.options.env, false);
     assert.equal("HOSPITAL_TENDER_SYNC_TOKEN" in invocation.options.env, false);
