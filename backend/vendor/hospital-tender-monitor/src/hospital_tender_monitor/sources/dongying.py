@@ -34,6 +34,10 @@ class DongyingAdapter(SourceAdapter):
         notices: list[TenderNotice] = []
         seen: set[str] = set()
         endpoint = urljoin(source_text(self.source, "url"), _PATH)
+        hospital_names = self.source.get("hospital_names", ())
+        if not isinstance(hospital_names, (list, tuple)):
+            return SourceResult(success=False, error="invalid source response")
+        hospital_names = tuple(str(name).strip() for name in hospital_names if str(name).strip())
         try:
             for category, notice_type in CATEGORIES:
                 data = urlencode(
@@ -41,7 +45,7 @@ class DongyingAdapter(SourceAdapter):
                         "siteGuid": source_text(self.source, "site_guid"),
                         "vname": source_text(self.source, "vname"),
                         "CatgoryNum": category,
-                        "Title": "",
+                        "Title": hospital_names[0] if hospital_names else "",
                         "pageSize": "20",
                         "pageIndex": "1",
                         "YZM": "",
@@ -54,7 +58,7 @@ class DongyingAdapter(SourceAdapter):
                 records = _records(response.text)
                 for record in records:
                     try:
-                        notice = self._notice(record, notice_type)
+                        notice = self._notice(record, notice_type, hospital_names)
                     except (TypeError, ValueError):
                         # A malformed row must not discard otherwise usable
                         # notices from the same public category response.
@@ -66,12 +70,23 @@ class DongyingAdapter(SourceAdapter):
             return SourceResult(success=False, error="invalid source response")
         return SourceResult(notices=tuple(notices))
 
-    def _notice(self, record: object, notice_type: NoticeType) -> TenderNotice | None:
+    def _notice(
+        self,
+        record: object,
+        notice_type: NoticeType,
+        hospital_names: tuple[str, ...] = (),
+    ) -> TenderNotice | None:
         if not isinstance(record, dict):
             return None
         title = strip_html(record.get("title"))
         published_at = parse_published_at(record.get("date"))
         if not title or published_at is None:
+            return None
+        matched_names = tuple(
+            name for name in hospital_names
+            if len(name) >= 4 and name.casefold() in title.casefold()
+        )
+        if hospital_names and not matched_names:
             return None
         try:
             link = public_link(source_text(self.source, "url"), record.get("href"))
@@ -87,6 +102,7 @@ class DongyingAdapter(SourceAdapter):
             notice_type=notice_type,
             source_item_id=str(record.get("index") or ""),
             content_text=title,
+            hospital_names=matched_names,
             raw_content=title,
         )
 

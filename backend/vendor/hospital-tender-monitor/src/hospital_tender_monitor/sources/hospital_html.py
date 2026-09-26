@@ -86,11 +86,20 @@ class HospitalHtmlAdapter(SourceAdapter):
             names = self.source.get("hospital_names", ())
             if not isinstance(names, (list, tuple)):
                 raise ValueError("hospital names")
+            title_match_required = self.source.get("title_match_required", False)
+            if type(title_match_required) is not bool:
+                raise ValueError("title match required")
             notices: list[TenderNotice] = []
             seen: set[str] = set()
             for title, href, record_text in parser.records:  # type: ignore[attr-defined]
                 title = strip_html(title)
                 if not title or not any(str(term) and str(term) in title for term in terms):
+                    continue
+                matched_names = tuple(
+                    str(name) for name in names
+                    if isinstance(name, str) and len(name.strip()) >= 4 and name.strip().casefold() in title.casefold()
+                )
+                if title_match_required and not matched_names:
                     continue
                 date_match = _DATE.search(record_text)
                 published_at = parse_published_at(date_match.group(1) if date_match else "")
@@ -114,7 +123,7 @@ class HospitalHtmlAdapter(SourceAdapter):
                         published_at=published_at,
                         notice_type=NoticeType.UNKNOWN,
                         content_text=title,
-                        hospital_names=tuple(str(name) for name in names),
+                        hospital_names=matched_names if title_match_required else tuple(str(name) for name in names),
                         raw_content=title,
                     ))
                 except (TypeError, ValueError):

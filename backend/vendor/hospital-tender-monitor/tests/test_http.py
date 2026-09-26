@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import gzip
 import socket
 from email.message import Message
 from io import BytesIO
@@ -47,6 +48,57 @@ class _Clock:
 
 
 class HttpBudgetTests(TestCase):
+    def test_gzip_response_is_decompressed_with_bounded_output(self) -> None:
+        class _GzipResponse(_Response):
+            def __init__(self, url: str, body: bytes) -> None:
+                super().__init__(url, body)
+                self.headers["Content-Encoding"] = "gzip"
+
+        requests = []
+
+        def opener(request, timeout):
+            requests.append(request)
+            return _GzipResponse(request.full_url, gzip.compress(b"notices"))
+
+        response = HttpClient(
+            opener=opener,
+            resolver=_resolver,
+            max_attempts=1,
+        ).request("GET", "https://public.example.test/notices")
+
+        self.assertEqual(response.body, b"notices")
+        self.assertEqual(requests[0].get_header("Accept-encoding"), "gzip")
+
+    def test_gzip_response_cannot_exceed_decompressed_size_limit(self) -> None:
+        class _GzipResponse(_Response):
+            def __init__(self, url: str, body: bytes) -> None:
+                super().__init__(url, body)
+                self.headers["Content-Encoding"] = "gzip"
+
+        client = HttpClient(
+            opener=lambda request, timeout: _GzipResponse(request.full_url, gzip.compress(b"too long")),
+            resolver=_resolver,
+            max_attempts=1,
+            max_response_bytes=4,
+        )
+
+        with self.assertRaises(HttpError):
+            client.request("GET", "https://public.example.test/oversized")
+
+    def test_unsupported_content_encoding_is_rejected(self) -> None:
+        class _EncodedResponse(_Response):
+            def __init__(self, url: str) -> None:
+                super().__init__(url)
+                self.headers["Content-Encoding"] = "br"
+
+        client = HttpClient(
+            opener=lambda request, timeout: _EncodedResponse(request.full_url),
+            resolver=_resolver,
+            max_attempts=1,
+        )
+        with self.assertRaises(HttpError):
+            client.request("GET", "https://public.example.test/brotli")
+
     def test_source_budget_rejects_response_body_that_finishes_after_deadline(self) -> None:
         clock = _Clock()
 

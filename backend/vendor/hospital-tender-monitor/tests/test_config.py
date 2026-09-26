@@ -77,7 +77,8 @@ class ConfigGateTests(TestCase):
             registry_path.write_text(json.dumps({"hospitals": [
                 {
                     "id": "hospital-a", "name": "示例医院甲", "city": "济宁", "region": "嘉祥县",
-                    "status": "direct", "source_ids": [], "aliases": ["甲医院"],
+                    "status": "direct", "source_ids": [], "aliases": ["HIS改造"],
+                    "hospital_aliases": ["甲医院"],
                     "announcement_sources": [
                         {"id": "official-a", "type": "hospital_official", "label": "医院官网", "url": "https://hospital-a.example.test/notices"},
                         {"id": "platform-a", "type": "public_resource", "label": "嘉祥县平台", "url": "https://trade.example.test/jiaxiang"},
@@ -97,8 +98,54 @@ class ConfigGateTests(TestCase):
             self.assertEqual(len(config.sources), 2)
             shared_platform = next(source for source in config.sources if source["url"].endswith("/jiaxiang"))
             self.assertEqual(shared_platform["adapter"], "hospital_html")
-            self.assertEqual(shared_platform["coverage"], "direct")
+            self.assertEqual(shared_platform["coverage"], "indirect")
+            self.assertTrue(shared_platform["title_match_required"])
             self.assertEqual(set(shared_platform["hospital_names"]), {"示例医院甲", "甲医院", "示例医院乙"})
+            self.assertNotIn("HIS改造", shared_platform["hospital_names"])
+
+    def test_customer_sources_select_region_adapters_and_keep_filters_isolated(self) -> None:
+        with TemporaryDirectory(prefix="hospital-tender-regional-sources-") as raw_root:
+            root = Path(raw_root)
+            self._write_config(root, [
+                {
+                    "id": "dongying-ggzy", "name": "东营平台", "adapter": "dongying",
+                    "url": "http://ggzy.dongying.gov.cn/", "enabled": True,
+                    "site_guid": "site-guid", "vname": "/dongying",
+                },
+                {
+                    "id": "qingdao-ggzy", "name": "青岛平台", "adapter": "qingdao",
+                    "url": "https://ggzy.qingdao.gov.cn/", "enabled": True,
+                    "area_codes": ["0214", "0209"],
+                },
+            ])
+            (root / "config" / "customer_hospitals.json").write_text(json.dumps({"hospitals": [
+                {
+                    "id": "dongying-hospital", "name": "东营市人民医院", "city": "东营", "region": "东营区",
+                    "status": "direct", "source_ids": [], "aliases": [],
+                    "announcement_sources": [{
+                        "type": "public_resource", "label": "东营公共资源平台",
+                        "url": "http://ggzy.dongying.gov.cn/?hospital=%E4%B8%9C%E8%90%A5%E5%B8%82%E4%BA%BA%E6%B0%91%E5%8C%BB%E9%99%A2",
+                    }],
+                },
+                {
+                    "id": "qingdao-hospital", "name": "胶州市中医院", "city": "青岛", "region": "胶州",
+                    "status": "direct", "source_ids": [], "aliases": [],
+                    "announcement_sources": [{
+                        "type": "public_resource", "label": "青岛公共资源平台（胶州）",
+                        "url": "https://ggzy.qingdao.gov.cn/?region=jiaozhou",
+                    }],
+                },
+            ]}), encoding="utf-8")
+
+            config = load_config({}, root)
+            dongying = next(source for source in config.sources if "hospital=%" in source["url"])
+            qingdao = next(source for source in config.sources if "region=jiaozhou" in source["url"])
+            self.assertEqual(dongying["adapter"], "dongying")
+            self.assertEqual(dongying["site_guid"], "site-guid")
+            self.assertEqual(dongying["hospital_names"], ("东营市人民医院",))
+            self.assertEqual(qingdao["adapter"], "qingdao")
+            self.assertEqual(qingdao["area_codes"], ("0209",))
+            self.assertEqual(qingdao["hospital_names"], ("胶州市中医院",))
 
     def test_customer_announcement_sources_reject_private_or_unknown_urls(self) -> None:
         with TemporaryDirectory(prefix="hospital-tender-customer-source-invalid-") as raw_root:
