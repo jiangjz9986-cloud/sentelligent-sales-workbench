@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from dataclasses import replace
 from html.parser import HTMLParser
 from typing import Mapping
 from urllib.parse import parse_qs, urlencode, urljoin, urlsplit
@@ -245,7 +246,7 @@ class QingdaoAdapter(SourceAdapter):
             link = public_link(source_text(self.source, "url"), href)
         except ValueError:
             return None
-        return TenderNotice(
+        notice = TenderNotice(
             source_id=source_text(self.source, "id"),
             source_name=source_text(self.source, "name"),
             city=source_text(self.source, "city"),
@@ -257,6 +258,18 @@ class QingdaoAdapter(SourceAdapter):
             content_text=title,
             raw_content=title,
         )
+        target_names = self.source.get("hospital_names", ())
+        if target_names:
+            if not isinstance(target_names, (list, tuple)):
+                return None
+            matched_names = tuple(
+                name for name in target_names
+                if isinstance(name, str) and name.strip() and name.casefold() in title.casefold()
+            )
+            if not matched_names:
+                return None
+            return replace(notice, hospital_names=matched_names)
+        return notice
 
 
 def _area_codes(source: Mapping[str, object]) -> tuple[str, ...]:

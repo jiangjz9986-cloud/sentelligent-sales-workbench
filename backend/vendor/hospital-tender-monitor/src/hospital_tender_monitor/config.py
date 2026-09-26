@@ -140,6 +140,7 @@ def _load_customer_hospitals(path: Path) -> tuple[Mapping[str, Any], ...]:
         if status not in allowed_statuses:
             raise ValueError("customer hospital status is invalid")
         aliases = item.get("aliases")
+        hospital_aliases = item.get("hospital_aliases", aliases)
         source_ids = item.get("source_ids")
         if (
             not isinstance(aliases, list)
@@ -147,6 +148,12 @@ def _load_customer_hospitals(path: Path) -> tuple[Mapping[str, Any], ...]:
             or len({value.strip().casefold() for value in aliases}) != len(aliases)
         ):
             raise ValueError("customer hospital aliases must be unique strings")
+        if (
+            not isinstance(hospital_aliases, list)
+            or any(not isinstance(value, str) or not value.strip() for value in hospital_aliases)
+            or len({value.strip().casefold() for value in hospital_aliases}) != len(hospital_aliases)
+        ):
+            raise ValueError("customer hospital name aliases must be unique strings")
         if (
             not isinstance(source_ids, list)
             or any(not isinstance(value, str) or not value.strip() for value in source_ids)
@@ -192,6 +199,7 @@ def _load_customer_hospitals(path: Path) -> tuple[Mapping[str, Any], ...]:
                 "region": item["region"].strip(),
                 "status": status,
                 "aliases": [value.strip() for value in aliases],
+                "hospital_aliases": [value.strip() for value in hospital_aliases],
                 "source_ids": [value.strip() for value in source_ids],
                 "announcement_sources": normalized_sources,
             }
@@ -204,15 +212,36 @@ def _load_customer_hospitals(path: Path) -> tuple[Mapping[str, Any], ...]:
 
 def _customer_sources(sources: list[Mapping[str, Any]], hospitals: tuple[Mapping[str, Any], ...]) -> list[Mapping[str, Any]]:
     output = [dict(source) for source in sources]
+    platform_sources = {
+        str(source.get("url", "")).split("/", 3)[2].casefold(): source
+        for source in output
+        if isinstance(source.get("url"), str) and "://" in str(source.get("url"))
+    }
     configured: dict[str, dict[str, Any]] = {}
     for hospital in hospitals:
         name = str(hospital.get("name", "")).strip()
         if not name:
             continue
         city = str(hospital.get("city", "")).strip()
-        names = [name, *(hospital.get("aliases", ()) or ())]
+        names = [name, *(hospital.get("hospital_aliases", hospital.get("aliases", ())) or ())]
         for source in hospital.get("announcement_sources", ()):
             key = str(source["url"])
+            host = urlsplit(key).hostname or ""
+            source_type = str(source.get("type", ""))
+            if source_type == "hospital_official":
+                adapter = "hospital_html"
+            elif host.casefold() == "ggzy.dongying.gov.cn":
+                adapter = "dongying"
+            elif host.casefold() == "jypt.bzggzyjy.cn":
+                adapter = "binzhou"
+            elif host.casefold() == "ggzy.qingdao.gov.cn":
+                adapter = "qingdao"
+            else:
+                adapter = "hospital_html"
+
+            # City-specific adapters need their source-specific configuration
+            # when the matching URL is one of the built-in regional sources.
+            inherited = platform_sources.get(host.casefold(), {})
             row = configured.get(key)
             if row is None:
                 digest = hashlib.sha256(key.encode("utf-8")).hexdigest()[:24]
@@ -220,18 +249,30 @@ def _customer_sources(sources: list[Mapping[str, Any]], hospitals: tuple[Mapping
                     "id": f"customer-url-{digest}",
                     "name": source["label"] or f"{name}公告页",
                     "city": city,
-                    "adapter": "hospital_html",
+                    "adapter": adapter,
                     "url": key,
                     "enabled": True,
-                    "coverage": "direct",
+                    "coverage": "direct" if source_type == "hospital_official" else "indirect",
                     "hospital_names": [],
                 }
+                if adapter == "hospital_html" and source_type == "public_resource":
+                    row["title_match_required"] = True
+                for field in ("site_guid", "vname", "categories"):
+                    if field in inherited:
+                        row[field] = inherited[field]
+                if adapter == "qingdao":
+                    row["area_codes"] = []
                 configured[key] = row
             for hospital_name in names:
                 if isinstance(hospital_name, str):
                     value = hospital_name.strip()
                     if value and value not in row["hospital_names"]:
                         row["hospital_names"].append(value[:200])
+            if adapter == "qingdao":
+                region = str(hospital.get("region", "")).casefold()
+                area_code = "0214" if "黄岛" in region else "0209" if "胶州" in region else ""
+                if area_code and area_code not in row["area_codes"]:
+                    row["area_codes"].append(area_code)
     output.extend(configured.values())
     return output
 

@@ -4855,6 +4855,13 @@ export function createServer(options = {}) {
           .map((item) => item.trim().slice(0, 200))
           .filter((item, index, values) => values.indexOf(item) === index)
           .slice(0, 30);
+        const hospitalAliases = Array.isArray(customer.aliases)
+          ? customer.aliases
+            .filter((item) => typeof item === "string" && item.trim())
+            .map((item) => item.trim().slice(0, 200))
+            .filter((item, index, values) => values.indexOf(item) === index)
+            .slice(0, 30)
+          : [];
         const region = String(customer.region ?? "").trim() || "全国";
         return {
           id: String(customer.id ?? "").trim().slice(0, 200),
@@ -4863,6 +4870,7 @@ export function createServer(options = {}) {
           region: region.slice(0, 100),
           status: "direct",
           source_ids: [],
+          hospital_aliases: hospitalAliases,
           announcement_sources: Array.isArray(customer.tenderSources)
             ? customer.tenderSources.map((source) => ({
               id: String(source.id ?? "").slice(0, 120),

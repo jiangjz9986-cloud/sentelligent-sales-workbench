@@ -49,7 +49,7 @@ function customers(count = 12) {
     ] : [],
     summary: "",
     opportunities: [],
-    aliases: [],
+    aliases: index === 0 ? ["A医院旧称"] : [],
     hospitalNames: [],
     requirements: [],
     painPoints: [],
@@ -110,7 +110,8 @@ describe("hospital tender scheduler", () => {
     const collected = collectorCustomers(list);
     assert.equal(collected.length, 200);
     assert.equal(collected[0].name, "胜利油田中心医院");
-    assert.deepEqual(collected[0].aliases, ["信息化"]);
+    assert.deepEqual(collected[0].aliases, ["A医院旧称", "信息化"]);
+    assert.deepEqual(collected[0].hospital_aliases, ["A医院旧称"]);
     assert.deepEqual(collected[0].announcement_sources, [
       { id: "official", type: "hospital_official", label: "医院官网", url: "https://hospital.example.test/notices" },
       { id: "county-platform", type: "public_resource", label: "嘉祥县平台", url: "https://trade.example.test/jiaxiang" },
