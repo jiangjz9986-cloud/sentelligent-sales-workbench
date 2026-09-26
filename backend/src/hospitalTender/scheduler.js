@@ -484,7 +484,7 @@ export function createHospitalTenderScheduler({
           lastFinishedAt: finishedAt,
           lastStatus: "failed",
           lastError: safeError(error),
-          nextRunAt: addMinutes(finishedAt, current.intervalMinutes),
+          nextRunAt: nextScheduledRunAt(finishedAt, current),
         });
         throw error;
       }

@@ -550,8 +550,16 @@ describe("hospital tender scheduler", () => {
 
   it("persists collector failures and leaves the pending batch resumable", async () => {
     await withDb(async (db) => {
+      const clock = () => new Date("2026-09-26T01:30:00.000Z");
       const { scheduler, schedulerRepository } = setup(db, {
+        clock,
         runner: { run: async () => { throw new Error("collector timed out"); } },
+      });
+      schedulerRepository.updateState({
+        intervalMinutes: 120,
+        batchSize: 200,
+        activeStartHour: 8,
+        activeEndHour: 21,
       });
       await assert.rejects(() => scheduler.runNext({ force: true }), /collector timed out/);
       const state = schedulerRepository.getState();
@@ -559,7 +567,7 @@ describe("hospital tender scheduler", () => {
       assert.equal(state.lastError, "collector timed out");
       assert.equal(state.cursorCustomerId, null);
       assert.equal(state.snapshotId, null);
-      assert.ok(state.nextRunAt);
+      assert.equal(state.nextRunAt, "2026-09-26T02:00:00.000Z");
     });
   });
 
