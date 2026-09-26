@@ -81,6 +81,31 @@ function schedulerRunLabel(value) {
   }[value] ?? "未知";
 }
 
+function schedulerPolicyLabel(state) {
+  const intervalMinutes = Number.isSafeInteger(state?.intervalMinutes) && state.intervalMinutes > 0
+    ? state.intervalMinutes
+    : 60;
+  const startHour = Number.isSafeInteger(state?.activeStartHour) ? state.activeStartHour : 9;
+  const endHour = Number.isSafeInteger(state?.activeEndHour) ? state.activeEndHour : 20;
+  const batchSize = Number.isSafeInteger(state?.batchSize) ? state.batchSize : 10;
+  const registeredCustomerCount = Number.isSafeInteger(state?.registeredCustomerCount)
+    ? state.registeredCustomerCount
+    : 0;
+  const slots = [];
+  for (let minute = startHour * 60; minute < endHour * 60; minute += intervalMinutes) {
+    slots.push(`${String(Math.floor(minute / 60)).padStart(2, "0")}:${String(minute % 60).padStart(2, "0")}`);
+  }
+  const cadence = intervalMinutes % 60 === 0
+    ? `每 ${intervalMinutes / 60} 小时`
+    : `每 ${intervalMinutes} 分钟`;
+  const coverage = registeredCustomerCount > 0 && registeredCustomerCount <= batchSize
+    ? `全客户 ${registeredCustomerCount} 家 / 轮`
+    : `每批最多 ${batchSize} 家`;
+  return slots.length
+    ? `北京时间 ${slots[0]}–${slots.at(-1)} · ${cadence} · ${coverage}`
+    : `北京时间 · ${cadence} · ${coverage}`;
+}
+
 const BOOKKEEPING_ACTION_LABELS = {
   "travel_expense.create": "新增费用",
   "travel_expense.update": "修改费用",
@@ -280,6 +305,9 @@ export function SystemSettingsPage({ apiClient, backendStatus, section = "securi
             enabled: item.enabled,
             intervalMinutes: item.intervalMinutes,
             batchSize: item.batchSize,
+            activeStartHour: item.activeStartHour,
+            activeEndHour: item.activeEndHour,
+            registeredCustomerCount: item.registeredCustomerCount,
             lastStatus: item.lastStatus,
             cycleNumber: item.cycleNumber,
             cycleProcessedCount: item.cycleProcessedCount,
@@ -711,7 +739,7 @@ export function SystemSettingsPage({ apiClient, backendStatus, section = "securi
     "tender-schedule": {
       eyebrow: "招标调度",
       title: "医院招标自动轮巡",
-      description: "查看固定节奏、按批次推进的客户轮巡状态，并控制启停或立即运行下一批。",
+      description: "每天在固定时点轮巡客户，查看运行进度，并控制启停或手动检测。",
       icon: CalendarClock,
     },
     "bookkeeping-log": {
@@ -970,7 +998,7 @@ export function SystemSettingsPage({ apiClient, backendStatus, section = "securi
                 <div className="settings-status-item">
                   <div>
                     <strong>自动轮巡</strong>
-                    <span>固定每 {schedulerState?.intervalMinutes ?? 60} 分钟 · 每批 {schedulerState?.batchSize ?? 10} 家客户</span>
+                    <span>{schedulerPolicyLabel(schedulerState)}</span>
                   </div>
                   <StatusMark status={schedulerStatus}>
                     {schedulerState ? schedulerRunLabel(schedulerState.lastStatus) : "未读取"}
@@ -1003,8 +1031,8 @@ export function SystemSettingsPage({ apiClient, backendStatus, section = "securi
               <div className="settings-schedule-policy">
                 <CalendarClock size={22} aria-hidden="true" />
                 <div>
-                  <strong>固定节奏处理下一批客户</strong>
-                  <p>当前为每 {schedulerState?.intervalMinutes ?? 60} 分钟、每批 {schedulerState?.batchSize ?? 10} 家客户；系统按稳定客户序号循环，成功后才推进游标。</p>
+                  <strong>固定时段轮询客户</strong>
+                  <p>{schedulerPolicyLabel(schedulerState)}；系统按稳定客户顺序检查，失败时不会提前推进进度。</p>
                 </div>
               </div>
               <div className="settings-button-row settings-scheduler-actions">
@@ -1024,7 +1052,7 @@ export function SystemSettingsPage({ apiClient, backendStatus, section = "securi
                   disabled={busy !== "" || backendStatus !== "connected" || schedulerState?.lastStatus === "running"}
                 >
                   {busy === "scheduler-run" ? <LoaderCircle className="state-spinner" size={16} /> : <Play size={16} />}
-                  {busy === "scheduler-run" ? "检测进行中" : "立即检测下一批"}
+                  {busy === "scheduler-run" ? "检测进行中" : (schedulerState?.registeredCustomerCount > 0 && schedulerState.registeredCustomerCount <= schedulerState.batchSize ? "立即检测全部客户" : "立即检测下一批")}
                 </button>
                 <button
                   className="ghost-button"

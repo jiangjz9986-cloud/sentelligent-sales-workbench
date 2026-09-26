@@ -1484,9 +1484,12 @@ async function runViewport(cdp, url, backendUrl, viewport, historicalSolution, h
         document.querySelector('[data-testid="subnav-settings-tender-schedule"]')?.click();
         await waitUntil(() => document.querySelector('[data-testid="settings-tender-schedule-section"]'), 5000);
         const tenderScheduleText = document.querySelector('[data-testid="settings-tender-schedule-section"]')?.textContent ?? '';
+        const hasCustomerCoverage = tenderScheduleText.includes('全客户') || tenderScheduleText.includes('每批最多');
+        const hasRunControl = tenderScheduleText.includes('立即检测全部客户') || tenderScheduleText.includes('立即检测下一批');
         settingsIa.tenderSchedule = window.location.pathname === '/settings/tender-schedule'
-          && tenderScheduleText.includes('固定节奏处理下一批客户')
-          && tenderScheduleText.includes('立即检测下一批');
+          && tenderScheduleText.includes('北京时间 09:00–19:00')
+          && hasCustomerCoverage
+          && hasRunControl;
         window.__qaSettingsIa = settingsIa;
 
         const setControlValue = (control, value) => {

@@ -44,11 +44,36 @@ function nextCustomers(customers, cursorCustomerId, batchSize) {
   return customers.slice(start, start + batchSize);
 }
 
-function addMinutes(isoDate, minutes) {
-  return new Date(Date.parse(isoDate) + minutes * 60_000).toISOString();
-}
-
 const SHANGHAI_UTC_OFFSET_MS = 8 * 3_600_000;
+
+function nextScheduledRunAt(dateOrIso, state, { inclusive = false } = {}) {
+  const nowMs = dateOrIso instanceof Date ? dateOrIso.getTime() : Date.parse(dateOrIso);
+  if (!Number.isFinite(nowMs)) throw new TypeError("schedule time must be a valid date");
+  const intervalMinutes = Number.isSafeInteger(state?.intervalMinutes) && state.intervalMinutes > 0
+    ? state.intervalMinutes
+    : DEFAULT_INTERVAL_MINUTES;
+  const startHour = Number.isSafeInteger(state?.activeStartHour) ? state.activeStartHour : 9;
+  const endHour = Number.isSafeInteger(state?.activeEndHour) ? state.activeEndHour : 20;
+  if (startHour < 0 || startHour > 23 || endHour < 1 || endHour > 24 || startHour >= endHour) {
+    throw new TypeError("active window is invalid");
+  }
+
+  const shanghaiNow = new Date(nowMs + SHANGHAI_UTC_OFFSET_MS);
+  const intervalMs = intervalMinutes * 60_000;
+  let localDayStart = Date.UTC(shanghaiNow.getUTCFullYear(), shanghaiNow.getUTCMonth(), shanghaiNow.getUTCDate());
+  for (let dayOffset = 0; dayOffset <= 2; dayOffset += 1) {
+    const windowStart = localDayStart + startHour * 3_600_000;
+    const windowEnd = localDayStart + endHour * 3_600_000;
+    const candidateBase = Math.max(windowStart, nowMs + SHANGHAI_UTC_OFFSET_MS);
+    const elapsed = candidateBase - windowStart;
+    let slot = windowStart + Math.ceil(elapsed / intervalMs) * intervalMs;
+    if (!inclusive && slot <= nowMs + SHANGHAI_UTC_OFFSET_MS) slot += intervalMs;
+    if (inclusive && slot < nowMs + SHANGHAI_UTC_OFFSET_MS) slot += intervalMs;
+    if (slot < windowEnd) return new Date(slot - SHANGHAI_UTC_OFFSET_MS).toISOString();
+    localDayStart += 24 * 3_600_000;
+  }
+  throw new Error("could not find a scheduled hospital tender run time");
+}
 
 /**
  * Milliseconds to wait until the Asia/Shanghai active window `[start, end)`
@@ -150,7 +175,7 @@ function transaction(db, work) {
 }
 
 /**
- * Hourly, resumable customer-batch scheduler for the built-in tender runner.
+ * Fixed-window, resumable customer-batch scheduler for the built-in tender runner.
  * The public-source snapshot is collected once per cycle and reused while the
  * cursor advances through stable customer ids in bounded batches.
  */
@@ -222,11 +247,12 @@ export function createHospitalTenderScheduler({
       return;
     }
     const currentTime = now();
-    const nextAt = current.nextRunAt
-      ? Date.parse(current.nextRunAt)
-      : Date.parse(repository.updateState({
-        nextRunAt: addMinutes(currentTime.toISOString(), current.intervalMinutes),
+    let nextAt = current.nextRunAt ? Date.parse(current.nextRunAt) : Number.NaN;
+    if (!Number.isFinite(nextAt) || nextAt < currentTime.getTime()) {
+      nextAt = Date.parse(repository.updateState({
+        nextRunAt: nextScheduledRunAt(currentTime, current),
       }).nextRunAt);
+    }
     const delay = Math.max(
       Math.max(0, minimumDelayMs),
       Math.max(0, Math.min(nextAt - currentTime.getTime(), 2 ** 31 - 1)),
@@ -269,7 +295,7 @@ export function createHospitalTenderScheduler({
       if (!force && windowWaitMs > 0) {
         const waiting = repository.updateState({
           lastStatus: "waiting",
-          nextRunAt: new Date(Date.parse(nowIso) + windowWaitMs).toISOString(),
+          nextRunAt: nextScheduledRunAt(now(), current),
         });
         return { status: "waiting", reason: "window", state: waiting };
       }
@@ -295,7 +321,7 @@ export function createHospitalTenderScheduler({
           lastBatchCount: 0,
           lastHighRelevanceCount: 0,
           notificationCount: 0,
-          nextRunAt: addMinutes(nowIso, current.intervalMinutes),
+          nextRunAt: nextScheduledRunAt(now(), current),
         });
         return { status: "success", batchCount: 0, state: empty };
       }
@@ -337,7 +363,7 @@ export function createHospitalTenderScheduler({
             lastError: errorText,
             lastHighRelevanceCount: 0,
             notificationCount: 0,
-            nextRunAt: addMinutes(finishedAt, current.intervalMinutes),
+            nextRunAt: nextScheduledRunAt(finishedAt, current),
           });
           throw error;
         }
@@ -372,7 +398,7 @@ export function createHospitalTenderScheduler({
           lastError: null,
           cycleCustomerCount: customers.length,
           cycleProcessedCount: Math.min(current.cycleProcessedCount, customers.length),
-          nextRunAt: addMinutes(finishedAt, current.intervalMinutes),
+          nextRunAt: nextScheduledRunAt(finishedAt, current),
         });
         return { status: "success", batchCount: 0, state: completed };
       }
@@ -439,7 +465,7 @@ export function createHospitalTenderScheduler({
             lastRejectedCount: error.rejectedCount,
             lastHighRelevanceCount: 0,
             notificationCount: 0,
-            nextRunAt: addMinutes(finishedAt, current.intervalMinutes),
+            nextRunAt: nextScheduledRunAt(finishedAt, current),
           });
           return {
             status: "partial",
@@ -542,7 +568,7 @@ export function createHospitalTenderScheduler({
             lastRejectedCount: result.rejectedCount,
             lastHighRelevanceCount: newHighNotices.length,
             notificationCount: 0,
-            nextRunAt: addMinutes(finishedAt, current.intervalMinutes),
+            nextRunAt: nextScheduledRunAt(finishedAt, current),
           });
           return { status: "partial", error: errorText, acceptedCount: result.acceptedCount, rejectedCount: result.rejectedCount, state: state() };
         }
@@ -570,7 +596,7 @@ export function createHospitalTenderScheduler({
           customers.length,
           current.cycleProcessedCount + batch.length,
         ),
-        nextRunAt: addMinutes(finishedAt, current.intervalMinutes),
+        nextRunAt: nextScheduledRunAt(finishedAt, current),
       });
       repository.updateRun(runId, {
         finishedAt,
@@ -623,4 +649,4 @@ export function createHospitalTenderScheduler({
   };
 }
 
-export { collectorCustomers, nextCustomers, stableCustomers };
+export { collectorCustomers, nextCustomers, nextScheduledRunAt, stableCustomers };

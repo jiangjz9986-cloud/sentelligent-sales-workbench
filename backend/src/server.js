@@ -7936,7 +7936,10 @@ export function createServer(options = {}) {
       ) {
         if (request.authContext.kind !== "user") return unauthorized(response);
         sendJson(response, 200, {
-          item: hospitalTenderScheduler.getState(),
+          item: {
+            ...hospitalTenderScheduler.getState(),
+            registeredCustomerCount: Number(db.prepare("SELECT COUNT(*) AS count FROM customers WHERE deleted_at IS NULL").get().count),
+          },
           runs: hospitalTenderScheduler.listRuns(10),
           lock: hospitalTenderSchedulerRepository.lockState(),
           notification: hospitalTenderNotificationState(),
@@ -7974,7 +7977,7 @@ export function createServer(options = {}) {
         if (!body || typeof body !== "object" || Array.isArray(body)) {
           throw new HttpError(422, "VALIDATION_ERROR", "轮巡配置必须是对象");
         }
-        const allowedFields = new Set(["enabled", "intervalMinutes", "batchSize"]);
+        const allowedFields = new Set(["enabled", "intervalMinutes", "batchSize", "activeStartHour", "activeEndHour"]);
         if (Object.keys(body).some((key) => !allowedFields.has(key))) {
           throw new HttpError(422, "VALIDATION_ERROR", "轮巡配置包含未知字段");
         }

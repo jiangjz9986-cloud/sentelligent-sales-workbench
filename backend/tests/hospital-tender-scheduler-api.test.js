@@ -86,6 +86,7 @@ describe("hospital tender scheduler API", () => {
     assert.equal(initial.response.status, 200);
     assert.equal(initial.body.item.intervalMinutes, 60);
     assert.equal(initial.body.item.batchSize, 10);
+    assert.equal(initial.body.item.registeredCustomerCount, 2);
     assert.equal(Array.isArray(initial.body.runs), true);
     assert.deepEqual(initial.body.notification, {
       status: "disabled",
@@ -105,11 +106,14 @@ describe("hospital tender scheduler API", () => {
     const updated = await request("/api/hospital-tenders/scheduler", {
       method: "PATCH",
       headers,
-      body: JSON.stringify({ intervalMinutes: 120, batchSize: 1 }),
+      body: JSON.stringify({ intervalMinutes: 120, batchSize: 200, activeStartHour: 8, activeEndHour: 21 }),
     });
     assert.equal(updated.response.status, 200);
     assert.equal(updated.body.item.intervalMinutes, 120);
-    assert.equal(updated.body.item.batchSize, 1);
+    assert.equal(updated.body.item.batchSize, 200);
+    assert.equal(updated.body.item.activeStartHour, 8);
+    assert.equal(updated.body.item.activeEndHour, 21);
+    assert.equal(updated.body.item.nextRunAt, "2026-08-17T02:00:00.000Z");
 
     const unknownField = await request("/api/hospital-tenders/scheduler", {
       method: "PATCH",
@@ -125,13 +129,13 @@ describe("hospital tender scheduler API", () => {
     });
     assert.equal(run.response.status, 200);
     assert.equal(run.body.item.status, "success");
-    assert.equal(run.body.item.state.lastBatchCount, 1);
-    assert.equal(run.body.item.state.cycleProcessedCount, 1);
+    assert.equal(run.body.item.state.lastBatchCount, 2);
+    assert.equal(run.body.item.state.cycleProcessedCount, 2);
 
     const status = await request("/api/hospital-tenders/scheduler", { headers: { Cookie: session.cookie } });
     assert.equal(status.response.status, 200);
     assert.equal(status.body.item.cycleNumber, 1);
-    assert.equal(status.body.item.cursorCustomerId !== null, true);
+    assert.equal(status.body.item.cursorCustomerId, null);
     assert.equal(status.body.runs.length, 1);
     assert.equal(status.body.lock.owner, null);
   });

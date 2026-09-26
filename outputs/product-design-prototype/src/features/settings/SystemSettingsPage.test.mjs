@@ -102,7 +102,11 @@ test("tender schedule settings expose the existing scheduler controls without sh
   assert.match(source, /nextRunAt/);
   assert.match(source, /立即检测下一批/);
   assert.match(source, /启用自动轮巡/);
-  assert.match(source, /固定节奏处理下一批客户/);
+  assert.match(source, /固定时段轮询客户/);
+  assert.match(source, /activeStartHour: item\.activeStartHour/);
+  assert.match(source, /activeEndHour: item\.activeEndHour/);
+  assert.match(source, /registeredCustomerCount: item\.registeredCustomerCount/);
+  assert.match(source, /全客户 \$\{registeredCustomerCount\} 家 \/ 轮/);
   assert.doesNotMatch(source, /固定的每小时/);
   assert.doesNotMatch(source, /每小时处理下一批/);
   assert.doesNotMatch(source, /name="intervalMinutes"/);
