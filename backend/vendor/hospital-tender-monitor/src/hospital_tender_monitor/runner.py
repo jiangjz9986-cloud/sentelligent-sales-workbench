@@ -15,6 +15,7 @@ from .config import AppConfig
 from .http import HttpClient
 from .models import ClassifiedNotice, RelevanceLevel, SourceHealth
 from .sources import (
+    BinzhouAdapter,
     DongyingAdapter,
     HospitalHtmlAdapter,
     JiaozhouCentralHospitalAdapter,
@@ -51,6 +52,8 @@ def source_factory(source: Mapping[str, object], http_client: HttpClient):
         raise MissingSourceAdapterError("source adapter is required")
     if adapter == "dongying":
         return DongyingAdapter(source, http_client)
+    if adapter == "binzhou":
+        return BinzhouAdapter(source, http_client)
     if adapter == "jining":
         return JiningAdapter(source, http_client)
     if adapter in {"qingdao", "qingdao_html", "qingdao-html"}:

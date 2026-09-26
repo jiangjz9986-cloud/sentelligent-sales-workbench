@@ -99,6 +99,11 @@ function collectorCustomers(customers) {
       region: String(customer.region ?? customer.city ?? "全国").slice(0, 100),
       status: "direct",
       source_ids: [],
+      hospital_aliases: (Array.isArray(customer.aliases) ? customer.aliases : [])
+        .filter((value) => typeof value === "string" && value.trim())
+        .map((value) => value.trim().slice(0, 200))
+        .filter((value, index, values) => values.indexOf(value) === index)
+        .slice(0, 30),
       announcement_sources: Array.isArray(customer.tenderSources)
         ? customer.tenderSources.map((source) => ({
           id: String(source.id ?? "").slice(0, 120),

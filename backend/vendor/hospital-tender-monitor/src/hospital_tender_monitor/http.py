@@ -7,6 +7,8 @@ same bound to connection establishment and subsequent socket reads.
 from __future__ import annotations
 
 from contextlib import contextmanager
+from io import BytesIO
+import gzip
 import ipaddress
 import socket
 import time
@@ -255,7 +257,7 @@ class HttpClient:
         return min(max(delay, 0.0), _MAX_RETRY_AFTER_SECONDS)
 
     def _request_headers(self, headers: Mapping[str, str] | None) -> dict[str, str]:
-        safe_headers = {"User-Agent": USER_AGENT, "Accept": "*/*"}
+        safe_headers = {"User-Agent": USER_AGENT, "Accept": "*/*", "Accept-Encoding": "gzip"}
         for name, value in (headers or {}).items():
             if name.lower() in _SENSITIVE_HEADERS or "token" in name.lower():
                 raise HttpError("request failed")
@@ -272,6 +274,14 @@ class HttpClient:
             if len(body) > self.max_response_bytes:
                 raise HttpError("request failed")
             headers = response.headers
+            content_encoding = str(headers.get("Content-Encoding", "identity")).strip().casefold()
+            if content_encoding == "gzip":
+                with gzip.GzipFile(fileobj=BytesIO(body)) as compressed:
+                    body = compressed.read(self.max_response_bytes + 1)
+                if len(body) > self.max_response_bytes:
+                    raise HttpError("request failed")
+            elif content_encoding not in {"", "identity"}:
+                raise HttpError("request failed")
             charset = headers.get_content_charset() or "utf-8"
             return HttpResponse(
                 url=response.geturl(), status=response.getcode() or 200, body=body, charset=charset
