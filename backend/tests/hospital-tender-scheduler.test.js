@@ -7,7 +7,7 @@ import { describe, it } from "node:test";
 import { openDatabase } from "../src/db.js";
 import { createHospitalTenderRepository } from "../src/hospitalTender/repository.js";
 import { createHospitalTenderSchedulerRepository } from "../src/hospitalTender/schedulerRepository.js";
-import { collectorCustomers, createHospitalTenderScheduler } from "../src/hospitalTender/scheduler.js";
+import { collectorCustomers, createHospitalTenderScheduler, nextScheduledRunAt } from "../src/hospitalTender/scheduler.js";
 
 function snapshot() {
   return {
@@ -104,6 +104,54 @@ function setup(db, options = {}) {
 }
 
 describe("hospital tender scheduler", () => {
+  it("aligns every run to two-hour Asia/Shanghai slots from 08:00 through 20:00", () => {
+    const state = { intervalMinutes: 120, activeStartHour: 8, activeEndHour: 21 };
+    assert.equal(nextScheduledRunAt("2026-09-26T01:59:00.000Z", state), "2026-09-26T02:00:00.000Z");
+    assert.equal(nextScheduledRunAt("2026-09-26T02:00:00.000Z", state, { inclusive: true }), "2026-09-26T02:00:00.000Z");
+    assert.equal(nextScheduledRunAt("2026-09-26T02:00:00.000Z", state), "2026-09-26T04:00:00.000Z");
+    assert.equal(nextScheduledRunAt("2026-09-26T12:30:00.000Z", state), "2026-09-27T00:00:00.000Z");
+  });
+
+  it("recomputes an overdue persisted slot at the next fixed time after service restart", async () => {
+    await withDb(async (db) => {
+      const clock = () => new Date("2026-09-26T01:59:00.000Z");
+      const beforeRestart = setup(db, { clock });
+      beforeRestart.schedulerRepository.updateState({
+        intervalMinutes: 120,
+        batchSize: 200,
+        activeStartHour: 8,
+        activeEndHour: 21,
+        nextRunAt: "2026-09-25T02:00:00.000Z",
+      });
+      beforeRestart.scheduler.stop();
+
+      const afterRestart = setup(db, { customers: beforeRestart.list, clock });
+      afterRestart.scheduler.start();
+      assert.equal(afterRestart.schedulerRepository.getState().nextRunAt, "2026-09-26T02:00:00.000Z");
+      afterRestart.scheduler.stop();
+    });
+  });
+
+  it("completes the full 69-customer production registry in one scheduled cycle", async () => {
+    await withDb(async (db) => {
+      const { scheduler, schedulerRepository } = setup(db, { customers: customers(69) });
+      const configured = schedulerRepository.updateState({
+        intervalMinutes: 120,
+        batchSize: 200,
+        activeStartHour: 8,
+        activeEndHour: 21,
+      });
+      assert.equal(configured.batchSize, 200);
+
+      const result = await scheduler.runNext({ force: true });
+      assert.equal(result.status, "success");
+      assert.equal(result.batchCustomerIds.length, 69);
+      assert.equal(schedulerRepository.getState().cycleProcessedCount, 69);
+      assert.equal(schedulerRepository.getState().cursorCustomerId, null);
+      assert.equal(schedulerRepository.getState().nextRunAt, "2026-08-17T02:00:00.000Z");
+    });
+  });
+
   it("keeps a large customer registry bounded and de-duplicates collector names", () => {
     const list = customers(201);
     list[200] = { ...list[200], id: "customer-201", name: list[0].name, needs: ["信息化", "信息化"] };
