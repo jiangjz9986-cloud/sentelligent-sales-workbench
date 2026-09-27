@@ -38,6 +38,7 @@ const expenseProofFixtureBase64 = readFileSync(
 ).toString("base64");
 const CDP_COMMAND_TIMEOUT_MS = 30_000;
 const CDP_FLOW_TIMEOUT_MS = 12 * 60_000;
+const EXPENSE_SCREENSHOT_STAGE_TIMEOUT_MS = 60_000;
 
 const desktopRecord =
   "周三现场拜访日照中医医院，和主任及主管工程师梁斌讨论未来 3-5 年规划。客户希望补齐本地数据中心基础架构健壮度，未来将移动云作为灾备中心。客户反馈移动云资源计费、平台封闭、数据导出配合度和后台管理权都存在问题。需要输出十五五年度规划材料，并判断是否同步到商机档案和周报。";
@@ -666,7 +667,7 @@ async function captureExpenseDesignScreenshots(cdp, isFlowRunning, viewport) {
   for (const capture of captures) {
     const started = Date.now();
     let stageReady = false;
-    while (isFlowRunning() && Date.now() - started < 20000) {
+    while (isFlowRunning() && Date.now() - started < EXPENSE_SCREENSHOT_STAGE_TIMEOUT_MS) {
       if (await evaluate(cdp, "window.__qaExpenseVisualCaptureStage ?? null") === capture.stage) {
         stageReady = true;
         break;
@@ -2451,6 +2452,14 @@ async function runViewport(cdp, url, backendUrl, viewport, historicalSolution, h
         ]);
         expensePage.querySelector('[data-testid="expense-tab-invoices"]')?.click();
         await waitUntil(() => document.querySelector('.invoice-candidate-week-summary'), 10000);
+        const invoiceQrUploadLabel = [...document.querySelectorAll('.invoice-manager-actions label')]
+          .find((label) => label.textContent?.includes('二维码取票'));
+        const invoiceQrInput = invoiceQrUploadLabel?.querySelector('input[type="file"]');
+        const qrImportControlVisible = Boolean(
+          invoiceQrUploadLabel?.getClientRects().length
+          && invoiceQrInput?.accept === 'image/jpeg,image/png,image/webp'
+          && !invoiceQrInput.disabled,
+        );
         const parseCnyCents = (value) => Math.round(Number(String(value ?? '').replace(/[^\\d.]/g, '')) * 100);
         const candidateSummaryValues = () => [...document.querySelectorAll('.invoice-candidate-week-summary > span')]
           .map((span) => parseCnyCents(span.querySelector('strong')?.textContent));
@@ -2645,6 +2654,7 @@ async function runViewport(cdp, url, backendUrl, viewport, historicalSolution, h
           proofListRemovedFromDetailParent,
           editorClosedWithEscape: !document.querySelector('.expense-drawer[role="dialog"]'),
           weeklyMissingSummaryMatchesApi,
+          qrImportControlVisible,
           substituteTargetSummaryMatches,
           candidateCombinationExact: Boolean(candidateCombinationExact),
           candidatesReviewableBeforeBatchAccept,
@@ -3924,6 +3934,7 @@ async function main() {
         assert.equal(result.expenseFlow.paymentProofLoaded, true, "desktop expense details should render the synthetic payment proof sharply");
         assert.equal(result.expenseFlow.proofListRemovedFromDetailParent, true, "desktop ledger should not keep a full proof list beneath the table");
         assert.equal(result.expenseFlow.editorClosedWithEscape, true, "desktop expense drawer should close on Escape");
+        assert.equal(result.expenseFlow.qrImportControlVisible, true, "desktop invoice manager should show an enabled QR-image import control");
         assert.equal(result.expenseFlow.weeklyMissingSummaryMatchesApi, true, "weekly missing-invoice amount should match the authoritative coverage API");
         assert.equal(result.expenseFlow.substituteTargetSummaryMatches, true, "weekly substitute target should reflect manually marked substitute expenses");
         assert.equal(result.expenseFlow.candidateCombinationExact, true, "weekly invoice suggestions should combine warehouse invoices to the exact substitute target");

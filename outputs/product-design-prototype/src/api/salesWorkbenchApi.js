@@ -1282,6 +1282,8 @@ export function createSalesWorkbenchApi({ baseUrl, fetchImpl = fetch, onUnauthor
   return {
     isEnabled: Boolean(root),
     setSession,
+    // Keeps feature-specific transport details out of the main bundle.
+    requestInternal: requestApi,
 
     async transcribeAudio({
       blob,

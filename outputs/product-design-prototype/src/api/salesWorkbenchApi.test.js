@@ -3653,6 +3653,14 @@ describe("sales workbench API client", () => {
         if (url.endsWith("/api/invoices") && options.method === "POST") {
           return jsonResponse({ item: sampleInvoice() }, 201);
         }
+        if (url.endsWith("/api/invoices/qr-fetch") && options.method === "POST") {
+          return jsonResponse({
+            fileName: "二维码发票.pdf",
+            mediaType: "application/pdf",
+            sizeBytes: 8,
+            contentBase64: "JVBERi0xLjQ=",
+          });
+        }
         if (url.endsWith("/api/invoices/invoice%2F%E4%B8%80%E5%8F%B7") && (options.method ?? "GET") === "GET") {
           return jsonResponse({ item: sampleInvoice({ id: "invoice/一号" }) });
         }
@@ -3689,12 +3697,17 @@ describe("sales workbench API client", () => {
       unexpected: "must-not-be-sent",
     }, 1);
     const deleted = await api.deleteInvoice("invoice/一号", 2);
+    const qrPdf = await api.requestInternal("/api/invoices/qr-fetch", {
+      method: "POST",
+      body: JSON.stringify({ url: "https://einvoice.chinatax.gov.cn/get?id=fixture" }),
+    });
 
     assert.equal(listed.length, 1);
     assert.equal(uploaded.id, "invoice-1");
     assert.equal(loaded.id, "invoice/一号");
     assert.equal(reviewed.version, 2);
     assert.equal(deleted.version, 3);
+    assert.equal(qrPdf.mediaType, "application/pdf");
     assert.equal(contentUrl, "https://example.test/api/invoices/invoice%2F%E4%B8%80%E5%8F%B7/content");
     assert.equal(calls[1].idempotencyKey, "invoice-upload-1");
     assert.equal(calls[1].csrf, "fixture-csrf-token");
@@ -3709,6 +3722,28 @@ describe("sales workbench API client", () => {
     assert.equal(Object.hasOwn(calls[3].body, "unexpected"), false);
     assert.equal(calls[4].ifMatch, '"2"');
     assert.equal(calls[4].method, "DELETE");
+    assert.equal(calls[5].url, "https://example.test/api/invoices/qr-fetch");
+    assert.equal(calls[5].method, "POST");
+    assert.equal(calls[5].csrf, "fixture-csrf-token");
+    assert.deepEqual(calls[5].body, { url: "https://einvoice.chinatax.gov.cn/get?id=fixture" });
+  });
+
+  it("allows a first-party feature module to use the authenticated API transport", async () => {
+    const api = createSalesWorkbenchApi({
+      baseUrl: "https://example.test",
+      fetchImpl: async () => jsonResponse({
+        fileName: "payload.html",
+        mediaType: "text/html",
+        sizeBytes: 4,
+        contentBase64: "aHRtbA==",
+      }),
+    });
+    api.setSession({ csrfToken: "fixture-csrf-token" });
+    const response = await api.requestInternal("/api/invoices/qr-fetch", {
+      method: "POST",
+      body: JSON.stringify({ url: "https://einvoice.chinatax.gov.cn/get" }),
+    });
+    assert.equal(response.mediaType, "text/html");
   });
 
   it("loads protected invoice content through the API client with Cookie credentials", async () => {

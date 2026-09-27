@@ -105,6 +105,7 @@ import {
 import { createInvoiceEscalationGapRepository } from "./travelExpense/invoiceEscalationGapRepository.js";
 import { renderInvoiceEscalationMessage } from "./travelExpense/invoiceEscalation.js";
 import { createInvoiceEscalationScheduler } from "./travelExpense/invoiceEscalationScheduler.js";
+import { createInvoiceQrFetcher, InvoiceQrDownloadError } from "./travelExpense/invoiceQrDownload.js";
 import { withDocumentBlobWritePreflight } from "./travelExpense/documentBlobStore.js";
 import {
   validateTravelExpenseAdvancePayload,
@@ -624,6 +625,12 @@ function validateInvoiceUploadPayload(value) {
     content: decodeStrictBase64(body.contentBase64),
     sourceRef: payloadText(body.sourceRef, "sourceRef", { optional: true, max: 500 }),
   };
+}
+
+function validateInvoiceQrFetchPayload(value) {
+  const body = plainObject(value);
+  allowedPayloadKeys(body, new Set(["url"]));
+  return { url: payloadText(body.url, "url", { max: 4096 }) };
 }
 
 function validateShortcutReviewConfirmPayload(value) {
@@ -3854,6 +3861,7 @@ export function createServer(options = {}) {
         : {}),
     });
   });
+  const invoiceQrFetcher = options.invoiceQrFetcher ?? createInvoiceQrFetcher(options.invoiceQrFetcherOptions);
   const bookkeepingCategoryRepository = options.bookkeepingCategoryRepository
     ?? createBookkeepingCategoryRepository(db, {
       ...(options.bookkeepingCategoryIdFactory ? { idFactory: options.bookkeepingCategoryIdFactory } : {}),
@@ -8638,6 +8646,32 @@ export function createServer(options = {}) {
           status: url.searchParams.get("status"),
         });
         sendJson(response, 200, { items });
+        return;
+      }
+
+      if (request.method === "POST" && url.pathname === "/api/invoices/qr-fetch") {
+        if (request.authContext?.kind !== "user") return unauthorized(response);
+        const body = validateInvoiceQrFetchPayload(await readJson(request, { maxBytes: 8 * 1024 }));
+        let fetched;
+        try {
+          fetched = await invoiceQrFetcher(body.url);
+        } catch (error) {
+          if (error instanceof InvoiceQrDownloadError) {
+            throw new HttpError(error.status, error.code, error.message);
+          }
+          throw new HttpError(502, "INVOICE_QR_DOWNLOAD_FAILED", "税务发票链接暂时无法下载，请手动打开二维码页面。 ");
+        }
+        const inspected = inspectInvoiceFile({
+          fileName: fetched?.fileName ?? "二维码发票.pdf",
+          mediaType: "application/pdf",
+          buffer: fetched?.content,
+        });
+        sendJson(response, 200, {
+          fileName: inspected.fileName,
+          mediaType: inspected.mediaType,
+          sizeBytes: inspected.sizeBytes,
+          contentBase64: inspected.buffer.toString("base64"),
+        }, { "Cache-Control": "no-store" });
         return;
       }
 

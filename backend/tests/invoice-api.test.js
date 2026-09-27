@@ -10,6 +10,7 @@ import {
 } from "../../shared/salesWorkbenchApiContract.mjs";
 import { hashPassword } from "../src/auth/password.js";
 import { createServer } from "../src/server.js";
+import { InvoiceQrDownloadError } from "../src/travelExpense/invoiceQrDownload.js";
 import { minimalPdf, VALID_JPEG, VALID_PDF } from "./helpers/image-fixtures.js";
 
 const account = "invoice-owner";
@@ -151,6 +152,54 @@ afterEach(async () => {
 });
 
 describe("authenticated invoice API", () => {
+  it("fetches QR-linked PDFs only for an authenticated user and returns bytes for normal invoice ingestion", async () => {
+    let fetchedUrl;
+    await startHarness({
+      invoiceQrFetcher: async (value) => {
+        fetchedUrl = value;
+        return { fileName: "二维码发票.pdf", content: PDF };
+      },
+    });
+
+    const anonymous = await read(await fetch(`${baseUrl}/api/invoices/qr-fetch`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ url: "https://einvoice.chinatax.gov.cn/get?id=secret" }),
+    }));
+    assert.equal(anonymous.response.status, 401);
+    assert.equal(fetchedUrl, undefined);
+
+    const response = await request("/api/invoices/qr-fetch", {
+      method: "POST",
+      body: JSON.stringify({ url: "https://einvoice.chinatax.gov.cn/get?id=private-token" }),
+    });
+    assert.equal(response.response.status, 200);
+    assert.equal(fetchedUrl, "https://einvoice.chinatax.gov.cn/get?id=private-token");
+    assert.equal(response.body.mediaType, "application/pdf");
+    assert.equal(response.body.fileName, "二维码发票.pdf");
+    assert.deepEqual(Buffer.from(response.body.contentBase64, "base64"), PDF);
+    assert.equal(JSON.stringify(response.body).includes("private-token"), false);
+  });
+
+  it("surfaces a tax landing page as a manual-download step without creating an invoice", async () => {
+    await startHarness({
+      invoiceQrFetcher: async () => {
+        throw new InvoiceQrDownloadError(
+          "INVOICE_QR_LANDING_PAGE",
+          "二维码打开的是税务局下载页面，请手动下载 PDF。",
+        );
+      },
+    });
+
+    const result = await request("/api/invoices/qr-fetch", {
+      method: "POST",
+      body: JSON.stringify({ url: "https://einvoice.chinatax.gov.cn/portal?id=fixture" }),
+    });
+    assert.equal(result.response.status, 422);
+    assert.equal(result.body.error.code, "INVOICE_QR_LANDING_PAGE");
+    assert.equal((await request("/api/invoices")).body.items.length, 0);
+  });
+
   it("reports local invoice extraction readiness without command paths or tool output", async () => {
     await startHarness({
       invoiceTextTools: {

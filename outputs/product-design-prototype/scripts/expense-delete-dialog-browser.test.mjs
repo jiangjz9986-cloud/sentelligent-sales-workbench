@@ -46,12 +46,29 @@ test("routes invoice-blocked expense deletion to invoice management without repe
 
   const browser = await chromium.launch({ channel: "chrome", headless: true });
   context.after(() => browser.close());
-  const page = await browser.newPage({ viewport: { width: 1280, height: 860 } });
+  const page = await browser.newPage({ viewport: { width: 1280, height: 860 }, timezoneId: "UTC" });
+  const browserErrors = [];
+  page.on("pageerror", (error) => browserErrors.push(error.message));
+  page.on("console", (message) => {
+    if (message.type() === "error") browserErrors.push(message.text());
+  });
   await page.goto(`http://127.0.0.1:${port}/scripts/fixtures/expense-delete-harness.html`);
 
   const expenseRow = page.locator('[data-ledger-expense-id="expense-delete-test"]:visible');
   const deleteButton = page.locator('[data-testid="expense-delete-ledger"]:visible').first();
-  await deleteButton.waitFor();
+  try {
+    await deleteButton.waitFor();
+  } catch (error) {
+    const pageState = await page.evaluate(() => {
+      const root = document.querySelector("#root");
+      return {
+        title: document.title,
+        rootText: root?.innerText?.slice(0, 1200) ?? "",
+        rootHtml: root?.innerHTML?.slice(0, 3000) ?? "",
+      };
+    });
+    throw new Error(`Expense delete control did not render: ${JSON.stringify({ browserErrors, pageState })}`, { cause: error });
+  }
   assert.equal(await expenseRow.count(), 1);
 
   await deleteButton.click();
