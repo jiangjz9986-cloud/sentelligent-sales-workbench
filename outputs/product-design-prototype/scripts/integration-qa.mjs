@@ -38,6 +38,7 @@ const expenseProofFixtureBase64 = readFileSync(
 ).toString("base64");
 const CDP_COMMAND_TIMEOUT_MS = 30_000;
 const CDP_FLOW_TIMEOUT_MS = 12 * 60_000;
+const EXPENSE_SCREENSHOT_STAGE_TIMEOUT_MS = 60_000;
 
 const desktopRecord =
   "周三现场拜访日照中医医院，和主任及主管工程师梁斌讨论未来 3-5 年规划。客户希望补齐本地数据中心基础架构健壮度，未来将移动云作为灾备中心。客户反馈移动云资源计费、平台封闭、数据导出配合度和后台管理权都存在问题。需要输出十五五年度规划材料，并判断是否同步到商机档案和周报。";
@@ -666,7 +667,7 @@ async function captureExpenseDesignScreenshots(cdp, isFlowRunning, viewport) {
   for (const capture of captures) {
     const started = Date.now();
     let stageReady = false;
-    while (isFlowRunning() && Date.now() - started < 20000) {
+    while (isFlowRunning() && Date.now() - started < EXPENSE_SCREENSHOT_STAGE_TIMEOUT_MS) {
       if (await evaluate(cdp, "window.__qaExpenseVisualCaptureStage ?? null") === capture.stage) {
         stageReady = true;
         break;
