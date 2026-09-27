@@ -3697,7 +3697,10 @@ describe("sales workbench API client", () => {
       unexpected: "must-not-be-sent",
     }, 1);
     const deleted = await api.deleteInvoice("invoice/一号", 2);
-    const qrPdf = await api.fetchInvoicePdfFromQr("https://einvoice.chinatax.gov.cn/get?id=fixture");
+    const qrPdf = await api.requestInternal("/api/invoices/qr-fetch", {
+      method: "POST",
+      body: JSON.stringify({ url: "https://einvoice.chinatax.gov.cn/get?id=fixture" }),
+    });
 
     assert.equal(listed.length, 1);
     assert.equal(uploaded.id, "invoice-1");
@@ -3725,7 +3728,7 @@ describe("sales workbench API client", () => {
     assert.deepEqual(calls[5].body, { url: "https://einvoice.chinatax.gov.cn/get?id=fixture" });
   });
 
-  it("rejects an invalid response from the invoice QR fetch endpoint", async () => {
+  it("allows a first-party feature module to use the authenticated API transport", async () => {
     const api = createSalesWorkbenchApi({
       baseUrl: "https://example.test",
       fetchImpl: async () => jsonResponse({
@@ -3736,7 +3739,11 @@ describe("sales workbench API client", () => {
       }),
     });
     api.setSession({ csrfToken: "fixture-csrf-token" });
-    await assert.rejects(api.fetchInvoicePdfFromQr("https://einvoice.chinatax.gov.cn/get"), /invalid PDF response/u);
+    const response = await api.requestInternal("/api/invoices/qr-fetch", {
+      method: "POST",
+      body: JSON.stringify({ url: "https://einvoice.chinatax.gov.cn/get" }),
+    });
+    assert.equal(response.mediaType, "text/html");
   });
 
   it("loads protected invoice content through the API client with Cookie credentials", async () => {

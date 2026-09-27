@@ -3,6 +3,7 @@ import { describe, it } from "node:test";
 
 import { normalizeInvoiceQrUrl } from "../../../../../shared/invoiceQrUrl.mjs";
 import { decodeInvoiceQrImage } from "./invoiceQr.js";
+import { assertInvoiceQrPdfResponse } from "./invoiceQrResponse.js";
 
 describe("invoice QR import", () => {
   it("accepts only HTTPS URLs under the official tax domain", () => {
@@ -73,5 +74,24 @@ describe("invoice QR import", () => {
       decodeInvoiceQrImage({ ...file, size: 12 * 1024 * 1024 + 1 }, factories),
       /不能超过 12 MiB/u,
     );
+  });
+
+  it("validates QR-fetched PDF responses before invoice upload", () => {
+    const valid = {
+      fileName: "invoice.pdf",
+      mediaType: "application/pdf",
+      sizeBytes: 8,
+      contentBase64: "JVBERi0xLjQ=",
+    };
+    assert.equal(assertInvoiceQrPdfResponse(valid), valid);
+    for (const patch of [
+      { fileName: "page.html" },
+      { mediaType: "text/html" },
+      { contentBase64: "<html>" },
+      { sizeBytes: 7 },
+      { sizeBytes: 12 * 1024 * 1024 + 1 },
+    ]) {
+      assert.throws(() => assertInvoiceQrPdfResponse({ ...valid, ...patch }), /invalid PDF response/u);
+    }
   });
 });

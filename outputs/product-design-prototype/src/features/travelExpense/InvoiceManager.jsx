@@ -22,6 +22,7 @@ import { AuthenticatedPdfFrame } from "./AuthenticatedPdfFrame.jsx";
 import { AuthenticatedImageFrame } from "./AuthenticatedImageFrame.jsx";
 import { prepareTravelExpenseDocument } from "./travelExpenseDocument.js";
 import { decodeInvoiceQrImage } from "./invoiceQr.js";
+import { assertInvoiceQrPdfResponse } from "./invoiceQrResponse.js";
 import {
   calculateInvoiceMatchAllocation,
   resolveExpenseReferenceCode,
@@ -413,7 +414,10 @@ export function InvoiceManager({
       const qrUrl = await decodeInvoiceQrImage(imageFile);
       let downloaded;
       try {
-        downloaded = await apiClient.fetchInvoicePdfFromQr(qrUrl);
+        downloaded = assertInvoiceQrPdfResponse(await apiClient.requestInternal("/api/invoices/qr-fetch", {
+          method: "POST",
+          body: JSON.stringify({ url: qrUrl }),
+        }));
       } catch (error) {
         setQrFallbackUrl(new Set([
           "INVOICE_QR_LANDING_PAGE",
