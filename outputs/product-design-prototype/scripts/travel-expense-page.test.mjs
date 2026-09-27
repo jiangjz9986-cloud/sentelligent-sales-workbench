@@ -116,6 +116,9 @@ describe("travel expense feature boundary", () => {
     assert.match(proofs, /formatTravelExpenseDateTime\(payment\.paidAt\)/);
     assert.doesNotMatch(proofs, /replace\("T", " "\)\.slice\(0, 16\)/);
     assert.match(invoices, /发票仓库/);
+    assert.match(invoices, /二维码取票/);
+    assert.match(invoices, /fetchInvoicePdfFromQr/);
+    assert.match(invoices, /INVOICE_QR_LANDING_PAGE/);
     assert.match(invoices, /识别冲突/);
     assert.match(invoices, /人工复核/);
     assert.match(invoices, /发票匹配/);

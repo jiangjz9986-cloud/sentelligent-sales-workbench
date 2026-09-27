@@ -4360,6 +4360,14 @@
   flex: 1 1 auto;
 }
 
+.invoice-qr-fallback-link {
+  flex: 0 0 auto;
+  color: #245bc5;
+  font-weight: 760;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
 .invoice-action-error button {
   width: 44px;
   height: 44px;

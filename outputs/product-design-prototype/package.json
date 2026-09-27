@@ -1,6 +1,6 @@
 {
   "name": "product-design-prototype",
-  "version": "0.13.20",
+  "version": "0.13.21",
   "private": true,
   "type": "module",
   "scripts": {
@@ -59,6 +59,7 @@
   },
   "dependencies": {
     "@vitejs/plugin-react": "5.0.4",
+    "jsqr": "1.4.0",
     "lucide-react": "^1.17.0",
     "pdfjs-dist": "6.3.289",
     "react": "19.2.0",

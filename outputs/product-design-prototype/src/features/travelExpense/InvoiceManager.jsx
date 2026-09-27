@@ -8,6 +8,7 @@ import {
   LoaderCircle,
   PackageOpen,
   Printer,
+  QrCode,
   RefreshCw,
   RotateCcw,
   Sparkles,
@@ -20,6 +21,7 @@ import { useEffect, useMemo, useState } from "react";
 import { AuthenticatedPdfFrame } from "./AuthenticatedPdfFrame.jsx";
 import { AuthenticatedImageFrame } from "./AuthenticatedImageFrame.jsx";
 import { prepareTravelExpenseDocument } from "./travelExpenseDocument.js";
+import { decodeInvoiceQrImage } from "./invoiceQr.js";
 import {
   calculateInvoiceMatchAllocation,
   resolveExpenseReferenceCode,
@@ -146,6 +148,7 @@ export function InvoiceManager({
   const [pendingAction, setPendingAction] = useState("");
   const [actionError, setActionError] = useState("");
   const [actionNotice, setActionNotice] = useState("");
+  const [qrFallbackUrl, setQrFallbackUrl] = useState("");
   const [reload, setReload] = useState({ invoices: 0, matches: 0, noInvoice: 0, candidates: 0 });
 
   function setResourceState(name, next) {
@@ -379,23 +382,55 @@ export function InvoiceManager({
     }
   }
 
-  async function uploadInvoice(file) {
-    const uploaded = await perform("upload", async () => {
-      const prepared = await prepareTravelExpenseDocument(file);
-      return apiClient.uploadInvoice({
-        fileName: prepared.fileName,
-        mediaType: prepared.mediaType,
-        contentBase64: prepared.contentBase64,
-        sourceRef: "manual-upload",
-      }, { idempotencyKey: actionKey("invoice-upload") });
-    });
+  async function uploadInvoiceContent(file, sourceRef = "manual-upload") {
+    const prepared = await prepareTravelExpenseDocument(file);
+    return apiClient.uploadInvoice({
+      fileName: prepared.fileName,
+      mediaType: prepared.mediaType,
+      contentBase64: prepared.contentBase64,
+      sourceRef,
+    }, { idempotencyKey: actionKey("invoice-upload") });
+  }
+
+  function showUploadedInvoice(uploaded, sourceLabel = "发票") {
     if (!uploaded) return;
     setInvoices((current) => [uploaded, ...current.filter((item) => item.id !== uploaded.id)]);
     setSelectedInvoiceId(uploaded.id);
     setActionNotice(uploaded.status === "matched"
-      ? "发票已入库，并已自动关联唯一匹配的费用。"
-      : "发票已入库；金额或日期无法唯一匹配时会保留待复核，不会猜测绑定。");
+      ? `${sourceLabel}已入库，并已自动关联唯一匹配的费用。`
+      : `${sourceLabel}已入库；金额或日期无法唯一匹配时会保留待复核，不会猜测绑定。`);
     setReload((current) => ({ ...current, matches: current.matches + 1, noInvoice: current.noInvoice + 1, candidates: current.candidates + 1 }));
+  }
+
+  async function uploadInvoice(file) {
+    const uploaded = await perform("upload", () => uploadInvoiceContent(file));
+    showUploadedInvoice(uploaded);
+  }
+
+  async function importInvoiceFromQr(imageFile) {
+    setQrFallbackUrl("");
+    const uploaded = await perform("qr-import", async () => {
+      const qrUrl = await decodeInvoiceQrImage(imageFile);
+      let downloaded;
+      try {
+        downloaded = await apiClient.fetchInvoicePdfFromQr(qrUrl);
+      } catch (error) {
+        setQrFallbackUrl(new Set([
+          "INVOICE_QR_LANDING_PAGE",
+          "INVOICE_QR_REDIRECT_BLOCKED",
+          "INVOICE_QR_DOWNLOAD_FAILED",
+          "INVOICE_QR_TIMEOUT",
+          "INVOICE_QR_DNS_FAILED",
+        ]).has(error?.code) ? qrUrl : "");
+        throw error;
+      }
+      const binary = globalThis.atob(downloaded.contentBase64);
+      const bytes = new Uint8Array(binary.length);
+      for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
+      const pdf = new File([bytes], downloaded.fileName, { type: "application/pdf" });
+      return uploadInvoiceContent(pdf, "qr-download");
+    });
+    showUploadedInvoice(uploaded, "二维码发票");
   }
 
   async function saveReview(event) {
@@ -574,10 +609,19 @@ export function InvoiceManager({
         </div>
         <div className="invoice-manager-actions">
           <button className="invoice-print-button" type="button" data-testid="invoice-print-trigger" disabled={resource.matches.status !== "ready" || printableInvoices.length === 0} title={printableInvoices.length ? `本周可打印 ${printableInvoices.length} 份已匹配发票` : "本周暂无已匹配发票"} onClick={() => onOpenPrint(printableInvoices)}><Printer size={17} />打印本周已匹配发票<span>{printableInvoices.length}</span></button>
-          <label className="invoice-upload-button" aria-disabled={pendingAction === "upload"}>
+          <label className="invoice-upload-button invoice-qr-upload-button" aria-disabled={pendingAction !== ""}>
+            {pendingAction === "qr-import" ? <LoaderCircle className="state-spinner" size={17} /> : <QrCode size={17} />}
+            <span>{pendingAction === "qr-import" ? "正在识别二维码" : "二维码取票"}</span>
+            <input type="file" accept="image/jpeg,image/png,image/webp" disabled={pendingAction !== ""} onChange={(event) => {
+              const file = event.target.files?.[0];
+              if (file) void importInvoiceFromQr(file);
+              event.target.value = "";
+            }} />
+          </label>
+          <label className="invoice-upload-button" aria-disabled={pendingAction !== ""}>
             {pendingAction === "upload" ? <LoaderCircle className="state-spinner" size={17} /> : <Upload size={17} />}
             <span>{pendingAction === "upload" ? "正在上传" : "上传发票"}</span>
-            <input type="file" accept="image/jpeg,image/png,image/webp,application/pdf" disabled={pendingAction === "upload"} onChange={(event) => {
+            <input type="file" accept="image/jpeg,image/png,image/webp,application/pdf" disabled={pendingAction !== ""} onChange={(event) => {
               const file = event.target.files?.[0];
               if (file) void uploadInvoice(file);
               event.target.value = "";
@@ -587,7 +631,7 @@ export function InvoiceManager({
       </header>
 
       {actionNotice ? <div className="invoice-action-notice" role="status"><FileCheck2 size={17} /><span>{actionNotice}</span><button type="button" aria-label="关闭提示" onClick={() => setActionNotice("")}><X size={16} /></button></div> : null}
-      {actionError ? <div className="invoice-action-error" role="alert"><CircleAlert size={18} /><span>{actionError}</span><button type="button" aria-label="关闭错误提示" onClick={() => setActionError("")}><X size={17} /></button></div> : null}
+      {actionError ? <div className="invoice-action-error" role="alert"><CircleAlert size={18} /><span>{actionError}</span>{qrFallbackUrl ? <a className="invoice-qr-fallback-link" href={qrFallbackUrl} target="_blank" rel="noopener noreferrer">打开税务局页面下载 PDF</a> : null}<button type="button" aria-label="关闭错误提示" onClick={() => { setActionError(""); setQrFallbackUrl(""); }}><X size={17} /></button></div> : null}
 
       <div className="invoice-manager-grid">
         <section className="invoice-repository" aria-label="发票仓库">
