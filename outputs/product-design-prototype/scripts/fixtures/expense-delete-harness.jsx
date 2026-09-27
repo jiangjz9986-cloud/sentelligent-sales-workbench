@@ -3,15 +3,11 @@ import { createRoot } from "react-dom/client";
 import { TravelExpensePage } from "../../src/features/travelExpense/TravelExpensePage.jsx";
 import "../../src/styles/global.css";
 
-const SHANGHAI_DATE_FORMATTER = new Intl.DateTimeFormat("en-CA", {
-  year: "numeric",
-  month: "2-digit",
-  day: "2-digit",
-  timeZone: "Asia/Shanghai",
-});
-
 function dateKey(date) {
-  return SHANGHAI_DATE_FORMATTER.format(date);
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
 }
 
 const occurredOn = dateKey(new Date());

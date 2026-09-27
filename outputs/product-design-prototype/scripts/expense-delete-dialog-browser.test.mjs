@@ -46,7 +46,7 @@ test("routes invoice-blocked expense deletion to invoice management without repe
 
   const browser = await chromium.launch({ channel: "chrome", headless: true });
   context.after(() => browser.close());
-  const page = await browser.newPage({ viewport: { width: 1280, height: 860 } });
+  const page = await browser.newPage({ viewport: { width: 1280, height: 860 }, timezoneId: "UTC" });
   const browserErrors = [];
   page.on("pageerror", (error) => browserErrors.push(error.message));
   page.on("console", (message) => {
