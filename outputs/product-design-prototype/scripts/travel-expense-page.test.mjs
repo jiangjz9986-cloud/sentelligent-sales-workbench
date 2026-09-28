@@ -117,6 +117,9 @@ describe("travel expense feature boundary", () => {
     assert.doesNotMatch(proofs, /replace\("T", " "\)\.slice\(0, 16\)/);
     assert.match(invoices, /发票仓库/);
     assert.match(invoices, /二维码取票/);
+    assert.match(invoices, /findInvoiceQrUrlInImage\(file\)/);
+    assert.match(invoices, /if \(!qrUrl\) return uploadInvoiceContent\(file\)/);
+    assert.match(invoices, /return uploadInvoiceFromQrUrl\(qrUrl\)/);
     assert.match(invoices, /requestInternal\("\/api\/invoices\/qr-fetch"/);
     assert.match(invoices, /INVOICE_QR_LANDING_PAGE/);
     assert.match(invoices, /识别冲突/);

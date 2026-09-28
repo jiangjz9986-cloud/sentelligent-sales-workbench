@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
 import { normalizeInvoiceQrUrl } from "../../../../../shared/invoiceQrUrl.mjs";
-import { decodeInvoiceQrImage } from "./invoiceQr.js";
+import { decodeInvoiceQrImage, findInvoiceQrUrlInImage } from "./invoiceQr.js";
 import { assertInvoiceQrPdfResponse } from "./invoiceQrResponse.js";
 
 describe("invoice QR import", () => {
@@ -74,6 +74,33 @@ describe("invoice QR import", () => {
       decodeInvoiceQrImage({ ...file, size: 12 * 1024 * 1024 + 1 }, factories),
       /不能超过 12 MiB/u,
     );
+  });
+
+  it("opportunistically detects only official tax invoice links during ordinary image upload", async () => {
+    const file = { type: "image/jpeg", size: 10 };
+    const factories = {
+      bitmapFactory: async () => ({ width: 1, height: 1, close() {} }),
+      canvasFactory: () => ({
+        getContext: () => ({ drawImage() {}, getImageData: () => ({ data: new Uint8ClampedArray(4) }) }),
+      }),
+    };
+
+    assert.equal(
+      await findInvoiceQrUrlInImage(file, {
+        ...factories,
+        decodeQr: () => ({ data: "https://einvoice.chinatax.gov.cn/download?token=fixture" }),
+      }),
+      "https://einvoice.chinatax.gov.cn/download?token=fixture",
+    );
+    assert.equal(await findInvoiceQrUrlInImage(file, { ...factories, decodeQr: () => null }), null);
+    assert.equal(
+      await findInvoiceQrUrlInImage(file, {
+        ...factories,
+        decodeQr: () => ({ data: "https://attacker.example/invoice.pdf" }),
+      }),
+      null,
+    );
+    assert.equal(await findInvoiceQrUrlInImage({ ...file, type: "image/gif" }, factories), null);
   });
 
   it("validates QR-fetched PDF responses before invoice upload", () => {

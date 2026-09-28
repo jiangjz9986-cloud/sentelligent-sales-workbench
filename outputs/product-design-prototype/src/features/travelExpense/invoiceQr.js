@@ -4,7 +4,7 @@ const MAX_IMAGE_BYTES = 12 * 1024 * 1024;
 const MAX_IMAGE_PIXELS = 24_000_000;
 const ALLOWED_IMAGE_TYPES = new Set(["image/jpeg", "image/png", "image/webp"]);
 
-export async function decodeInvoiceQrImage(file, {
+async function readInvoiceQrText(file, {
   bitmapFactory = globalThis.createImageBitmap,
   canvasFactory = () => globalThis.document?.createElement("canvas"),
   decodeQr,
@@ -39,9 +39,23 @@ export async function decodeInvoiceQrImage(file, {
     const image = context.getImageData(0, 0, width, height);
     const decoder = decodeQr ?? (await import("jsqr")).default;
     const result = decoder(image.data, width, height, { inversionAttempts: "attemptBoth" });
-    if (!result?.data) throw new Error("图片中没有识别到二维码，请上传完整、清晰的二维码截图");
-    return normalizeInvoiceQrUrl(result.data);
+    return result?.data || null;
   } finally {
     bitmap.close?.();
+  }
+}
+
+export async function decodeInvoiceQrImage(file, options = {}) {
+  const value = await readInvoiceQrText(file, options);
+  if (!value) throw new Error("图片中没有识别到二维码，请上传完整、清晰的二维码截图");
+  return normalizeInvoiceQrUrl(value);
+}
+
+export async function findInvoiceQrUrlInImage(file, options = {}) {
+  try {
+    const value = await readInvoiceQrText(file, options);
+    return value ? normalizeInvoiceQrUrl(value) : null;
+  } catch {
+    return null;
   }
 }

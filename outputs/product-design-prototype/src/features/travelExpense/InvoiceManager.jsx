@@ -21,7 +21,7 @@ import { useEffect, useMemo, useState } from "react";
 import { AuthenticatedPdfFrame } from "./AuthenticatedPdfFrame.jsx";
 import { AuthenticatedImageFrame } from "./AuthenticatedImageFrame.jsx";
 import { prepareTravelExpenseDocument } from "./travelExpenseDocument.js";
-import { decodeInvoiceQrImage } from "./invoiceQr.js";
+import { decodeInvoiceQrImage, findInvoiceQrUrlInImage } from "./invoiceQr.js";
 import { assertInvoiceQrPdfResponse } from "./invoiceQrResponse.js";
 import {
   calculateInvoiceMatchAllocation,
@@ -404,35 +404,51 @@ export function InvoiceManager({
   }
 
   async function uploadInvoice(file) {
-    const uploaded = await perform("upload", () => uploadInvoiceContent(file));
-    showUploadedInvoice(uploaded);
+    setQrFallbackUrl("");
+    let qrDownloaded = false;
+    const uploaded = await perform("upload", async () => {
+      const qrUrl = String(file.type ?? "").toLowerCase().startsWith("image/")
+        ? await findInvoiceQrUrlInImage(file)
+        : null;
+      if (!qrUrl) return uploadInvoiceContent(file);
+      qrDownloaded = true;
+      return uploadInvoiceFromQrUrl(qrUrl);
+    });
+    showUploadedInvoice(uploaded, qrDownloaded ? "二维码发票" : "发票");
+  }
+
+  async function fetchInvoicePdfFromQrUrl(qrUrl) {
+    try {
+      return assertInvoiceQrPdfResponse(await apiClient.requestInternal("/api/invoices/qr-fetch", {
+        method: "POST",
+        body: JSON.stringify({ url: qrUrl }),
+      }));
+    } catch (error) {
+      if (new Set([
+        "INVOICE_QR_LANDING_PAGE",
+        "INVOICE_QR_REDIRECT_BLOCKED",
+        "INVOICE_QR_DOWNLOAD_FAILED",
+        "INVOICE_QR_TIMEOUT",
+        "INVOICE_QR_DNS_FAILED",
+      ]).has(error?.code)) setQrFallbackUrl(qrUrl);
+      throw error;
+    }
+  }
+
+  async function uploadInvoiceFromQrUrl(qrUrl) {
+    const downloaded = await fetchInvoicePdfFromQrUrl(qrUrl);
+    const binary = globalThis.atob(downloaded.contentBase64);
+    const bytes = new Uint8Array(binary.length);
+    for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
+    const pdf = new File([bytes], downloaded.fileName, { type: "application/pdf" });
+    return uploadInvoiceContent(pdf, "qr-download");
   }
 
   async function importInvoiceFromQr(imageFile) {
     setQrFallbackUrl("");
     const uploaded = await perform("qr-import", async () => {
       const qrUrl = await decodeInvoiceQrImage(imageFile);
-      let downloaded;
-      try {
-        downloaded = assertInvoiceQrPdfResponse(await apiClient.requestInternal("/api/invoices/qr-fetch", {
-          method: "POST",
-          body: JSON.stringify({ url: qrUrl }),
-        }));
-      } catch (error) {
-        setQrFallbackUrl(new Set([
-          "INVOICE_QR_LANDING_PAGE",
-          "INVOICE_QR_REDIRECT_BLOCKED",
-          "INVOICE_QR_DOWNLOAD_FAILED",
-          "INVOICE_QR_TIMEOUT",
-          "INVOICE_QR_DNS_FAILED",
-        ]).has(error?.code) ? qrUrl : "");
-        throw error;
-      }
-      const binary = globalThis.atob(downloaded.contentBase64);
-      const bytes = new Uint8Array(binary.length);
-      for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
-      const pdf = new File([bytes], downloaded.fileName, { type: "application/pdf" });
-      return uploadInvoiceContent(pdf, "qr-download");
+      return uploadInvoiceFromQrUrl(qrUrl);
     });
     showUploadedInvoice(uploaded, "二维码发票");
   }

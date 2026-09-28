@@ -23,6 +23,8 @@ import { withImmediateTransaction } from "../db/transaction.js";
 import { HttpError } from "../http/errors.js";
 import { decodeCanonicalBase64 } from "../http/strictBase64.js";
 import { withDocumentBlobWritePreflight } from "../travelExpense/documentBlobStore.js";
+import { createInvoiceQrFetcher } from "../travelExpense/invoiceQrDownload.js";
+import { decodeInvoiceQrUrlFromImage } from "../travelExpense/invoiceQrImage.js";
 import { createActionRiskAssistantAdapter } from "./actionRiskAssistantAdapter.js";
 import { createAdvanceSettlementAssistantAdapter } from "./advanceSettlementAssistantAdapter.js";
 import { createAssistantBusinessSnapshotAdapter } from "./businessSnapshotAdapter.js";
@@ -213,7 +215,7 @@ function moneyFromCents(value) {
   return Number.isSafeInteger(value) && value >= 0 ? `${(value / 100).toFixed(2)} 元` : "金额待确认";
 }
 
-function invoiceReceiptText(item, { duplicate = false } = {}) {
+function invoiceReceiptText(item, { duplicate = false, qrDownloaded = false } = {}) {
   const invoiceCode = weixinClip(item?.invoiceCode, 30, "");
   const invoiceNumber = weixinClip(item?.invoiceNumber, 30, "");
   const invoiceIdentity = [invoiceCode, invoiceNumber].filter(Boolean).join(" / ");
@@ -226,7 +228,7 @@ function invoiceReceiptText(item, { duplicate = false } = {}) {
       ? `金额 ${moneyFromCents(item.totalCents)}`
       : null,
   ].filter(Boolean);
-  const title = duplicate ? "发票已在仓库" : "发票已入库";
+  const title = duplicate ? "发票已在仓库" : qrDownloaded ? "二维码发票已下载并入库" : "发票已入库";
   return fields.length > 0
     ? `${title}：${fields.join("，")}。`
     : `${title}，识别信息待补充。`;
@@ -552,6 +554,8 @@ export function createAssistantToolHandlers({
   invoiceRepository,
   paymentProofRecognizer,
   invoiceRecognizer,
+  invoiceQrImageDecoder = decodeInvoiceQrUrlFromImage,
+  invoiceQrFetcher = createInvoiceQrFetcher(),
   businessSnapshotAdapter = null,
   settlementSnapshotAdapter = null,
   customerAssistantAdapter = null,
@@ -2717,12 +2721,42 @@ export function createAssistantToolHandlers({
       if (context.channel === "weixin" && serverData.auditMetadata?.financialScope !== true) {
         return { text: FINANCIAL_SCOPE_DENIED, status: "denied" };
       }
-      const content = mediaBuffer(media);
+      let content = mediaBuffer(media);
+      let fileName = media.fileName;
+      let mediaType = media.mediaType;
+      let qrDownloaded = false;
+      const normalizedMediaType = String(mediaType ?? "").split(";", 1)[0].trim().toLowerCase();
+      if (["image/jpeg", "image/jpg", "image/png"].includes(normalizedMediaType)) {
+        let qrUrl = null;
+        try {
+          qrUrl = await invoiceQrImageDecoder(content, mediaType);
+        } catch {
+          qrUrl = null;
+        }
+        if (qrUrl) {
+          try {
+            const fetched = await invoiceQrFetcher(qrUrl);
+            content = fetched.content;
+            fileName = fetched.fileName ?? "二维码发票.pdf";
+            mediaType = "application/pdf";
+            qrDownloaded = true;
+          } catch (error) {
+            return {
+              text: "已识别到税务发票二维码，但未能自动下载 PDF，本次未入库。请在网页发票管理中重试“二维码取票”，或发送已下载的 PDF。",
+              status: "review_required",
+              invoiceQr: {
+                status: "download_failed",
+                code: typeof error?.code === "string" ? error.code : "INVOICE_QR_DOWNLOAD_FAILED",
+              },
+            };
+          }
+        }
+      }
       let recognition;
       try {
         recognition = boundedRecognition(await invoiceRecognizer({
-          fileName: media.fileName,
-          mediaType: media.mediaType,
+          fileName,
+          mediaType,
           buffer: content,
         }, {
           owner: context.owner,
@@ -2746,8 +2780,8 @@ export function createAssistantToolHandlers({
             actor: context.owner,
             source: "weixin",
             sourceRef: media.sourceRef,
-            fileName: media.fileName,
-            mediaType: media.mediaType,
+            fileName,
+            mediaType,
             content,
             encodedDocumentBlob,
             recognition,
@@ -2761,7 +2795,7 @@ export function createAssistantToolHandlers({
             before: null,
             after: { id: created.id, status: created.status, sizeBytes: created.sizeBytes, sha256: created.sha256 },
             entityVersion: created.version,
-            metadata: { source: "weixin", mediaType: created.mediaType },
+            metadata: { source: "weixin", mediaType: created.mediaType, qrDownloaded },
           });
           return created;
         }));
@@ -2810,7 +2844,7 @@ export function createAssistantToolHandlers({
         const expenseAttachment = attachmentResult?.attachment ?? null;
         const attachmentPending = reconciliation.some((result) => result.status === "pending");
         return {
-          text: invoiceReceiptText(item, { duplicate }),
+          text: invoiceReceiptText(item, { duplicate, qrDownloaded }),
           status: attachmentPending ? "review_required" : "matched",
           item,
           match: { ...match, match: activeMatch },
@@ -2820,7 +2854,7 @@ export function createAssistantToolHandlers({
         };
       }
       return {
-        text: invoiceReceiptText(item, { duplicate }),
+        text: invoiceReceiptText(item, { duplicate, qrDownloaded }),
         status: duplicate ? "duplicate" : "review_required",
         item,
         match,
