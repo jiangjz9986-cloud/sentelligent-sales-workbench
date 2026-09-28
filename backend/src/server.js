@@ -4745,6 +4745,8 @@ export function createServer(options = {}) {
       invoiceRepository,
       paymentProofRecognizer,
       invoiceRecognizer,
+      invoiceQrImageDecoder: options.invoiceQrImageDecoder,
+      invoiceQrFetcher,
       businessSnapshotAdapter: assistantBusinessSnapshotAdapter,
       settlementSnapshotAdapter: assistantSettlementSnapshotAdapter,
       customerAssistantAdapter: assistantCustomerAdapter,

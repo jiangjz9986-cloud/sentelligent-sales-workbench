@@ -28,6 +28,11 @@ let actionSequence;
 let outboxSequence;
 let latestQuoteMessageId;
 let lastRecognitionOptions;
+let lastInvoiceRecognitionInput;
+let invoiceQrDecodedUrl;
+let invoiceQrFetcherError;
+let invoiceQrFetchCalls;
+let invoiceQrFetchedPdf;
 let driftingRecognitionCalls;
 let concurrentRecognitionCalls;
 let concurrentRecognitionWaiters;
@@ -165,6 +170,11 @@ beforeEach(async () => {
   outboxSequence = 0;
   latestQuoteMessageId = null;
   lastRecognitionOptions = null;
+  lastInvoiceRecognitionInput = null;
+  invoiceQrDecodedUrl = null;
+  invoiceQrFetcherError = null;
+  invoiceQrFetchCalls = [];
+  invoiceQrFetchedPdf = minimalPdf("wechat-qr-invoice");
   driftingRecognitionCalls = 0;
   concurrentRecognitionCalls = 0;
   concurrentRecognitionWaiters = [];
@@ -359,23 +369,32 @@ beforeEach(async () => {
         source: { provider: "test", model: null },
       };
     },
-    invoiceRecognizer: async () => ({
-      status: "unmatched",
-      extractedText: "电子发票 华住酒店集团 219.00",
-      conflicts: [],
-      warnings: [],
-      fields: {
-        invoiceCode: "INV-TEST-1",
-        invoiceNumber: "NO-TEST-1",
-        issuedOn: "2026-08-18",
-        sellerName: "华住酒店集团",
-        buyerName: "森特智行",
-        amountExTaxCents: 20467,
-        taxCents: 1433,
-        totalCents: 21900,
-        suggestedCategory: "lodging",
-      },
-    }),
+    invoiceRecognizer: async (input) => {
+      lastInvoiceRecognitionInput = input;
+      return {
+        status: "unmatched",
+        extractedText: "电子发票 华住酒店集团 219.00",
+        conflicts: [],
+        warnings: [],
+        fields: {
+          invoiceCode: "INV-TEST-1",
+          invoiceNumber: "NO-TEST-1",
+          issuedOn: "2026-08-18",
+          sellerName: "华住酒店集团",
+          buyerName: "森特智行",
+          amountExTaxCents: 20467,
+          taxCents: 1433,
+          totalCents: 21900,
+          suggestedCategory: "lodging",
+        },
+      };
+    },
+    invoiceQrImageDecoder: async () => invoiceQrDecodedUrl,
+    invoiceQrFetcher: async (url) => {
+      invoiceQrFetchCalls.push(url);
+      if (invoiceQrFetcherError) throw invoiceQrFetcherError;
+      return { content: invoiceQrFetchedPdf, fileName: "二维码下载发票.pdf" };
+    },
   });
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
   baseUrl = `http://127.0.0.1:${server.address().port}`;
@@ -1525,6 +1544,79 @@ describe("小小微信图片记账与自然语言确认闭环", () => {
     const db = openDatabase({ databaseUrl: join(tempDir, "assistant.sqlite") });
     assert.equal(db.prepare("SELECT COUNT(*) AS count FROM invoice_documents").get().count, 1);
     assert.equal(db.prepare("SELECT COUNT(*) AS count FROM shortcut_bookkeeping_entries").get().count, 0);
+    db.close();
+  });
+
+  it("downloads a WeChat invoice QR and stores the linked PDF instead of the QR image", async () => {
+    invoiceQrDecodedUrl = "https://einvoice.chinatax.gov.cn/download?token=fixture";
+    invoiceQrFetchedPdf = minimalPdf("wechat-qr-downloaded-invoice");
+    const received = await request("/api/integrations/weixin-agent/events", {
+      method: "POST",
+      headers: eventHeaders("weixin-invoice-qr-download"),
+      body: JSON.stringify({
+        conversationId: "conversation-invoice-qr-download",
+        text: "发票",
+        sourceMessageId: "weixin-invoice-qr-download",
+        senderId: sender,
+        chatType: "direct",
+        suppressQuote: true,
+        media: {
+          type: "image",
+          fileName: "tax-invoice-qr.jpg",
+          mimeType: "image/jpeg",
+          contentBase64: VALID_JPEG.toString("base64"),
+        },
+      }),
+    });
+
+    assert.equal(received.response.status, 200, JSON.stringify(received.body));
+    assert.match(received.body.text, /二维码发票已下载并入库/u);
+    assert.deepEqual(invoiceQrFetchCalls, [invoiceQrDecodedUrl]);
+    assert.equal(lastInvoiceRecognitionInput?.fileName, "二维码下载发票.pdf");
+    assert.equal(lastInvoiceRecognitionInput?.mediaType, "application/pdf");
+    assert.deepEqual(lastInvoiceRecognitionInput?.buffer, invoiceQrFetchedPdf);
+
+    const db = openDatabase({ databaseUrl: join(tempDir, "assistant.sqlite") });
+    const row = db.prepare("SELECT id, file_name, media_type FROM invoice_documents").get();
+    assert.ok(row.id);
+    assert.equal(row.file_name, "二维码下载发票.pdf");
+    assert.equal(row.media_type, "application/pdf");
+    const stored = createInvoiceRepository(db).getInvoiceContent(row.id, { owner });
+    assert.deepEqual(stored.content, invoiceQrFetchedPdf);
+    assert.equal(db.prepare("SELECT COUNT(*) AS count FROM shortcut_bookkeeping_entries").get().count, 0);
+    db.close();
+  });
+
+  it("does not store a QR image as an invoice when its PDF download fails", async () => {
+    invoiceQrDecodedUrl = "https://einvoice.chinatax.gov.cn/download?token=fixture";
+    invoiceQrFetcherError = Object.assign(new Error("fixture download failure"), {
+      code: "INVOICE_QR_DOWNLOAD_FAILED",
+    });
+    const received = await request("/api/integrations/weixin-agent/events", {
+      method: "POST",
+      headers: eventHeaders("weixin-invoice-qr-download-failed"),
+      body: JSON.stringify({
+        conversationId: "conversation-invoice-qr-download-failed",
+        text: "发票",
+        sourceMessageId: "weixin-invoice-qr-download-failed",
+        senderId: sender,
+        chatType: "direct",
+        suppressQuote: true,
+        media: {
+          type: "image",
+          fileName: "tax-invoice-qr.jpg",
+          mimeType: "image/jpeg",
+          contentBase64: VALID_JPEG.toString("base64"),
+        },
+      }),
+    });
+
+    assert.equal(received.response.status, 200, JSON.stringify(received.body));
+    assert.match(received.body.text, /本次未入库/u);
+    assert.deepEqual(invoiceQrFetchCalls, [invoiceQrDecodedUrl]);
+    assert.equal(lastInvoiceRecognitionInput, null);
+    const db = openDatabase({ databaseUrl: join(tempDir, "assistant.sqlite") });
+    assert.equal(db.prepare("SELECT COUNT(*) AS count FROM invoice_documents").get().count, 0);
     db.close();
   });
 
