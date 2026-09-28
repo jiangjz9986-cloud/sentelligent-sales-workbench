@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from html.parser import HTMLParser
 from typing import Mapping
 import re
@@ -12,6 +12,21 @@ from urllib.parse import urljoin
 
 from hospital_tender_monitor.config import validate_public_url
 from hospital_tender_monitor.models import TenderNotice
+
+
+SOURCE_LOOKBACK_DAYS = 14
+
+
+def scan_cutoff(now: datetime) -> datetime:
+    if now.tzinfo is None or now.utcoffset() is None:
+        raise ValueError("scan clock must be timezone-aware")
+    return now.astimezone(timezone.utc) - timedelta(days=SOURCE_LOOKBACK_DAYS)
+
+
+def page_reaches_cutoff(published_at: list[datetime], cutoff: datetime) -> bool:
+    # A page may contain a few out-of-order rows. Stop only when every dated
+    # row is outside the overlap window, otherwise a newer item could be lost.
+    return bool(published_at) and max(published_at) < cutoff
 
 
 @dataclass(frozen=True, slots=True)
