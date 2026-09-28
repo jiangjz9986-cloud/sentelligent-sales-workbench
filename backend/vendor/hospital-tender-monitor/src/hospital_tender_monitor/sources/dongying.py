@@ -1,16 +1,25 @@
-"""Adapter for Dongying Epoint's first-page public listing endpoint."""
+"""Adapter for Dongying Epoint's public-resource listing endpoint."""
 
 from __future__ import annotations
 
 import json
-from datetime import datetime
-from typing import Mapping
+from datetime import datetime, timezone
+from typing import Callable, Mapping
 from urllib.parse import urlencode, urljoin
 
 from hospital_tender_monitor.http import HttpClient, HttpError
 from hospital_tender_monitor.models import NoticeType, TenderNotice
 
-from .base import SourceAdapter, SourceResult, parse_published_at, public_link, source_text, strip_html
+from .base import (
+    SourceAdapter,
+    SourceResult,
+    page_reaches_cutoff,
+    parse_published_at,
+    public_link,
+    scan_cutoff,
+    source_text,
+    strip_html,
+)
 
 
 CATEGORIES: tuple[tuple[str, NoticeType], ...] = (
@@ -23,49 +32,82 @@ CATEGORIES: tuple[tuple[str, NoticeType], ...] = (
     ("005001010", NoticeType.CONTRACT),
 )
 _PATH = "/EWB-FRONT/moreinfoListAction.action?cmd=getInfolist"
+_PAGE_SIZE = 20
+_MAX_PAGES = 30
 
 
 class DongyingAdapter(SourceAdapter):
-    def __init__(self, source: Mapping[str, object], http: HttpClient) -> None:
+    def __init__(
+        self,
+        source: Mapping[str, object],
+        http: HttpClient,
+        *,
+        clock: Callable[[], datetime] | None = None,
+    ) -> None:
         self.source = source
         self.http = http
+        self.clock = clock or (lambda: datetime.now(timezone.utc))
 
     def fetch(self) -> SourceResult:
         notices: list[TenderNotice] = []
         seen: set[str] = set()
         endpoint = urljoin(source_text(self.source, "url"), _PATH)
-        hospital_names = self.source.get("hospital_names", ())
-        if not isinstance(hospital_names, (list, tuple)):
+        configured_names = self.source.get("hospital_names", ())
+        if not isinstance(configured_names, (list, tuple)):
             return SourceResult(success=False, error="invalid source response")
-        hospital_names = tuple(str(name).strip() for name in hospital_names if str(name).strip())
+        hospital_names = tuple(dict.fromkeys(
+            str(name).strip() for name in configured_names
+            if isinstance(name, str) and len(name.strip()) >= 4
+        ))
+        # Region sources can intentionally be broad. Customer-specific sources
+        # issue one server-side Title search for every canonical name/alias.
+        search_names = hospital_names or ("",)
+        cutoff = scan_cutoff(self.clock())
         try:
             for category, notice_type in CATEGORIES:
-                data = urlencode(
-                    {
-                        "siteGuid": source_text(self.source, "site_guid"),
-                        "vname": source_text(self.source, "vname"),
-                        "CatgoryNum": category,
-                        "Title": hospital_names[0] if hospital_names else "",
-                        "pageSize": "20",
-                        "pageIndex": "1",
-                        "YZM": "",
-                        "ImgGuid": "",
-                    }
-                ).encode("ascii")
-                response = self.http.request(
-                    "POST", endpoint, data=data, headers={"Content-Type": "application/x-www-form-urlencoded"}
-                )
-                records = _records(response.text)
-                for record in records:
-                    try:
-                        notice = self._notice(record, notice_type, hospital_names)
-                    except (TypeError, ValueError):
-                        # A malformed row must not discard otherwise usable
-                        # notices from the same public category response.
-                        continue
-                    if notice is not None and notice.identity_key not in seen:
-                        seen.add(notice.identity_key)
-                        notices.append(notice)
+                for search_name in search_names:
+                    for page_index in range(_MAX_PAGES):
+                        data = urlencode(
+                            {
+                                "siteGuid": source_text(self.source, "site_guid"),
+                                "vname": source_text(self.source, "vname"),
+                                "CatgoryNum": category,
+                                "Title": search_name,
+                                "pageSize": str(_PAGE_SIZE),
+                                # Epoint's browser client uses a zero-based index.
+                                "pageIndex": str(page_index),
+                                "YZM": "",
+                                "ImgGuid": "",
+                            }
+                        ).encode("ascii")
+                        response = self.http.request(
+                            "POST", endpoint, data=data,
+                            headers={"Content-Type": "application/x-www-form-urlencoded"},
+                        )
+                        records, total = _page(response.text)
+                        page_dates: list[datetime] = []
+                        for record in records:
+                            published = None
+                            if isinstance(record, dict):
+                                published = parse_published_at(record.get("date"))
+                                if published is not None:
+                                    page_dates.append(published)
+                            if published is not None and published < cutoff:
+                                continue
+                            try:
+                                notice = self._notice(record, notice_type, hospital_names)
+                            except (TypeError, ValueError):
+                                continue
+                            if notice is not None and notice.identity_key not in seen:
+                                seen.add(notice.identity_key)
+                                notices.append(notice)
+                        if (
+                            not records
+                            or len(records) < _PAGE_SIZE
+                            or (total is not None and (page_index + 1) * _PAGE_SIZE >= total)
+                            or page_reaches_cutoff(page_dates, cutoff)
+                        ):
+                            break
         except (HttpError, ValueError, json.JSONDecodeError, TypeError):
             return SourceResult(success=False, error="invalid source response")
         return SourceResult(notices=tuple(notices))
@@ -107,24 +149,34 @@ class DongyingAdapter(SourceAdapter):
         )
 
 
-def _records(text: str) -> list[object]:
+def _page(text: str) -> tuple[list[object], int | None]:
     outer = json.loads(text)
-    # Epoint deployments have returned both the documented wrapper and a
-    # direct list in the wild. Keep the parser strict about the record shape,
-    # but accept either envelope so a harmless upstream wrapper change does
-    # not turn an otherwise healthy source into a failed run.
+    # Epoint deployments return either the documented wrapper or a direct list.
     if isinstance(outer, list):
-        return outer
+        return outer, None
     if not isinstance(outer, dict):
         raise ValueError("outer response")
     candidate = outer.get("data", outer.get("custom"))
     if isinstance(candidate, str):
         candidate = json.loads(candidate)
     if isinstance(candidate, list):
-        return candidate
+        return candidate, _positive_total(outer)
     if not isinstance(candidate, dict):
         raise ValueError("inner response")
     records = candidate.get("data")
     if not isinstance(records, list):
         raise ValueError("records")
-    return records
+    return records, _positive_total(candidate) or _positive_total(outer)
+
+
+def _positive_total(value: Mapping[str, object]) -> int | None:
+    for key in ("total", "totalCount", "totalcount", "count", "recordCount"):
+        if key not in value:
+            continue
+        try:
+            total = int(value[key])
+        except (TypeError, ValueError):
+            continue
+        if total >= 0:
+            return total
+    return None

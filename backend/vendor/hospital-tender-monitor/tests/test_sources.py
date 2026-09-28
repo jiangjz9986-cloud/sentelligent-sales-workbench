@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest import TestCase
+from urllib.parse import parse_qs, quote, urlsplit
 
 from hospital_tender_monitor.http import HttpResponse
 from hospital_tender_monitor.sources.binzhou import BinzhouAdapter
@@ -10,7 +12,7 @@ from hospital_tender_monitor.sources.dongying import DongyingAdapter
 from hospital_tender_monitor.sources.hospital_html import HospitalHtmlAdapter
 from hospital_tender_monitor.sources.jining import JiningAdapter
 from hospital_tender_monitor.sources.qingdao import QingdaoAdapter
-from hospital_tender_monitor.sources.base import parse_published_at
+from hospital_tender_monitor.sources.base import page_reaches_cutoff, parse_published_at
 from hospital_tender_monitor.models import NoticeType
 
 
@@ -27,7 +29,33 @@ class _Http:
         return HttpResponse(url=url, status=200, body=self.body.encode("utf-8"), charset="utf-8")
 
 
+class _RouteHttp:
+    def __init__(self, respond) -> None:
+        self.respond = respond
+        self.calls = []
+
+    def request(self, method: str, url: str, data=None, headers=None) -> HttpResponse:
+        self.calls.append((method, url, data, headers))
+        body = self.respond(method, url, data, headers)
+        return HttpResponse(url=url, status=200, body=body.encode("utf-8"), charset="utf-8")
+
+
+FIXTURE_NOW = datetime(2026, 8, 18, tzinfo=timezone.utc)
+SCAN_NOW = datetime(2026, 9, 28, 12, tzinfo=timezone.utc)
+
+
 class SourceFixtureTests(TestCase):
+    def test_lookback_page_cutoff_requires_every_row_to_be_old(self) -> None:
+        cutoff = datetime(2026, 9, 14, tzinfo=timezone.utc)
+        self.assertFalse(page_reaches_cutoff([
+            datetime(2026, 9, 10, tzinfo=timezone.utc),
+            datetime(2026, 9, 25, tzinfo=timezone.utc),
+        ], cutoff))
+        self.assertTrue(page_reaches_cutoff([
+            datetime(2026, 9, 10, tzinfo=timezone.utc),
+            datetime(2026, 9, 12, tzinfo=timezone.utc),
+        ], cutoff))
+
     def test_published_date_parser_accepts_common_public_site_spellings(self) -> None:
         self.assertIsNotNone(parse_published_at("2026年8月17日"))
         self.assertIsNotNone(parse_published_at("20260817"))
@@ -45,7 +73,11 @@ class SourceFixtureTests(TestCase):
             "site_guid": "fixture-guid",
             "vname": "/dongying",
         }
-        result = DongyingAdapter(source, _Http((FIXTURES / "dongying_search.json").read_text(encoding="utf-8"))).fetch()
+        result = DongyingAdapter(
+            source,
+            _Http((FIXTURES / "dongying_search.json").read_text(encoding="utf-8")),
+            clock=lambda: FIXTURE_NOW,
+        ).fetch()
         self.assertTrue(result.success)
         self.assertEqual(len(result.notices), 1)
         self.assertEqual(result.notices[0].content_text, result.notices[0].title)
@@ -60,7 +92,7 @@ class SourceFixtureTests(TestCase):
             "vname": "/dongying",
         }
         body = '[{"title":"示例医院信息化采购公告","date":"2026年8月17日","href":"/notices/example-1.html","index":"example-1"}]'
-        result = DongyingAdapter(source, _Http(body)).fetch()
+        result = DongyingAdapter(source, _Http(body), clock=lambda: FIXTURE_NOW).fetch()
         self.assertTrue(result.success)
         self.assertEqual(len(result.notices), 1)
         self.assertEqual(result.notices[0].content_text, result.notices[0].title)
@@ -76,7 +108,7 @@ class SourceFixtureTests(TestCase):
             "hospital_names": ["示例医院"],
         }
         http = _Http((FIXTURES / "dongying_search.json").read_text(encoding="utf-8"))
-        result = DongyingAdapter(source, http).fetch()
+        result = DongyingAdapter(source, http, clock=lambda: FIXTURE_NOW).fetch()
         self.assertTrue(result.success)
         self.assertEqual(len(result.notices), 1)
         self.assertEqual(result.notices[0].hospital_names, ("示例医院",))
@@ -96,6 +128,75 @@ class SourceFixtureTests(TestCase):
             NoticeType.PROCUREMENT,
             ("示例医院",),
         ))
+
+    def test_dongying_uses_zero_based_pages_and_stops_after_old_overlap_page(self) -> None:
+        source = {
+            "id": "dongying-customer",
+            "name": "医院公共资源公告",
+            "city": "东营",
+            "url": "http://ggzy.dongying.gov.cn/jyxx/005001/005001002/about.html",
+            "site_guid": "fixture-guid",
+            "vname": "/dongying",
+            "hospital_names": ["示例医院"],
+        }
+
+        def respond(_method, _url, data, _headers):
+            query = parse_qs(data.decode("ascii"))
+            if query["CatgoryNum"] != ["005001002"]:
+                return '{"data":"{\\"data\\":[],\\"totalcount\\":0}"}'
+            if query["pageIndex"] == ["0"]:
+                records = [
+                    {
+                        "title": f"示例医院信息化采购公告 {index}",
+                        "date": "2026-09-25",
+                        "href": f"/notices/dy-{index}.html",
+                        "index": f"dy-{index}",
+                    }
+                    for index in range(20)
+                ]
+            else:
+                records = [
+                    {
+                        "title": f"示例医院旧公告 {index}",
+                        "date": "2026-09-10",
+                        "href": f"/notices/dy-old-{index}.html",
+                        "index": f"dy-old-{index}",
+                    }
+                    for index in range(20)
+                ]
+            return json.dumps({"data": json.dumps({"data": records, "totalcount": 40})})
+
+        http = _RouteHttp(respond)
+        result = DongyingAdapter(source, http, clock=lambda: SCAN_NOW).fetch()
+        self.assertTrue(result.success)
+        self.assertEqual(len(result.notices), 20)
+        category_calls = [
+            parse_qs(call[2].decode("ascii"))
+            for call in http.calls
+            if parse_qs(call[2].decode("ascii"))["CatgoryNum"] == ["005001002"]
+        ]
+        self.assertEqual([call["pageIndex"][0] for call in category_calls], ["0", "1"])
+        self.assertTrue(all(call["Title"] == ["示例医院"] for call in category_calls))
+
+    def test_dongying_searches_every_configured_hospital_alias(self) -> None:
+        source = {
+            "id": "dongying-customer",
+            "name": "医院公共资源公告",
+            "city": "东营",
+            "url": "http://ggzy.dongying.gov.cn/",
+            "site_guid": "fixture-guid",
+            "vname": "/dongying",
+            "hospital_names": ["东营市人民医院", "东营人民医院"],
+        }
+        http = _RouteHttp(lambda *_: '{"data":"{\\"data\\":[],\\"totalcount\\":0}"}')
+        result = DongyingAdapter(source, http, clock=lambda: SCAN_NOW).fetch()
+        self.assertTrue(result.success)
+        first_category_titles = [
+            parse_qs(call[2].decode("ascii"))["Title"][0]
+            for call in http.calls
+            if parse_qs(call[2].decode("ascii"))["CatgoryNum"] == ["005001001"]
+        ]
+        self.assertEqual(first_category_titles, ["东营市人民医院", "东营人民医院"])
 
     def test_binzhou_search_extracts_only_verified_hospital_titles(self) -> None:
         source = {
@@ -121,6 +222,58 @@ class SourceFixtureTests(TestCase):
         self.assertEqual(payload["accuracy"], "100")
         self.assertEqual(payload["noParticiple"], "1")
 
+    def test_binzhou_list_url_without_wd_searches_configured_hospital_names_and_aliases(self) -> None:
+        source = {
+            "id": "binzhou-people",
+            "name": "滨州市人民医院公共资源公告",
+            "city": "滨州",
+            "url": "https://jypt.bzggzyjy.cn/bzweb/jyxx/012002/012002004/list1.html",
+            "hospital_names": ["滨州市人民医院", "滨州人民医院"],
+        }
+        body = json.dumps({"result": {
+            "totalcount": 2,
+            "records": [
+                {"title": "滨州市人民医院设备采购公告", "webdate": "2026-09-25", "linkurl": "/notice/people.html"},
+                {"title": "滨州人民医院信息系统采购公告", "webdate": "2026-09-25", "linkurl": "/notice/alias.html"},
+            ],
+        }})
+        http = _Http(body)
+        result = BinzhouAdapter(source, http, clock=lambda: SCAN_NOW).fetch()
+        self.assertTrue(result.success)
+        self.assertEqual(len(result.notices), 2)
+        self.assertEqual(
+            [json.loads(call[2])["wd"] for call in http.calls],
+            [quote("滨州市人民医院"), quote("滨州人民医院")],
+        )
+
+    def test_binzhou_paginates_offsets_and_excludes_rows_beyond_overlap(self) -> None:
+        source = {
+            "id": "binzhou-people",
+            "name": "滨州市人民医院公共资源公告",
+            "city": "滨州",
+            "url": "https://jypt.bzggzyjy.cn/bzweb/jyxx/012002/012002004/list1.html",
+            "hospital_names": ["滨州市人民医院"],
+        }
+
+        def respond(_method, _url, data, _headers):
+            payload = json.loads(data)
+            date = "2026-09-25" if payload["pn"] == 0 else "2026-09-10"
+            records = [
+                {
+                    "title": f"滨州市人民医院采购公告 {payload['pn'] + index}",
+                    "webdate": date,
+                    "linkurl": f"/notice/bz-{payload['pn'] + index}.html",
+                }
+                for index in range(50)
+            ]
+            return json.dumps({"result": {"totalcount": 100, "records": records}})
+
+        http = _RouteHttp(respond)
+        result = BinzhouAdapter(source, http, clock=lambda: SCAN_NOW).fetch()
+        self.assertTrue(result.success)
+        self.assertEqual(len(result.notices), 50)
+        self.assertEqual([json.loads(call[2])["pn"] for call in http.calls], [0, 50])
+
     def test_jining_categories_deduplicate_the_same_public_notice(self) -> None:
         source = {
             "id": "jining-ggzy",
@@ -134,6 +287,51 @@ class SourceFixtureTests(TestCase):
         self.assertTrue(result.success)
         self.assertEqual(len(result.notices), 1)
         self.assertEqual(result.notices[0].content_text, result.notices[0].title)
+
+    def test_jining_filters_hospital_and_reads_four_categories_with_one_based_pages(self) -> None:
+        categories = ["55100101", "55200101", "553001", "57100101"]
+        source = {
+            "id": "jining-hospital",
+            "name": "济宁市第一人民医院公共资源公告",
+            "city": "济宁",
+            "url": "https://www.jnsggzy.cn/JiNing/Posts?cat=55100101&filter=济宁市第一人民医院",
+            "tenant": "JiNing",
+            "categories": categories,
+            "hospital_names": ["济宁市第一人民医院"],
+        }
+
+        def respond(_method, url, _data, _headers):
+            query = parse_qs(urlsplit(url).query)
+            category = query["cat"][0]
+            page = query.get("pn", ["1"])[0]
+            date = "2026-09-25" if page == "1" else "2026-09-10"
+            rows = []
+            for index in range(20):
+                title = "其他医院办公采购" if index == 0 else f"济宁市第一人民医院采购公告 {index}"
+                rows.append(
+                    f'<li class="list-group-item"><span class="time">{date}</span>'
+                    f'<a href="/JiNing/Posts/Detail?id={category}-{page}-{index}">'
+                    f'<span class="badge">{index + 1}</span>{title}</a></li>'
+                )
+            return "<ul>" + "".join(rows) + "</ul>"
+
+        http = _RouteHttp(respond)
+        result = JiningAdapter(source, http, clock=lambda: SCAN_NOW).fetch()
+        self.assertTrue(result.success)
+        self.assertEqual(len(result.notices), 4 * 19)
+        self.assertEqual({notice.notice_type for notice in result.notices}, {
+            NoticeType.PROCUREMENT,
+            NoticeType.CHANGE,
+            NoticeType.RESULT,
+            NoticeType.TERMINATED,
+        })
+        queries = [parse_qs(urlsplit(call[1]).query) for call in http.calls]
+        self.assertEqual({query["cat"][0] for query in queries}, set(categories))
+        self.assertEqual(
+            {query.get("pn", ["1"])[0] for query in queries},
+            {"1", "2"},
+        )
+        self.assertTrue(all(query["filter"] == ["济宁市第一人民医院"] for query in queries))
 
     def test_qingdao_notice_exports_nonempty_normalized_content(self) -> None:
         source = {
