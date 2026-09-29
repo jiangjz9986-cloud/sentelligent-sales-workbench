@@ -54,6 +54,7 @@ import { apply as applyBookkeepingCategoryAliases } from "./migrations/0050_book
 import { apply as applyNotificationChannels } from "./migrations/0051_notification_channels.mjs";
 import { apply as applyCustomerTenderSources } from "./migrations/0052_customer_tender_sources.mjs";
 import { apply as applySecureSettingsPushplusAccessKey } from "./migrations/0053_secure_settings_pushplus_access_key.mjs";
+import { apply as applyHospitalTenderThirtyMinuteCadence } from "./migrations/0054_hospital_tender_thirty_minute_cadence.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const migrations = [
@@ -367,6 +368,12 @@ const migrations = [
     path: resolve(here, "migrations", "0053_secure_settings_pushplus_access_key.mjs"),
     type: "module",
     apply: applySecureSettingsPushplusAccessKey,
+  },
+  {
+    version: "0054",
+    path: resolve(here, "migrations", "0054_hospital_tender_thirty_minute_cadence.mjs"),
+    type: "module",
+    apply: applyHospitalTenderThirtyMinuteCadence,
   },
 ];
 

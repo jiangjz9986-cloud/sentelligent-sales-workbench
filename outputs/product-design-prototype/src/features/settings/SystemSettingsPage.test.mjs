@@ -103,6 +103,7 @@ test("tender schedule settings expose the existing scheduler controls without sh
   assert.match(source, /立即检测下一批/);
   assert.match(source, /启用自动轮巡/);
   assert.match(source, /固定时段轮询客户/);
+  assert.match(source, /公共资源交易平台优先，医院官网补充监测/);
   assert.match(source, /activeStartHour: item\.activeStartHour/);
   assert.match(source, /activeEndHour: item\.activeEndHour/);
   assert.match(source, /registeredCustomerCount: item\.registeredCustomerCount/);
