@@ -1488,7 +1488,9 @@ async function runViewport(cdp, url, backendUrl, viewport, historicalSolution, h
         const hasCustomerCoverage = tenderScheduleText.includes('全客户') || tenderScheduleText.includes('每批最多');
         const hasRunControl = tenderScheduleText.includes('立即检测全部客户') || tenderScheduleText.includes('立即检测下一批');
         settingsIa.tenderSchedule = window.location.pathname === '/settings/tender-schedule'
-          && tenderScheduleText.includes('北京时间 09:00–19:00')
+          && tenderScheduleText.includes('北京时间 09:00–19:30')
+          && tenderScheduleText.includes('每 30 分钟')
+          && tenderScheduleText.includes('公共资源交易平台优先')
           && hasCustomerCoverage
           && hasRunControl;
         window.__qaSettingsIa = settingsIa;
