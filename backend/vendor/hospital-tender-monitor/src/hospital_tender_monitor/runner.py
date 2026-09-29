@@ -26,6 +26,20 @@ from .sources.base import SourceResult
 from .storage import Repository, RepositoryError, RunRecord
 
 
+_PUBLIC_RESOURCE_ADAPTERS = frozenset({"binzhou", "dongying", "jining", "qingdao"})
+
+
+def _source_priority(source: Mapping[str, object]) -> int:
+    adapter = str(source.get("adapter", "")).strip().casefold()
+    coverage = str(source.get("coverage", "")).strip().casefold()
+    source_type = str(source.get("source_type", "")).strip().casefold()
+    return 0 if (
+        source_type == "public_resource"
+        or coverage == "indirect"
+        or adapter in _PUBLIC_RESOURCE_ADAPTERS
+    ) else 1
+
+
 logger = logging.getLogger(__name__)
 DEFAULT_REQUEST_INTERVAL_SECONDS = 0.2
 DEFAULT_SOURCE_REQUEST_BUDGET_SECONDS = 45.0
@@ -142,7 +156,7 @@ class MonitorRunner:
 
     def _sources(self) -> list[tuple[Mapping[str, object], object]]:
         output = []
-        for source in self.config.sources:
+        for source in sorted(self.config.sources, key=_source_priority):
             if source.get("enabled", True) is False:
                 continue
             try:

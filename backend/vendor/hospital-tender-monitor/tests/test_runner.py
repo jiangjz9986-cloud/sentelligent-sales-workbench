@@ -93,6 +93,48 @@ def _notice(source_id: str) -> TenderNotice:
 
 
 class RunnerIsolationTests(TestCase):
+    def test_public_resource_sources_run_before_hospital_sites(self) -> None:
+        config = _Config()
+        config.sources = (
+            {"id": "hospital-first", "adapter": "hospital_html", "coverage": "direct", "enabled": True},
+            {"id": "jining-platform", "adapter": "jining", "enabled": True},
+            {
+                "id": "configured-platform",
+                "adapter": "hospital_html",
+                "source_type": "public_resource",
+                "coverage": "indirect",
+                "enabled": True,
+            },
+            {"id": "hospital-second", "adapter": "hospital_html", "coverage": "direct", "enabled": True},
+        )
+        fetched = []
+
+        class _RecordingAdapter:
+            def __init__(self, source_id: str) -> None:
+                self.source_id = source_id
+
+            def fetch(self) -> SourceResult:
+                fetched.append(self.source_id)
+                return SourceResult(success=True, notices=(), error="")
+
+        adapters = {source["id"]: _RecordingAdapter(source["id"]) for source in config.sources}
+        with patch(
+            "hospital_tender_monitor.runner.source_factory",
+            side_effect=lambda source, _http: adapters[source["id"]],
+        ):
+            summary = MonitorRunner(
+                config,
+                repository=_Repository(),
+                http_client=object(),
+                lock_path=Path("/tmp/hospital-tender-runner-public-resource-priority.lock"),
+            ).run()
+
+        self.assertTrue(summary.success)
+        self.assertEqual(
+            fetched,
+            ["jining-platform", "configured-platform", "hospital-first", "hospital-second"],
+        )
+
     def test_exhausted_source_budget_does_not_block_later_source_persistence(self) -> None:
         config = _Config()
         config.sources = (

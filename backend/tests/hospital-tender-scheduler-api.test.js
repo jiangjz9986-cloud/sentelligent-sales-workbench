@@ -84,7 +84,7 @@ describe("hospital tender scheduler API", () => {
     };
     const initial = await request("/api/hospital-tenders/scheduler/status", { headers: { Cookie: session.cookie } });
     assert.equal(initial.response.status, 200);
-    assert.equal(initial.body.item.intervalMinutes, 60);
+    assert.equal(initial.body.item.intervalMinutes, 30);
     assert.equal(initial.body.item.batchSize, 10);
     assert.equal(initial.body.item.registeredCustomerCount, 2);
     assert.equal(Array.isArray(initial.body.runs), true);

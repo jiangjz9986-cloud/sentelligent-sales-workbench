@@ -252,6 +252,7 @@ def _customer_sources(sources: list[Mapping[str, Any]], hospitals: tuple[Mapping
                     "adapter": adapter,
                     "url": key,
                     "enabled": True,
+                    "source_type": source_type,
                     "coverage": "direct" if source_type == "hospital_official" else "indirect",
                     "hospital_names": [],
                 }

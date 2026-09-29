@@ -1032,7 +1032,7 @@ export function SystemSettingsPage({ apiClient, backendStatus, section = "securi
                 <CalendarClock size={22} aria-hidden="true" />
                 <div>
                   <strong>固定时段轮询客户</strong>
-                  <p>{schedulerPolicyLabel(schedulerState)}；系统按稳定客户顺序检查，失败时不会提前推进进度。</p>
+                  <p>{schedulerPolicyLabel(schedulerState)}；公共资源交易平台优先，医院官网补充监测；来源失败会单独记录并继续检查。</p>
                 </div>
               </div>
               <div className="settings-button-row settings-scheduler-actions">

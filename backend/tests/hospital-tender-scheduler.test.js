@@ -112,6 +112,13 @@ describe("hospital tender scheduler", () => {
     assert.equal(nextScheduledRunAt("2026-09-26T12:30:00.000Z", state), "2026-09-27T00:00:00.000Z");
   });
 
+  it("aligns every run to 30-minute Asia/Shanghai slots in the existing 08:00-20:00 window", () => {
+    const state = { intervalMinutes: 30, activeStartHour: 8, activeEndHour: 21 };
+    assert.equal(nextScheduledRunAt("2026-09-26T01:59:00.000Z", state), "2026-09-26T02:00:00.000Z");
+    assert.equal(nextScheduledRunAt("2026-09-26T02:00:00.000Z", state), "2026-09-26T02:30:00.000Z");
+    assert.equal(nextScheduledRunAt("2026-09-26T12:30:00.000Z", state), "2026-09-27T00:00:00.000Z");
+  });
+
   it("recomputes an overdue persisted slot at the next fixed time after service restart", async () => {
     await withDb(async (db) => {
       const clock = () => new Date("2026-09-26T01:59:00.000Z");
