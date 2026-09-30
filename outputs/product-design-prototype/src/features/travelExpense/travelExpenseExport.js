@@ -261,6 +261,23 @@ export function buildExpenseListTotals(rows = [], { matches = [] } = {}) {
   };
 }
 
+export function buildExpenseListCategoryTotals(rows = []) {
+  if (!Array.isArray(rows)) throw new TypeError("rows must be an array");
+  const totals = new Map();
+  for (const row of rows) {
+    const label = String(row?.cells?.purpose?.value ?? "").trim() || "其他";
+    const amountCents = row?.cells?.amount?.cents;
+    const current = totals.get(label) ?? { label, expenseCount: 0, amountCents: 0 };
+    current.expenseCount = safeAddCents(current.expenseCount, 1, "categoryExpenseCount");
+    current.amountCents = safeAddCents(current.amountCents, amountCents, "categoryAmountCents");
+    totals.set(label, current);
+  }
+  return [...totals.values()].map((total) => ({
+    ...total,
+    amountLabel: formatCny(total.amountCents),
+  }));
+}
+
 /**
  * Produces the renderer-neutral reimbursement list used by Web preview, Excel,
  * PDF and print generators. Only `cells` defines visible columns; IDs and layout

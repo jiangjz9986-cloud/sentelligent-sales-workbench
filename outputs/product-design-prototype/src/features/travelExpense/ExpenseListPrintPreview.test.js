@@ -10,6 +10,7 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
 import {
+  buildExpenseListCategoryTotals,
   buildExpenseListExport,
   paginateExpenseList,
 } from "./travelExpenseExport.js";
@@ -27,7 +28,7 @@ const bundle = await build({
   logLevel: "silent",
 });
 await writeFile(bundlePath, bundle.outputFiles[0].contents);
-const { ExpenseListPage } = await import(`${pathToFileURL(bundlePath).href}?test=${Date.now()}`);
+const { ExpenseListPage, ExpenseListCategorySummary } = await import(`${pathToFileURL(bundlePath).href}?test=${Date.now()}`);
 
 after(async () => {
   await rm(bundlePath, { force: true });
@@ -94,6 +95,38 @@ function occurrences(source, pattern) {
 }
 
 describe("ExpenseListPrintPreview physical-row rendering", () => {
+  it("renders current-period category totals in a separate sidebar card", () => {
+    const breakfast = makeExpense(0);
+    const lunch = makeExpense(0);
+    const lodging = makeExpense(0);
+    const exportModel = buildExpenseListExport({
+      expenses: [
+        { ...breakfast, id: "breakfast", referenceCode: "EXP-BREAKFAST", category: "breakfast" },
+        {
+          ...lunch,
+          id: "lunch",
+          referenceCode: "EXP-LUNCH",
+          occurredOn: "2026-08-25",
+          category: "lunch",
+          payments: [{ ...lunch.payments[0], id: "payment-lunch", amountCents: 2500, reimbursementCents: 2500 }],
+        },
+        {
+          ...lodging,
+          id: "lodging",
+          referenceCode: "EXP-LODGING",
+          occurredOn: "2026-08-26",
+        },
+      ],
+      week: { start: "2026-08-24", end: "2026-08-30" },
+    });
+    const categoryTotals = buildExpenseListCategoryTotals(exportModel.rows);
+    const html = renderToStaticMarkup(createElement(ExpenseListCategorySummary, { categoryTotals }));
+
+    assert.match(html, /aria-label="分类金额"/);
+    assert.match(html, /<dt>餐费<small>2 条<\/small><\/dt><dd>¥143\.00<\/dd>/);
+    assert.match(html, /<dt>住宿<small>1 条<\/small><\/dt><dd>¥118\.00<\/dd>/);
+  });
+
   it("renders two proofs as two table rows with six row-spanned shared cells", () => {
     const { pages, html: [html] } = renderPages(2);
 
