@@ -6,6 +6,7 @@ import {
 import { useEffect, useMemo, useState } from "react";
 
 import {
+  buildExpenseListCategoryTotals,
   buildExpenseListExport,
   paginateExpenseList,
   printWhenImagesReady,
@@ -23,6 +24,22 @@ function PaymentRecordCell({ paymentRecord, thumbnailUrls }) {
       </figure>
     </div>
   ) : <span className="expense-list-payment-loading">缩略图准备中</span>;
+}
+
+export function ExpenseListCategorySummary({ categoryTotals = [] }) {
+  return (
+    <section className="expense-list-category-summary" aria-label="分类金额">
+      <header><strong>分类金额</strong><span>{categoryTotals.length} 类</span></header>
+      {categoryTotals.length > 0 ? (
+        <dl>{categoryTotals.map((category) => (
+          <div key={category.label}>
+            <dt>{category.label}<small>{category.expenseCount} 条</small></dt>
+            <dd>{category.amountLabel}</dd>
+          </div>
+        ))}</dl>
+      ) : <p>本周暂无费用</p>}
+    </section>
+  );
 }
 
 export function ExpenseListPage({ page, week, owner, generatedOn, totals, thumbnailUrls, title = "出差费用清单" }) {
@@ -102,6 +119,7 @@ export function ExpenseListPrintPreview({
     week,
     regionProfile,
   }), [expenses, matches, noInvoiceConfirmations, regionProfile, week]);
+  const categoryTotals = useMemo(() => buildExpenseListCategoryTotals(exportModel.rows), [exportModel]);
   // Payment-record images print at the same physical size as the embedded
   // XLSX pictures (~2in wide), so an A4 portrait page holds six proof rows.
   const pages = useMemo(() => paginateExpenseList({ rows: exportModel.rows, rowsPerPage: 6 }), [exportModel]);
@@ -201,11 +219,14 @@ export function ExpenseListPrintPreview({
       </header>
       {printError || thumbnailState.error ? <div className="expense-page-alert no-print" role="alert"><span>{printError || thumbnailState.error}</span><button className="ghost-button" type="button" onClick={() => { setPrintError(""); setThumbnailAttempt((value) => value + 1); }} disabled={printing || thumbnailLoading}>重新生成付款记录</button></div> : null}
       <div className="expense-print-layout expense-list-print-layout">
-        <aside className="expense-print-settings no-print">
-          <section><strong>记录范围</strong><span>{week.start}—{week.end}</span></section>
-          <section><strong>固定七列</strong><ul><li><Check size={14} />序号、日期、用途、金额</li><li><Check size={14} />付款记录、发票、备注</li></ul></section>
-          <section><strong>付款记录</strong><ul><li><Check size={14} />单元格直接显示压缩图片</li><li><Check size={14} />保持原图比例，最长边不超过 360×240</li><li><Check size={14} />重新编码并清除原图元数据</li></ul></section>
-          <section><strong>数据汇总</strong><dl><div><dt>费用</dt><dd>{exportModel.rows.length} 条</dd></div><div><dt>付款记录行</dt><dd>{physicalRowCount} 行</dd></div><div><dt>预计页数</dt><dd>{pages.length} 页</dd></div></dl></section>
+        <aside className="expense-list-preview-sidebar no-print">
+          <div className="expense-print-settings">
+            <section><strong>记录范围</strong><span>{week.start}—{week.end}</span></section>
+            <section><strong>固定七列</strong><ul><li><Check size={14} />序号、日期、用途、金额</li><li><Check size={14} />付款记录、发票、备注</li></ul></section>
+            <section><strong>付款记录</strong><ul><li><Check size={14} />单元格直接显示压缩图片</li><li><Check size={14} />保持原图比例，最长边不超过 360×240</li><li><Check size={14} />重新编码并清除原图元数据</li></ul></section>
+            <section><strong>数据汇总</strong><dl><div><dt>费用</dt><dd>{exportModel.rows.length} 条</dd></div><div><dt>付款记录行</dt><dd>{physicalRowCount} 行</dd></div><div><dt>预计页数</dt><dd>{pages.length} 页</dd></div></dl></section>
+          </div>
+          <ExpenseListCategorySummary categoryTotals={categoryTotals} />
         </aside>
         <div className="expense-list-print-document">
           {pages.map((page) => <ExpenseListPage key={page.pageNumber} page={page} week={week} owner={owner} generatedOn={generatedOn} totals={exportModel.totals} thumbnailUrls={thumbnailState.urls} title={exportModel.title} />)}

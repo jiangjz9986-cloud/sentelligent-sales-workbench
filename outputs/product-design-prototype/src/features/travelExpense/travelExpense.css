@@ -3179,6 +3179,83 @@
   grid-template-columns: 220px minmax(0, 1fr);
 }
 
+.expense-list-preview-sidebar {
+  position: sticky;
+  top: 0;
+  align-self: start;
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+}
+
+.expense-list-preview-sidebar .expense-print-settings {
+  position: static;
+}
+
+.expense-list-category-summary {
+  display: grid;
+  gap: 12px;
+  padding: 14px;
+  border: 1px solid var(--expense-line);
+  border-radius: 8px;
+  background: #fff;
+  box-shadow: 0 4px 18px rgba(16, 35, 75, 0.05);
+}
+
+.expense-list-category-summary > header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.expense-list-category-summary > header strong {
+  color: #17294d;
+  font-size: 12.5px;
+}
+
+.expense-list-category-summary > header span,
+.expense-list-category-summary dt small {
+  color: #8a95a9;
+  font-size: 10px;
+}
+
+.expense-list-category-summary dl {
+  display: grid;
+  gap: 9px;
+  margin: 0;
+}
+
+.expense-list-category-summary dl > div {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.expense-list-category-summary dt {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+  min-width: 0;
+  color: #5c6b83;
+  font-size: 11px;
+}
+
+.expense-list-category-summary dd {
+  margin: 0;
+  color: #17294d;
+  font-size: 11.5px;
+  font-weight: 750;
+  white-space: nowrap;
+}
+
+.expense-list-category-summary > p {
+  margin: 0;
+  color: #8a95a9;
+  font-size: 11px;
+}
+
 .expense-list-print-document {
   min-width: 0;
   display: grid;
@@ -5681,6 +5758,7 @@
   .expense-organizer-head { align-items: flex-start; }
   .expense-organizer-actions { flex-wrap: wrap; justify-content: flex-end; }
   .expense-print-layout { grid-template-columns: 1fr; }
+  .expense-list-preview-sidebar { position: static; }
   .expense-print-settings { position: static; grid-template-columns: repeat(4, minmax(0, 1fr)); }
   .expense-print-settings section { border-bottom: 0; border-right: 1px solid var(--expense-soft-line); }
   .expense-print-settings section:last-child { border-right: 0; }

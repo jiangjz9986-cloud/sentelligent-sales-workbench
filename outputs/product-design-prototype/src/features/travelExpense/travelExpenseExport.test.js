@@ -4,6 +4,7 @@ import { describe, it } from "node:test";
 import {
   EXPENSE_LIST_COLUMNS,
   EXPENSE_LIST_FORMAT_CAPABILITIES,
+  buildExpenseListCategoryTotals,
   buildExpenseListExport,
   buildExpenseListRows,
   buildExpenseListTitle,
@@ -508,6 +509,39 @@ describe("confirmed seven-column expense list export", () => {
       substituteInvoiceTotalCents: 17990,
       substituteInvoiceTotalLabel: "¥179.90",
     });
+  });
+
+  it("groups category amounts using the report labels and integer cents", () => {
+    const list = buildExpenseListExport({
+      expenses: [
+        expenses[0],
+        expenses[1],
+        {
+          ...expenses[0],
+          id: "lunch-expense",
+          referenceCode: "EXP-LUNCH",
+          occurredOn: "2026-08-05",
+          category: "lunch",
+          attachments: [],
+          payments: [{ ...expenses[0].payments[0], id: "lunch-payment", amountCents: 2500, reimbursementCents: 2500 }],
+        },
+        {
+          ...expenses[0],
+          id: "lodging-expense",
+          referenceCode: "EXP-LODGING",
+          occurredOn: "2026-08-06",
+          category: "lodging",
+          attachments: [],
+          payments: [{ ...expenses[0].payments[0], id: "lodging-payment", amountCents: 8000 }],
+        },
+      ],
+    });
+
+    assert.deepEqual(buildExpenseListCategoryTotals(list.rows), [
+      { label: "餐费", expenseCount: 2, amountCents: 6500, amountLabel: "¥65.00" },
+      { label: "交通", expenseCount: 1, amountCents: 2400, amountLabel: "¥24.00" },
+      { label: "住宿", expenseCount: 1, amountCents: 8000, amountLabel: "¥80.00" },
+    ]);
   });
 
   it("marks CSV as data-only while Excel, PDF and print retain proof thumbnails", () => {
