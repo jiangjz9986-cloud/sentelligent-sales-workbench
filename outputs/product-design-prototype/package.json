@@ -1,6 +1,6 @@
 {
   "name": "product-design-prototype",
-  "version": "0.13.25",
+  "version": "0.13.26",
   "private": true,
   "type": "module",
   "scripts": {
@@ -42,7 +42,7 @@
     "test:stage-strip": "node --test scripts/stage-strip-timeout.test.mjs scripts/stage-strip-data.test.mjs",
     "test:visual": "node --test scripts/visual-rhythm.test.mjs",
     "test:modules": "node --test scripts/module-coverage.test.mjs",
-    "test:settings": "node --test src/features/settings/SystemSettingsPage.test.mjs src/features/settings/UserManagementPage.test.mjs",
+    "test:settings": "node --test src/features/settings/SystemSettingsPage.test.mjs src/features/settings/UserManagementPage.test.mjs src/features/settings/bookkeepingCategoryViewModel.test.mjs",
     "test:user-management": "node --test scripts/user-management-page.test.mjs",
     "test:tender": "node --test src/features/hospitalTender/HospitalTenderPage.test.mjs src/features/hospitalTender/HospitalTenderPage.browser.test.mjs",
     "scan:secrets": "node scripts/secret-scan.mjs",

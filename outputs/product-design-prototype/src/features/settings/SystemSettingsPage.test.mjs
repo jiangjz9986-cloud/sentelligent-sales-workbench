@@ -85,9 +85,26 @@ test("bookkeeping categories expose owner-scoped CRUD controls and archived reco
   assert.match(source, /updateBookkeepingCategory/);
   assert.match(source, /deleteBookkeepingCategory/);
   assert.match(source, /新增分类/);
-  assert.match(source, /显示已停用/);
+  assert.match(source, /搜索分类、小类或识别词/);
+  assert.match(source, /categoryStatusFilter/);
+  assert.match(source, /settings-category-card-grid/);
+  assert.match(source, /settings-category-card-section/);
+  assert.match(source, /settings-category-archive-summary/);
+  assert.match(source, /名称升序/);
+  assert.match(source, /名称降序/);
+  assert.match(source, /分类显示方式/);
+  assert.match(source, /aria-label="卡片视图"/);
+  assert.match(source, /aria-label="列表视图"/);
+  assert.match(source, /aria-label=\{`停用\$\{item\.name\}`\}/);
+  assert.match(source, /includeArchived: true/);
   assert.match(source, /恢复/);
   assert.match(source, /历史记账仍会保留该分类/);
+  assert.match(source, /role="dialog" aria-modal="true"/);
+  assert.match(source, /categoryTypeCount\.archived/);
+  assert.match(source, /系统默认分类不可改名或停用/);
+  const restoreHandler = source.match(/async function restoreCategory\(item\) \{[\s\S]*?\n  \}/u)?.[0] ?? "";
+  assert.match(restoreHandler, /setCategoryStatusFilter\("active"\)/);
+  assert.doesNotMatch(source, /<Trash2 size=\{15\} \/> 停用/);
 });
 
 test("tender schedule settings expose the existing scheduler controls without showing secrets", async () => {
