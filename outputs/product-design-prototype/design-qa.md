@@ -558,3 +558,37 @@
 - `CHROME_PATH='/Applications/Google Chrome.app/Contents/MacOS/Google Chrome' SENT_ZX_INTEGRATION_RUNTIME=native npm run qa:full`: passed. This includes the full deploy/security, AI Platform, Backend (`2113/2113`), frontend, Chrome integration, scroll-wheel, customer import, and WebKit automation stages.
 - WebKit automation is not iPhone real-device acceptance; no iPhone device test was performed.
 - `git diff --check`: passed.
+
+## 2026-10-01 Bookkeeping Categories Option 2
+
+### Reference and State
+
+- Reference: `/Users/jiangjizhen/.codex/generated_images/01a07521-3776-7b00-bcb7-559545c7c4a3/exec-f00d6588-9235-4ed6-9e02-20846314ff72.png` (1487 x 1058).
+- Implementation: local Vite preview at `http://127.0.0.1:5179/scripts/fixtures/bookkeeping-categories-harness.html`.
+- Desktop comparison viewport: 1487 x 1058; expense type, active categories, empty search, system order, card view, six system categories, no archived categories.
+- Responsive checks: 1280 x 720 and 390 x 844.
+- Data source: isolated in-memory fixture only. No production API or customer data was used.
+
+### Visual Comparison
+
+- Measured desktop bounds: title y=120; toolbar x=270, y=201, width=1189; category panel x=270, y=271; first category card x=288, y=337, width=571, height=173; archive section y=903.
+- The toolbar is separated from the category surface. At 1487px it uses the reference's four-column arrangement; at 1280px it wraps into compact rows with a full-width search; at 390px category cards become one column.
+- Category tiles use distinct blue, violet, green, rose, orange, and yellow tones. Subcategory chips align with each category name; recognition guidance remains in a separate footer row.
+- The archive empty state remains visible beneath enabled categories. Search, sort, card/list controls, and category lifecycle actions remain available.
+- No horizontal document overflow was observed at any checked viewport.
+
+### Interaction Checks
+
+- Sorting changed category order and restored system order.
+- Card/list view toggled both ways.
+- Search by subcategory returned the matching category.
+- A temporary fixture category was created, archived, restored, and then cleared by reloading the fixture.
+- `npm run test:settings`: 20 passed, 0 failed.
+- `npm run build`: passed.
+- `git diff --check`: passed.
+
+### Evidence Limitation
+
+The implementation screenshot was captured and inspected in the Codex browser, but could not be exported to a local image for an archived side-by-side composite. Browser policy rejected the attempted `data:` navigation used to initiate a local download. No alternate browser or command-line workaround was attempted. The source and implementation were inspected as separate live images, and layout dimensions were recorded above.
+
+final result: blocked
