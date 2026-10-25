@@ -72,11 +72,16 @@ class _FailingAdapter:
 class _BudgetHttpClient:
     def __init__(self) -> None:
         self.budgets = []
+        self.calls = []
 
     @contextmanager
     def request_budget(self, seconds):
         self.budgets.append(seconds)
         yield
+
+    def request(self, method, url):
+        self.calls.append((method, url))
+        return SimpleNamespace(status=200, text="<p>项目概况</p><p>预算金额：500万元</p>")
 
 
 def _notice(source_id: str) -> TenderNotice:
@@ -167,6 +172,33 @@ class RunnerIsolationTests(TestCase):
         self.assertFalse(summary.notification_sent)
         self.assertEqual(summary.notification_count, 0)
         self.assertEqual(repository.notification_queries, 0)
+
+    def test_high_relevance_procurement_reads_budget_from_same_host_detail(self) -> None:
+        config = _Config()
+        config.sources = ({
+            "id": "jining-ggzy",
+            "name": "济宁市公共资源交易公共服务平台",
+            "adapter": "fixture",
+            "url": "https://example.test/list",
+            "enabled": True,
+        },)
+        repository = _Repository()
+        client = _BudgetHttpClient()
+        with patch(
+            "hospital_tender_monitor.runner.source_factory",
+            return_value=_Adapter(SourceResult(notices=(_notice("jining-ggzy"),))),
+        ):
+            summary = MonitorRunner(
+                config,
+                repository=repository,
+                http_client=client,
+                clock=lambda: datetime(2026, 8, 17, tzinfo=timezone.utc),
+                lock_path=Path("/tmp/hospital-tender-runner-budget-detail.lock"),
+            ).run()
+
+        self.assertTrue(summary.success)
+        self.assertEqual(client.calls, [("GET", "https://example.test/jining-ggzy")])
+        self.assertEqual(repository.saved[0].notice.budget_text, "500万元")
 
     def test_persists_each_source_with_one_bounded_bulk_write(self) -> None:
         config = _Config()

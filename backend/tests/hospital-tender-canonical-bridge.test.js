@@ -64,9 +64,9 @@ function matchFor(customerIds = [CUSTOMER_A]) {
       match.matchedNeeds[customerId] = ["PACS 双活"];
       match.matchScore = Math.max(match.matchScore, 100);
     } else {
-      match.matchReasons[customerId] = ["city", "need"];
+      match.matchReasons[customerId] = ["hospital_name", "city", "need"];
       match.matchedNeeds[customerId] = ["PACS"];
-      match.matchScore = Math.max(match.matchScore, 40);
+      match.matchScore = Math.max(match.matchScore, 100);
     }
   }
   return match;
@@ -99,7 +99,7 @@ function addStandardCustomers({ bothOwners = false } = {}) {
     addCustomer({
       id: CUSTOMER_B,
       owner: OWNER_B,
-      name: "另一账号医院",
+      name: "青岛市中心医院",
       needs: ["PACS"],
     });
   }
@@ -301,7 +301,8 @@ describe("hospital tender canonical bridge", () => {
       hydrated.canonicalDigest,
       canonicalNoticeDigest(notice(), { canonicalNoticeId: hydrated.canonicalNoticeId }),
     );
-    assert.match(hydrated.canonicalNoticeId, /^project:/u);
+    assert.match(hydrated.canonicalNoticeId, /^notice:/u);
+    assert.equal(hydrated.canonicalNoticeId, stored.canonicalNoticeId);
 
     const bridge = repository.ensureBridge({
       owner: OWNER_A,

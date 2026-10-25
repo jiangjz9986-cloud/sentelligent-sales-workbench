@@ -63,10 +63,20 @@ class DongyingAdapter(SourceAdapter):
         # issue one server-side Title search for every canonical name/alias.
         search_names = hospital_names or ("",)
         cutoff = scan_cutoff(self.clock())
+        start_category, start_hospital, start_page = self.resume_position(
+            categories=len(CATEGORIES), hospitals=len(search_names), first_page=0, last_page=999_999,
+        )
+        cursor = {"categoryIndex": start_category, "hospitalIndex": start_hospital, "page": start_page}
+        completed = 0
         try:
-            for category, notice_type in CATEGORIES:
-                for search_name in search_names:
-                    for page_index in range(_MAX_PAGES):
+            for category_index in range(start_category, len(CATEGORIES)):
+                category, notice_type = CATEGORIES[category_index]
+                hospital_start = start_hospital if category_index == start_category else 0
+                for hospital_index in range(hospital_start, len(search_names)):
+                    search_name = search_names[hospital_index]
+                    page_start = start_page if (category_index, hospital_index) == (start_category, start_hospital) else 0
+                    for page_index in range(page_start, min(page_start + _MAX_PAGES, 1_000_000)):
+                        cursor = {"categoryIndex": category_index, "hospitalIndex": hospital_index, "page": page_index}
                         data = urlencode(
                             {
                                 "siteGuid": source_text(self.source, "site_guid"),
@@ -101,6 +111,7 @@ class DongyingAdapter(SourceAdapter):
                             if notice is not None and notice.identity_key not in seen:
                                 seen.add(notice.identity_key)
                                 notices.append(notice)
+                        completed += 1
                         if (
                             not records
                             or len(records) < _PAGE_SIZE
@@ -108,8 +119,11 @@ class DongyingAdapter(SourceAdapter):
                             or page_reaches_cutoff(page_dates, cutoff)
                         ):
                             break
-        except (HttpError, ValueError, json.JSONDecodeError, TypeError):
-            return SourceResult(success=False, error="invalid source response")
+                    else:
+                        cursor["page"] = min(page_index + 1, 999_999)
+                        return SourceResult(tuple(notices), False, "source page limit", cursor, True)
+        except (HttpError, OSError, ValueError, TypeError):
+            return SourceResult(tuple(notices), False, "invalid source response", cursor, bool(completed or notices))
         return SourceResult(notices=tuple(notices))
 
     def _notice(

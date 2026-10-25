@@ -131,3 +131,4 @@ class SourceHealth:
     error: str = ""
     source_name: str = ""
     city: str = ""
+    partial: bool = False

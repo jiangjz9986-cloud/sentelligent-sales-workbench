@@ -258,6 +258,7 @@ import { createHospitalTenderLeadConversionService } from "./hospitalTender/lead
 import { createHospitalTenderLeadConversionHttpHandlers } from "./hospitalTender/leadConversionHttp.js";
 import { createHospitalTenderSchedulerRepository } from "./hospitalTender/schedulerRepository.js";
 import { createHospitalTenderScheduler } from "./hospitalTender/scheduler.js";
+import { hospitalTenderSourceStatus } from "./hospitalTender/opsStatus.js";
 import { buildHospitalTenderProactiveEvent } from "./hospitalTender/proactiveEvent.js";
 import {
   ASR_SETTING_KEY,
@@ -4702,6 +4703,11 @@ export function createServer(options = {}) {
   // outbox backlog, and worker heartbeat for the 5-minute ops inspector.
   const opsAlertStatusSnapshot = () => {
     const tenderState = hospitalTenderScheduler.getState();
+    const latestTenderSnapshot = hospitalTenderSchedulerRepository.latestSnapshot();
+    const tenderSourceStatus = hospitalTenderSourceStatus({
+      sources: latestTenderSnapshot?.payload.sources ?? hospitalTenderRepository.listSources(),
+      customers: all(db, "SELECT * FROM customers WHERE deleted_at IS NULL").map(customerFromRow),
+    });
     return {
       generatedAt: new Date().toISOString(),
       outbox: weixinConfirmationOutboxRepository.statusCounts(),
@@ -4717,6 +4723,7 @@ export function createServer(options = {}) {
               lastError: tenderState.lastError ?? null,
               lastFinishedAt: tenderState.lastFinishedAt ?? null,
               nextRunAt: tenderState.nextRunAt ?? null,
+              ...tenderSourceStatus,
             }
           : null,
         actionReminders: actionReminderScheduler.status(),

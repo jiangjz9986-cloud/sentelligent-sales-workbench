@@ -140,8 +140,13 @@ class JiningAdapter(SourceAdapter):
 
         notices: list[TenderNotice] = []
         seen: set[str] = set()
+        start_category, _, _ = self.resume_position(categories=len(categories))
+        cursor = {"categoryIndex": start_category, "hospitalIndex": 0, "page": 1}
+        completed = 0
         try:
-            for category in categories:
+            for category_index in range(start_category, len(categories)):
+                category = categories[category_index]
+                cursor = {"categoryIndex": category_index, "hospitalIndex": 0, "page": 1}
                 endpoint = urljoin(
                     source_url,
                     f"/Tenants/{quote(tenant, safe='')}/Posts/{quote(category, safe='')}/newest.json",
@@ -159,8 +164,9 @@ class JiningAdapter(SourceAdapter):
                     if notice is not None and notice.identity_key not in seen:
                         seen.add(notice.identity_key)
                         notices.append(notice)
-        except (HttpError, ValueError, json.JSONDecodeError, TypeError):
-            return SourceResult(success=False, error="invalid source response")
+                completed += 1
+        except (HttpError, OSError, ValueError, TypeError):
+            return SourceResult(tuple(notices), False, "invalid source response", cursor, bool(completed or notices))
         return SourceResult(notices=tuple(notices))
 
     def _search_names(self) -> tuple[str, ...]:
@@ -184,10 +190,20 @@ class JiningAdapter(SourceAdapter):
         seen: set[str] = set()
         cutoff = scan_cutoff(self.clock())
         list_endpoint = urljoin(source_url, f"/{quote(tenant, safe='')}/Posts")
+        start_category, start_hospital, start_page = self.resume_position(
+            categories=len(categories), hospitals=len(hospital_names), last_page=1_000_000,
+        )
+        cursor = {"categoryIndex": start_category, "hospitalIndex": start_hospital, "page": start_page}
+        completed = 0
         try:
-            for category in categories:
-                for name in hospital_names:
-                    for page in range(1, _MAX_PAGES + 1):
+            for category_index in range(start_category, len(categories)):
+                category = categories[category_index]
+                hospital_start = start_hospital if category_index == start_category else 0
+                for hospital_index in range(hospital_start, len(hospital_names)):
+                    name = hospital_names[hospital_index]
+                    page_start = start_page if (category_index, hospital_index) == (start_category, start_hospital) else 1
+                    for page in range(page_start, min(page_start + _MAX_PAGES, 1_000_001)):
+                        cursor = {"categoryIndex": category_index, "hospitalIndex": hospital_index, "page": page}
                         query = {"cat": category, "filter": name}
                         if page > 1:
                             query["pn"] = str(page)
@@ -209,10 +225,14 @@ class JiningAdapter(SourceAdapter):
                                 if notice.identity_key not in seen:
                                     seen.add(notice.identity_key)
                                     notices.append(notice)
+                        completed += 1
                         if len(records) < _PAGE_SIZE or page_reaches_cutoff(page_dates, cutoff):
                             break
-        except (HttpError, ValueError, TypeError):
-            return SourceResult(success=False, error="invalid source response")
+                    else:
+                        cursor["page"] = min(page + 1, 1_000_000)
+                        return SourceResult(tuple(notices), False, "source page limit", cursor, True)
+        except (HttpError, OSError, ValueError, TypeError):
+            return SourceResult(tuple(notices), False, "invalid source response", cursor, bool(completed or notices))
         return SourceResult(notices=tuple(notices))
 
     def _notice(

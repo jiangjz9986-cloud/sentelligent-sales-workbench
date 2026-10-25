@@ -198,6 +198,48 @@ describe("hospital tender scheduler", () => {
     });
   });
 
+  it("pushes a cross-source duplicate once with the public-platform link and matched customer", async () => {
+    await withDb(async (db) => {
+      let delivered = [];
+      const payload = snapshot();
+      const seed = payload.notices[0];
+      payload.notices = [
+        {
+          ...seed,
+          identityKey: "hospital-jining-first:item-88",
+          sourceId: "hospital-jining-first",
+          sourceName: "济宁市第一人民医院",
+          url: "https://hospital.example.test/notices/88",
+          budgetText: "",
+        },
+        {
+          ...seed,
+          identityKey: "jining-ggzy:item-88",
+          sourceId: "jining-ggzy",
+          sourceName: "济宁市公共资源交易公共服务平台",
+          url: "https://www.jnsggzy.cn/JiNing/Posts/Detail?id=88",
+          budgetText: "",
+          contentText: "项目概况：预算金额：323万元",
+        },
+      ];
+      const { scheduler } = setup(db, {
+        runner: { run: async () => ({ payload, source: "fixture" }) },
+        notifier: async ({ notices }) => {
+          delivered = notices;
+          return notices.length;
+        },
+      });
+
+      const result = await scheduler.runNext({ force: true });
+      assert.equal(result.status, "success");
+      assert.equal(result.notificationCount, 1);
+      assert.equal(delivered.length, 1);
+      assert.equal(delivered[0].url, "https://www.jnsggzy.cn/JiNing/Posts/Detail?id=88");
+      assert.deepEqual(delivered[0].matchedCustomerNames, ["胜利油田中心医院"]);
+      assert.equal(delivered[0].budgetText, "323万元");
+    });
+  });
+
   it("continues collection without marking a batch failed when notification is disabled", async () => {
     await withDb(async (db) => {
       let delivered = false;

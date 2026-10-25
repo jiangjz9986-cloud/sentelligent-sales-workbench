@@ -63,9 +63,10 @@ export function createHospitalTenderPushplusDeliveryRepository(db, {
   function beginAttempt(idValue) {
     const id = requiredText(idValue, "id", 200);
     const now = nowIso();
-    db.prepare(`UPDATE hospital_tender_pushplus_deliveries SET status='submitting',
+    const claimed = db.prepare(`UPDATE hospital_tender_pushplus_deliveries SET status='submitting',
       attempt_count=attempt_count+1,last_error_code=NULL,next_check_at=NULL,updated_at=$now
       WHERE id=$id AND status IN ('queued','failed')`).run({ $id: id, $now: now });
+    if (Number(claimed.changes) !== 1) return null;
     return map(selectById.get({ $id: id }));
   }
 

@@ -206,6 +206,11 @@ export function createHospitalTenderSchedulerRepository(db, {
     return mapSnapshot(db.prepare("SELECT * FROM hospital_tender_scheduler_snapshots WHERE id = $id").get({ $id: id }));
   }
 
+  function latestSnapshot() {
+    return mapSnapshot(db.prepare(`SELECT * FROM hospital_tender_scheduler_snapshots
+      ORDER BY cycle_number DESC, created_at DESC, id DESC LIMIT 1`).get());
+  }
+
   function updateSnapshot(id, { status, completedAt = null, errorText = null } = {}) {
     if (!["pending", "completed", "failed"].includes(status)) throw new TypeError("snapshot status is invalid");
     const finished = completedAt === null ? null : iso(completedAt, "completedAt", { nullable: true });
@@ -364,6 +369,7 @@ export function createHospitalTenderSchedulerRepository(db, {
     updateState,
     saveSnapshot,
     getSnapshot,
+    latestSnapshot,
     updateSnapshot,
     recordRun,
     updateRun,

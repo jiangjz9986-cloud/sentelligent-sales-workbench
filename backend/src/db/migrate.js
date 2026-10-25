@@ -55,6 +55,10 @@ import { apply as applyNotificationChannels } from "./migrations/0051_notificati
 import { apply as applyCustomerTenderSources } from "./migrations/0052_customer_tender_sources.mjs";
 import { apply as applySecureSettingsPushplusAccessKey } from "./migrations/0053_secure_settings_pushplus_access_key.mjs";
 import { apply as applyHospitalTenderThirtyMinuteCadence } from "./migrations/0054_hospital_tender_thirty_minute_cadence.mjs";
+import { apply as applyBookkeepingCategoryReference } from "./migrations/0055_bookkeeping_category_reference.mjs";
+import { apply as applyBookkeepingProofDetachments } from "./migrations/0056_bookkeeping_proof_detachments.mjs";
+import { apply as applyHospitalTenderNoticeSources } from "./migrations/0057_hospital_tender_notice_sources.mjs";
+import { apply as applyHospitalTenderDeliveryEvents } from "./migrations/0058_hospital_tender_delivery_events.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const migrations = [
@@ -374,6 +378,30 @@ const migrations = [
     path: resolve(here, "migrations", "0054_hospital_tender_thirty_minute_cadence.mjs"),
     type: "module",
     apply: applyHospitalTenderThirtyMinuteCadence,
+  },
+  {
+    version: "0055",
+    path: resolve(here, "migrations", "0055_bookkeeping_category_reference.mjs"),
+    type: "module",
+    apply: applyBookkeepingCategoryReference,
+  },
+  {
+    version: "0056",
+    path: resolve(here, "migrations", "0056_bookkeeping_proof_detachments.mjs"),
+    type: "module",
+    apply: applyBookkeepingProofDetachments,
+  },
+  {
+    version: "0057",
+    path: resolve(here, "migrations", "0057_hospital_tender_notice_sources.mjs"),
+    type: "module",
+    apply: applyHospitalTenderNoticeSources,
+  },
+  {
+    version: "0058",
+    path: resolve(here, "migrations", "0058_hospital_tender_delivery_events.mjs"),
+    type: "module",
+    apply: applyHospitalTenderDeliveryEvents,
   },
 ];
 

@@ -76,9 +76,17 @@ class BinzhouAdapter(SourceAdapter):
         notices: list[TenderNotice] = []
         seen: set[str] = set()
         cutoff = scan_cutoff(self.clock())
+        _, start_hospital, start_page = self.resume_position(
+            hospitals=len(search_terms), first_page=0, last_page=999_999,
+        )
+        cursor = {"categoryIndex": 0, "hospitalIndex": start_hospital, "page": start_page}
+        completed = 0
         try:
-            for search_term in search_terms:
-                for page in range(_MAX_PAGES):
+            for hospital_index in range(start_hospital, len(search_terms)):
+                search_term = search_terms[hospital_index]
+                page_start = start_page if hospital_index == start_hospital else 0
+                for page in range(page_start, min(page_start + _MAX_PAGES, 1_000_000)):
+                    cursor = {"categoryIndex": 0, "hospitalIndex": hospital_index, "page": page}
                     payload = {
                         "token": "",
                         "pn": page * _PAGE_SIZE,
@@ -128,6 +136,7 @@ class BinzhouAdapter(SourceAdapter):
                         if notice is not None and notice.identity_key not in seen:
                             seen.add(notice.identity_key)
                             notices.append(notice)
+                    completed += 1
                     if (
                         not records
                         or len(records) < _PAGE_SIZE
@@ -135,8 +144,11 @@ class BinzhouAdapter(SourceAdapter):
                         or page_reaches_cutoff(page_dates, cutoff)
                     ):
                         break
-        except (HttpError, ValueError, TypeError, json.JSONDecodeError):
-            return SourceResult(success=False, error="invalid source response")
+                else:
+                    cursor["page"] = min(page + 1, 999_999)
+                    return SourceResult(tuple(notices), False, "source page limit", cursor, True)
+        except (HttpError, OSError, ValueError, TypeError):
+            return SourceResult(tuple(notices), False, "invalid source response", cursor, bool(completed or notices))
         return SourceResult(notices=tuple(notices))
 
     def _notice(

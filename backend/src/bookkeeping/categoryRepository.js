@@ -209,11 +209,28 @@ export function createBookkeepingCategoryRepository(db, {
   function resolve(input = {}) {
     const owner = requiredText(input.owner, "owner", 200);
     const ledgerName = normalizeLedgerName(input.ledgerName);
-    return resolveBookkeepingCategoryAgainstCatalog({
+    const resolved = resolveBookkeepingCategoryAgainstCatalog({
       ...input,
       catalog: catalogFor({ owner, ledgerName, includeArchived: input.includeArchived === true }),
       ledgerName,
     });
+    const category = db.prepare(`
+      SELECT id, version FROM bookkeeping_categories
+      WHERE owner = $owner AND ledger_name = $ledgerName
+        AND entry_type = $entryType AND name = $name
+        AND ($includeArchived = 1 OR status = 'active')
+    `).get({
+      $owner: owner,
+      $ledgerName: ledgerName,
+      $entryType: resolved.entryType,
+      $name: resolved.category,
+      $includeArchived: input.includeArchived === true ? 1 : 0,
+    });
+    return {
+      ...resolved,
+      categoryId: category?.id ?? null,
+      categoryVersion: category ? Number(category.version) : null,
+    };
   }
 
   function create({ owner, ledgerName = DEFAULT_LEDGER_NAME, entryType, name, subcategories = [], aliases = [] } = {}) {

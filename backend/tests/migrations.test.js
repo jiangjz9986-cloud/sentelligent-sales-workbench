@@ -237,6 +237,16 @@ function rebuildDatabaseAs0032(db) {
   db.exec("BEGIN IMMEDIATE");
   try {
     db.exec(`
+      DROP TABLE hospital_tender_notification_events;
+      DROP TABLE hospital_tender_notification_batches;
+      DROP TABLE hospital_tender_collector_progress;
+      DROP TABLE hospital_tender_notice_sources;
+      DROP INDEX idx_hospital_tender_notice_project;
+      ALTER TABLE hospital_tender_notices DROP COLUMN project_identity;
+      DROP TABLE bookkeeping_proof_detachments;
+      DROP INDEX idx_shortcut_bookkeeping_category_reference;
+      ALTER TABLE shortcut_bookkeeping_entries DROP COLUMN category_id;
+      ALTER TABLE shortcut_bookkeeping_entries DROP COLUMN category_snapshot_json;
       DROP INDEX idx_quick_records_confirmation_preview;
       DROP TABLE quick_record_confirmation_previews;
       ALTER TABLE quick_records DROP COLUMN confirmation_preview_id;
@@ -382,7 +392,8 @@ function rebuildDatabaseAs0032(db) {
       DROP TABLE IF EXISTS secure_setting_sync_state;
       DELETE FROM schema_migrations WHERE version IN (
         '0033', '0034', '0035', '0036', '0037', '0038', '0039', '0040', '0041',
-        '0042', '0043', '0044', '0045', '0046', '0047', '0048', '0049', '0050', '0051', '0052', '0053', '0054'
+        '0042', '0043', '0044', '0045', '0046', '0047', '0048', '0049', '0050', '0051', '0052', '0053', '0054',
+        '0055', '0056', '0057', '0058'
       );
     `);
     db.exec("COMMIT");
@@ -438,7 +449,7 @@ test("records versioned migrations exactly once and remains idempotent on reopen
       second = openDatabase({ databaseUrl });
       const secondMigrations = all(second, "SELECT version, checksum FROM schema_migrations ORDER BY version");
 
-      assert.equal(firstMigrations.length, 53);
+      assert.equal(firstMigrations.length, 57);
       assert.equal(firstMigrations[0].version, "0001");
       assert.equal(firstMigrations[1].version, "0002");
       assert.equal(firstMigrations[2].version, "0003");
@@ -492,6 +503,10 @@ test("records versioned migrations exactly once and remains idempotent on reopen
       assert.equal(firstMigrations[50].version, "0052");
       assert.equal(firstMigrations[51].version, "0053");
       assert.equal(firstMigrations[52].version, "0054");
+      assert.equal(firstMigrations[53].version, "0055");
+      assert.equal(firstMigrations[54].version, "0056");
+      assert.equal(firstMigrations[55].version, "0057");
+      assert.equal(firstMigrations[56].version, "0058");
       assert.match(firstMigrations[0].checksum, /^[a-f0-9]{64}$/);
       assert.match(firstMigrations[1].checksum, /^[a-f0-9]{64}$/);
       assert.match(firstMigrations[2].checksum, /^[a-f0-9]{64}$/);
@@ -555,6 +570,10 @@ test("records versioned migrations exactly once and remains idempotent on reopen
         "../src/db/migrations/0052_customer_tender_sources.mjs",
         "../src/db/migrations/0053_secure_settings_pushplus_access_key.mjs",
         "../src/db/migrations/0054_hospital_tender_thirty_minute_cadence.mjs",
+        "../src/db/migrations/0055_bookkeeping_category_reference.mjs",
+        "../src/db/migrations/0056_bookkeeping_proof_detachments.mjs",
+        "../src/db/migrations/0057_hospital_tender_notice_sources.mjs",
+        "../src/db/migrations/0058_hospital_tender_delivery_events.mjs",
       ].map((relativePath) => readFileSync(fileURLToPath(new URL(relativePath, import.meta.url)), "utf8"));
       assert.equal(firstMigrations[0].checksum, migrationChecksum(migrationSources[0]));
       assert.equal(firstMigrations[1].checksum, migrationChecksum(migrationSources[1]));
@@ -607,6 +626,9 @@ test("records versioned migrations exactly once and remains idempotent on reopen
       assert.equal(firstMigrations[48].checksum, migrationChecksum(migrationSources[48]));
       assert.equal(firstMigrations[49].checksum, migrationChecksum(migrationSources[49]));
       assert.equal(firstMigrations[50].checksum, migrationChecksum(migrationSources[50]));
+      for (let index = 51; index < migrationSources.length; index += 1) {
+        assert.equal(firstMigrations[index].checksum, migrationChecksum(migrationSources[index]));
+      }
       assert.deepEqual(secondMigrations, firstMigrations);
     } finally {
       second?.close();
@@ -1047,7 +1069,7 @@ test("migration 0054 sets the tender cadence and reschedules without changing th
   }
 });
 
-test("current migrations upgrade a complete 0032 database through 0033-0054 in order", () => {
+test("current migrations upgrade a complete 0032 database through 0033-0058 in order", () => {
   withDatabase((databaseUrl) => {
     const db = openDatabase({ databaseUrl });
     try {
@@ -1071,15 +1093,15 @@ test("current migrations upgrade a complete 0032 database through 0033-0054 in o
         "SELECT version, checksum, applied_at FROM schema_migrations ORDER BY version",
       ).all().map((row) => ({ ...row }));
       const added = ledgerAfter.filter((row) => !ledgerBefore.some((before) => before.version === row.version));
-      assert.equal(ledgerAfter.length, 53);
+      assert.equal(ledgerAfter.length, 57);
       assert.deepEqual(added.map((row) => row.version), [
         "0033", "0034", "0035", "0036", "0037", "0038", "0039", "0040", "0041",
-        "0042", "0043", "0044", "0045", "0046", "0047", "0048", "0049", "0050", "0051", "0052", "0053", "0054",
+        "0042", "0043", "0044", "0045", "0046", "0047", "0048", "0049", "0050", "0051", "0052", "0053", "0054", "0055", "0056", "0057", "0058",
       ]);
       assert.deepEqual(
         ledgerAfter.filter((row) => ![
           "0033", "0034", "0035", "0036", "0037", "0038", "0039", "0040", "0041",
-          "0042", "0043", "0044", "0045", "0046", "0047", "0048", "0049", "0050", "0051", "0052", "0053", "0054",
+          "0042", "0043", "0044", "0045", "0046", "0047", "0048", "0049", "0050", "0051", "0052", "0053", "0054", "0055", "0056", "0057", "0058",
         ].includes(row.version)),
         ledgerBefore,
       );
@@ -1276,7 +1298,7 @@ test("reconciles the former settings migration 0019 before applying Shortcut mig
       );
       assert.equal(
         db.prepare("SELECT COUNT(*) AS count FROM schema_migrations").get().count,
-        53,
+        57,
       );
     } finally {
       db.close();
@@ -1700,7 +1722,7 @@ test("upgrades all legacy business data into the phase one write-integrity schem
       assert.deepEqual(hashesAfter, hashesBefore);
       assert.deepEqual(
         all(migrated, "SELECT version FROM schema_migrations ORDER BY version").map((row) => row.version),
-        ["0001", "0002", "0003", "0005", "0006", "0007", "0008", "0009", "0010", "0011", "0012", "0013", "0014", "0015", "0016", "0017", "0018", "0019", "0020", "0021", "0022", "0023", "0024", "0025", "0026", "0027", "0028", "0029", "0030", "0031", "0032", "0033", "0034", "0035", "0036", "0037", "0038", "0039", "0040", "0041", "0042", "0043", "0044", "0045", "0046", "0047", "0048", "0049", "0050", "0051", "0052", "0053", "0054"],
+        ["0001", "0002", "0003", "0005", "0006", "0007", "0008", "0009", "0010", "0011", "0012", "0013", "0014", "0015", "0016", "0017", "0018", "0019", "0020", "0021", "0022", "0023", "0024", "0025", "0026", "0027", "0028", "0029", "0030", "0031", "0032", "0033", "0034", "0035", "0036", "0037", "0038", "0039", "0040", "0041", "0042", "0043", "0044", "0045", "0046", "0047", "0048", "0049", "0050", "0051", "0052", "0053", "0054", "0055", "0056", "0057", "0058"],
       );
     } finally {
       migrated.close();
@@ -1894,7 +1916,7 @@ test("adopts legacy baseline tables by adding missing columns without losing row
       assert.equal(all(db, "SELECT title, assignee FROM action_items WHERE id = 'legacy-action'")[0].title, "Legacy action");
       assert.equal(all(db, "SELECT assignee, due FROM risk_items WHERE id = 'legacy-risk'")[0].due, null);
       assert.equal(all(db, "SELECT artifact_type FROM solution_drafts WHERE id = 'legacy-solution'")[0].artifact_type, "solution_framework");
-      assert.equal(all(db, "SELECT version FROM schema_migrations").length, 53);
+      assert.equal(all(db, "SELECT version FROM schema_migrations").length, 57);
     } finally {
       db.close();
     }
@@ -2448,7 +2470,7 @@ test("rolls back every 0002 schema change when the module migration fails partwa
       assert.equal(columnNames(db, "customers").includes("version"), true);
       assert.deepEqual(
         all(db, "SELECT version FROM schema_migrations ORDER BY version").map((row) => row.version),
-        ["0001", "0002", "0003", "0005", "0006", "0007", "0008", "0009", "0010", "0011", "0012", "0013", "0014", "0015", "0016", "0017", "0018", "0019", "0020", "0021", "0022", "0023", "0024", "0025", "0026", "0027", "0028", "0029", "0030", "0031", "0032", "0033", "0034", "0035", "0036", "0037", "0038", "0039", "0040", "0041", "0042", "0043", "0044", "0045", "0046", "0047", "0048", "0049", "0050", "0051", "0052", "0053", "0054"],
+        ["0001", "0002", "0003", "0005", "0006", "0007", "0008", "0009", "0010", "0011", "0012", "0013", "0014", "0015", "0016", "0017", "0018", "0019", "0020", "0021", "0022", "0023", "0024", "0025", "0026", "0027", "0028", "0029", "0030", "0031", "0032", "0033", "0034", "0035", "0036", "0037", "0038", "0039", "0040", "0041", "0042", "0043", "0044", "0045", "0046", "0047", "0048", "0049", "0050", "0051", "0052", "0053", "0054", "0055", "0056", "0057", "0058"],
       );
     } finally {
       db.close();

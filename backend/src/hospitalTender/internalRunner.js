@@ -5,6 +5,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { normalizeHospitalTenderSyncPayload } from "./sync.js";
+import { normalizeCollectionProgress } from "./collectionProgress.js";
 
 const DEFAULT_TIMEOUT_MS = 5 * 60 * 1000;
 const MAX_CUSTOMER_HOSPITALS = 2_000;
@@ -96,11 +97,17 @@ export function createInternalHospitalTenderRunner(options = {}) {
 
   return {
     collectorRoot,
-    async run({ signal, customerHospitals } = {}) {
+    async run({ signal, customerHospitals, collectionProgress } = {}) {
       const runDir = await mkdtemp(join(tmpdir(), "sentelligent-hospital-tender-"));
       const dataDir = join(runDir, "data");
       const outputPath = join(runDir, "snapshot.json");
       try {
+        const resumeArguments = [];
+        if (collectionProgress !== undefined) {
+          const resumePath = join(runDir, "resume-progress.json");
+          await writeFile(resumePath, JSON.stringify(normalizeCollectionProgress(collectionProgress)), { encoding: "utf8", mode: 0o600 });
+          resumeArguments.push(`--resume-progress=${resumePath}`);
+        }
         let customerHospitalsPath = "";
         if (customerHospitals !== undefined) {
           if (!Array.isArray(customerHospitals) || customerHospitals.length > MAX_CUSTOMER_HOSPITALS) {
@@ -128,7 +135,7 @@ export function createInternalHospitalTenderRunner(options = {}) {
         try {
           child = spawnImpl(
             pythonExecutable,
-            ["-m", "hospital_tender_monitor.cli", "--project-root", collectorRoot, "run-and-export", "--output", outputPath],
+            ["-m", "hospital_tender_monitor.cli", "--project-root", collectorRoot, "run-and-export", "--output", outputPath, ...resumeArguments],
             {
               cwd: collectorRoot,
               env: commandEnvironment({

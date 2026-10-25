@@ -48,6 +48,32 @@ class _Clock:
 
 
 class HttpBudgetTests(TestCase):
+    def test_fractional_source_budget_bounds_requests_and_retries(self) -> None:
+        clock = _Clock()
+        timeouts = []
+
+        def opener(_request, timeout):
+            timeouts.append(timeout)
+            clock.value += timeout
+            raise TimeoutError("fixture timeout")
+
+        client = HttpClient(
+            timeout_seconds=15, opener=opener, resolver=_resolver,
+            sleeper=clock.sleep, monotonic=clock.now, max_attempts=3,
+        )
+        with client.request_budget(0.5):
+            with self.assertRaises(HttpError):
+                client.request("GET", "https://public.example.test/fractional")
+        self.assertEqual(timeouts, [0.5])
+        self.assertEqual(clock.value, 0.5)
+
+    def test_source_budget_rejects_nonpositive_nonfinite_and_boolean_values(self) -> None:
+        client = HttpClient(opener=lambda *_: self.fail("must not send a request"), resolver=_resolver)
+        for value in (0, -1, float("nan"), float("inf"), 301, True, False):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                with client.request_budget(value):
+                    self.fail("invalid budget was accepted")
+
     def test_gzip_response_is_decompressed_with_bounded_output(self) -> None:
         class _GzipResponse(_Response):
             def __init__(self, url: str, body: bytes) -> None:

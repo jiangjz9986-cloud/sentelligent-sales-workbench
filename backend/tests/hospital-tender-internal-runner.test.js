@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { writeFile } from "node:fs/promises";
 import { describe, it } from "node:test";
 
@@ -26,6 +27,35 @@ function fakeChild() {
 }
 
 describe("internal hospital tender runner", () => {
+  it("passes bounded recovery progress in a private temporary file and removes it after collection", async () => {
+    const progress = [{ sourceId: "jining-ggzy", configurationDigest: "a".repeat(64), cursor: { categoryIndex: 1, hospitalIndex: 0, page: 2 } }];
+    let resumePath;
+    const runner = createInternalHospitalTenderRunner({
+      spawnImpl(_command, args) {
+        resumePath = args.find((argument) => argument.startsWith("--resume-progress=")).slice("--resume-progress=".length);
+        assert.deepEqual(JSON.parse(readFileSync(resumePath, "utf8")), progress);
+        assert.equal(statSync(resumePath).mode & 0o777, 0o600);
+        const child = fakeChild();
+        const output = args[args.indexOf("--output") + 1];
+        void writeFile(output, JSON.stringify({ ...validSnapshot(), collectionProgress: progress }), "utf8")
+          .then(() => queueMicrotask(() => child.emit("close", 0, null)));
+        return child;
+      },
+    });
+    const result = await runner.run({ collectionProgress: progress });
+    assert.deepEqual(result.payload.collectionProgress, progress);
+    assert.equal(existsSync(resumePath), false);
+  });
+
+  it("rejects unsafe recovery state before spawning the collector", async () => {
+    let spawned = false;
+    const runner = createInternalHospitalTenderRunner({ spawnImpl() { spawned = true; return fakeChild(); } });
+    await assert.rejects(runner.run({ collectionProgress: [{
+      sourceId: "jining", configurationDigest: "a".repeat(64), cursor: { url: "https://example.test/private" },
+    }] }), (error) => error instanceof InternalHospitalTenderRunError);
+    assert.equal(spawned, false);
+  });
+
   it("runs the bundled collector without forwarding credentials and validates its snapshot", async () => {
     let invocation;
     const runner = createInternalHospitalTenderRunner({

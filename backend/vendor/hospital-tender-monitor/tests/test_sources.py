@@ -12,7 +12,12 @@ from hospital_tender_monitor.sources.dongying import DongyingAdapter
 from hospital_tender_monitor.sources.hospital_html import HospitalHtmlAdapter
 from hospital_tender_monitor.sources.jining import JiningAdapter
 from hospital_tender_monitor.sources.qingdao import QingdaoAdapter
-from hospital_tender_monitor.sources.base import page_reaches_cutoff, parse_published_at
+from hospital_tender_monitor.sources.base import (
+    extract_budget_text,
+    fetch_detail_budget,
+    page_reaches_cutoff,
+    parse_published_at,
+)
 from hospital_tender_monitor.models import NoticeType
 
 
@@ -63,6 +68,39 @@ class SourceFixtureTests(TestCase):
             parse_published_at("2026/08/17 12:30").isoformat(),
             "2026-08-17T12:30:00+00:00",
         )
+
+    def test_budget_parser_reads_only_labeled_amounts_from_project_overview(self) -> None:
+        detail = """
+          <h2>項目概況</h2>
+          <p>採購內容：網絡安全服務</p>
+          <p>預算金額（萬元）：<strong>323.00</strong></p>
+          <script>const fakeBudget = '999999元';</script>
+        """
+        self.assertEqual(extract_budget_text(detail), "323.00萬元")
+        self.assertEqual(extract_budget_text("项目概况：采购服务器 2 台"), "")
+
+    def test_detail_budget_fetch_is_same_host_and_extracts_explicit_amount(self) -> None:
+        http = _RouteHttp(lambda *_: "<p>项目概况</p><p>预算金额：人民币 500 万元</p>")
+        budget = fetch_detail_budget(http, "https://trade.example.test", "https://trade.example.test/item/1")
+        self.assertEqual(budget, "500万元")
+        self.assertEqual(len(http.calls), 1)
+        self.assertEqual(
+            fetch_detail_budget(http, "https://trade.example.test", "https://unrelated.example.test/item/2"),
+            "",
+        )
+        self.assertEqual(len(http.calls), 1)
+
+    def test_budget_parser_ignores_project_ids_after_an_unpublished_budget(self) -> None:
+        value = "\u9884\u7b97\u91d1\u989d\uff1a\u6682\u672a\u62ab\u9732\uff0c\u9879\u76ee\u7f16\u53f7 2026-0099"
+        self.assertEqual(extract_budget_text(value), "")
+
+    def test_budget_detail_fetch_rejects_https_downgrades(self) -> None:
+        http = _RouteHttp(lambda *_: "<p>budget 500</p>")
+        self.assertEqual(
+            fetch_detail_budget(http, "https://trade.example.test", "http://trade.example.test/item/3"),
+            "",
+        )
+        self.assertEqual(http.calls, [])
 
     def test_dongying_categories_deduplicate_the_same_public_notice(self) -> None:
         source = {
@@ -211,7 +249,7 @@ class SourceFixtureTests(TestCase):
             '{"title":"博兴县园林绿化工程招标公告","webdate":"2026-09-25 10:00:00","linkurl":"/jyxx/012001/012001001/20260925/other.html"}' \
             ']}}'
         http = _Http(body)
-        result = BinzhouAdapter(source, http).fetch()
+        result = BinzhouAdapter(source, http, clock=lambda: SCAN_NOW).fetch()
         self.assertTrue(result.success)
         self.assertEqual(len(result.notices), 1)
         self.assertEqual(result.notices[0].title, "山东省滨州市博兴县人民医院设备采购公告")

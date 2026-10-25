@@ -73,6 +73,7 @@ class HospitalHtmlAdapter(SourceAdapter):
         self._parser_factory = parser_factory
 
     def fetch(self) -> SourceResult:
+        notices: list[TenderNotice] = []
         try:
             response = self.http.request("GET", source_text(self.source, "url"))
             if not isinstance(response.text, str) or response.status < 200 or response.status >= 300:
@@ -89,7 +90,6 @@ class HospitalHtmlAdapter(SourceAdapter):
             title_match_required = self.source.get("title_match_required", False)
             if type(title_match_required) is not bool:
                 raise ValueError("title match required")
-            notices: list[TenderNotice] = []
             seen: set[str] = set()
             for title, href, record_text in parser.records:  # type: ignore[attr-defined]
                 title = strip_html(title)
@@ -131,5 +131,5 @@ class HospitalHtmlAdapter(SourceAdapter):
                     # from the same hospital page.
                     continue
             return SourceResult(notices=tuple(notices))
-        except (HttpError, ValueError, TypeError, AttributeError):
-            return SourceResult(success=False, error="invalid source response")
+        except (HttpError, OSError, ValueError, TypeError, AttributeError):
+            return SourceResult(tuple(notices), False, "invalid source response", {}, bool(notices))

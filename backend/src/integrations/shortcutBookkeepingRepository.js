@@ -3,7 +3,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { insertAudit } from "../audit/auditRepository.js";
 import { withImmediateTransaction } from "../db/transaction.js";
 import { HttpError } from "../http/errors.js";
-import { resolveBookkeepingCategory } from "../bookkeeping/categoryCatalog.js";
+import { normalizeBookkeepingSubcategory, resolveBookkeepingCategory } from "../bookkeeping/categoryCatalog.js";
 import { resolveTravelExpenseRegionFromDatabase } from "../travelExpense/regionRepository.js";
 
 const COMPLETED_STATUSES = new Set(["accepted", "review_required", "rejected"]);
@@ -132,6 +132,21 @@ function parseJson(value, fallback) {
   } catch {
     return fallback;
   }
+}
+
+function categoryReference(selection, owner) {
+  const categoryId = selection.categoryId ?? null;
+  const snapshot = selection.categorySnapshot ?? {
+    version: 1,
+    owner,
+    categoryId,
+    categoryVersion: selection.categoryVersion ?? null,
+    ledgerName: selection.ledgerName,
+    entryType: selection.entryType,
+    category: selection.category,
+    subcategory: selection.subcategory,
+  };
+  return { categoryId, snapshotJson: JSON.stringify(snapshot) };
 }
 
 function itemFromRow(row) {
@@ -298,30 +313,35 @@ function normalizeAnalysis(value, row, { resolveCategory = resolveBookkeepingCat
   const confidence = Number(value.confidence);
   const expense = normalizeExpense(value.expense, { required: status === "ready" });
   const category = requiredText(value.category ?? row.category, "analysis.category", 100);
-  const subcategory = optionalText(value.subcategory ?? row.subcategory, "analysis.subcategory", 100);
+  const subcategory = optionalText(
+    Object.hasOwn(value, "subcategory") ? value.subcategory : row.subcategory,
+    "analysis.subcategory", 100,
+  );
   const resolvedSelection = resolveCategory({
     owner: row.owner,
     ledgerName: row.ledger_name,
     entryType: row.entry_type,
     category,
     subcategory,
-    includeArchived: category === row.category,
   });
   const note = optionalText(value.note ?? row.note, "analysis.note", 1_000);
   if (status === "ready" && !expense.purpose) {
     expense.purpose = `${resolvedSelection.category}${resolvedSelection.subcategory ? `-${resolvedSelection.subcategory}` : ""}`;
   }
   return {
-    status,
-    confidence: Number.isFinite(confidence) ? Math.max(0, Math.min(1, confidence)) : 0,
-    category: resolvedSelection.category,
-    subcategory: resolvedSelection.subcategory,
-    note,
-    noteAutomation: normalizeNoteAutomation(value.noteAutomation),
-    categoryAutomation: normalizeCategoryAutomation(value.categoryAutomation),
-    expense,
-    warnings: normalizeWarnings(value.warnings),
-    source: normalizeSource(value.source),
+    selection: resolvedSelection,
+    analysis: {
+      status,
+      confidence: Number.isFinite(confidence) ? Math.max(0, Math.min(1, confidence)) : 0,
+      category: resolvedSelection.category,
+      subcategory: resolvedSelection.subcategory,
+      note,
+      noteAutomation: normalizeNoteAutomation(value.noteAutomation),
+      categoryAutomation: normalizeCategoryAutomation(value.categoryAutomation),
+      expense,
+      warnings: normalizeWarnings(value.warnings),
+      source: normalizeSource(value.source),
+    },
   };
 }
 
@@ -346,7 +366,6 @@ function normalizeReviewPatch(value, row, { resolveCategory = resolveBookkeeping
     entryType: row.entry_type,
     category,
     subcategory,
-    includeArchived: category === row.category,
   });
   return {
     category: resolved.category,
@@ -440,6 +459,40 @@ export function createShortcutBookkeepingRepository(db, {
   const resolveCategory = categoryRepository?.resolve
     ? (input) => categoryRepository.resolve(input)
     : resolveBookkeepingCategory;
+
+  function resolveStoredCategory(input, row) {
+    const unchanged = input.category === row.category
+      && normalizeBookkeepingSubcategory(input.subcategory) === normalizeBookkeepingSubcategory(row.subcategory);
+    if (!unchanged || row.category_snapshot_json === null || row.category_snapshot_json === undefined) {
+      return resolveCategory({ ...input, includeArchived: false });
+    }
+    const snapshot = parseJson(row.category_snapshot_json, null);
+    const categoryId = row.category_id ?? null;
+    const inScope = categoryId === null || db.prepare(`
+      SELECT id FROM bookkeeping_categories
+      WHERE id = $id AND owner = $owner AND ledger_name = $ledgerName AND entry_type = $entryType
+    `).get({ $id: categoryId, $owner: row.owner, $ledgerName: row.ledger_name, $entryType: row.entry_type });
+    // Only the stored, owner-bound selection may outlive dictionary edits.
+    if (!isPlainObject(snapshot) || snapshot.version !== 1
+      || snapshot.owner !== row.owner || snapshot.categoryId !== categoryId
+      || snapshot.ledgerName !== row.ledger_name || snapshot.entryType !== row.entry_type
+      || snapshot.category !== row.category
+      || snapshot.subcategory !== normalizeBookkeepingSubcategory(row.subcategory)
+      || (categoryId !== null && (!Number.isSafeInteger(snapshot.categoryVersion) || snapshot.categoryVersion < 1))
+      || !inScope) {
+      throw new HttpError(422, "VALIDATION_ERROR", "Request validation failed", { category: "notAllowed" });
+    }
+    return {
+      ledgerName: snapshot.ledgerName,
+      entryType: snapshot.entryType,
+      category: snapshot.category,
+      subcategory: snapshot.subcategory,
+      targetSystem: row.target_system,
+      categoryId,
+      categoryVersion: snapshot.categoryVersion,
+      categorySnapshot: snapshot,
+    };
+  }
 
   const selectById = db.prepare(`
     SELECT entry.*, expense.reference_code AS expense_reference_code
@@ -627,7 +680,6 @@ export function createShortcutBookkeepingRepository(db, {
     const entryType = requiredText(input.entryType, "entryType", 20);
     const category = requiredText(input.category, "category", 100);
     const subcategory = optionalText(input.subcategory, "subcategory", 100);
-    const resolved = resolveCategory({ owner, ledgerName, entryType, category, subcategory });
     const idempotencyKeyHash = hashValue(requiredText(input.idempotencyKey, "idempotencyKey", 200));
     const normalizedRequestHash = sha256Value(input.requestHash, "requestHash");
     const rawText = requiredText(input.rawText, "rawText", 12_000);
@@ -648,16 +700,18 @@ export function createShortcutBookkeepingRepository(db, {
         }
         return { item: itemFromRow(existing), replayed: true };
       }
+      const resolved = resolveCategory({ owner, ledgerName, entryType, category, subcategory });
+      const reference = categoryReference(resolved, owner);
       const id = generatedId(idFactory, "generated shortcut bookkeeping id");
       db.prepare(`
         INSERT INTO shortcut_bookkeeping_entries (
           id, owner, actor, target_system, ledger_name, entry_type, category, subcategory,
           note, idempotency_key_hash, request_hash, source_id, raw_text, captured_at,
-          status, created_at, updated_at
+          status, created_at, updated_at, category_id, category_snapshot_json
         ) VALUES (
           $id, $owner, $actor, $targetSystem, $ledgerName, $entryType, $category, $subcategory,
           $note, $idempotencyKeyHash, $requestHash, $sourceId, $rawText, $capturedAt,
-          'received', $now, $now
+          'received', $now, $now, $categoryId, $categorySnapshotJson
         )
       `).run({
         $id: id,
@@ -668,6 +722,8 @@ export function createShortcutBookkeepingRepository(db, {
         $entryType: entryType,
         $category: category,
         $subcategory: resolved.subcategory,
+        $categoryId: reference.categoryId,
+        $categorySnapshotJson: reference.snapshotJson,
         $note: note,
         $idempotencyKeyHash: idempotencyKeyHash,
         $requestHash: normalizedRequestHash,
@@ -1013,23 +1069,34 @@ export function createShortcutBookkeepingRepository(db, {
         || !["income", "expense"].includes(current.entry_type)) {
         throw new TypeError("Sentelligent Shortcut bookkeeping entry type is invalid");
       }
-      const normalizedReviewPatch = normalizeReviewPatch(reviewPatch, current, { resolveCategory });
-      const effectiveCurrent = normalizedReviewPatch
+      const resolveCurrentSelection = (input) => resolveStoredCategory(input, current);
+      const normalizedReviewPatch = normalizeReviewPatch(reviewPatch, current, { resolveCategory: resolveCurrentSelection });
+      const patchedCurrent = normalizedReviewPatch
         ? { ...current, ...normalizedReviewPatch }
         : current;
-      if (normalizedReviewPatch) {
-        db.prepare(`
-          UPDATE shortcut_bookkeeping_entries
-          SET category = $category, subcategory = $subcategory, note = $note
-          WHERE id = $id AND status = 'processing'
-        `).run({
-          $id: id,
-          $category: normalizedReviewPatch.category,
-          $subcategory: normalizedReviewPatch.subcategory,
-          $note: normalizedReviewPatch.note,
-        });
-      }
-      let analysis = normalizeAnalysis(analysisValue, effectiveCurrent, { resolveCategory });
+      const hasClassificationPatch = normalizedReviewPatch
+        && (Object.hasOwn(reviewPatch, "category") || Object.hasOwn(reviewPatch, "subcategory"));
+      const analysisInput = hasClassificationPatch && isPlainObject(analysisValue)
+        ? { ...analysisValue, category: normalizedReviewPatch.category, subcategory: normalizedReviewPatch.subcategory }
+        : analysisValue;
+      const normalized = normalizeAnalysis(analysisInput, patchedCurrent, { resolveCategory: resolveCurrentSelection });
+      let analysis = normalized.analysis;
+      const effectiveCurrent = {
+        ...patchedCurrent,
+        category: analysis.category,
+        subcategory: analysis.subcategory,
+      };
+      const reference = categoryReference(normalized.selection, current.owner);
+      db.prepare(`
+        UPDATE shortcut_bookkeeping_entries
+        SET category_id = $categoryId, category_snapshot_json = $categorySnapshotJson
+        WHERE id = $id AND owner = $owner AND status = 'processing'
+      `).run({
+        $id: id,
+        $owner: current.owner,
+        $categoryId: reference.categoryId,
+        $categorySnapshotJson: reference.snapshotJson,
+      });
       // Shortcut expense captures use the consumption amount as the
       // reimbursable amount by product rule. Keep the invariant at the
       // repository boundary too, so a legacy analyzer or a Web correction

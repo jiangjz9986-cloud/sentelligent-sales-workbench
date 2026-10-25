@@ -12,6 +12,7 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from .config import load_config
+from .progress import load_collection_progress
 from .runner import LockBusyError, MonitorRunner
 from .storage import RepositoryError
 from .sync import SyncError, build_snapshot, post_snapshot, run_and_sync
@@ -24,6 +25,7 @@ def _environment():
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="hospital-tender-monitor", description="Run the hospital IT tender monitor once")
     parser.add_argument("--project-root", type=Path, default=Path.cwd())
+    parser.add_argument("--resume-progress", type=Path, default=None)
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("check-config", help="validate configuration without contacting sources")
     sub.add_parser("list-sources", help="list enabled configured sources")
@@ -50,6 +52,8 @@ def _parser() -> argparse.ArgumentParser:
     optional_sync = sub.add_parser("run-and-sync-if-configured", help="collect once and sync when the bridge is configured")
     optional_sync.add_argument("--endpoint", default=os.environ.get("SENTELLIGENT_HOSPITAL_TENDER_SYNC_URL", ""))
     optional_sync.add_argument("--possible", action="store_true", help=argparse.SUPPRESS)
+    for command in ("dry-run", "smoke", "run", "run-and-export", "run-and-sync", "run-and-sync-if-configured"):
+        sub.choices[command].add_argument("--resume-progress", type=Path, default=argparse.SUPPRESS)
     return parser
 
 
@@ -75,6 +79,7 @@ def main(argv: list[str] | None = None) -> int:
     except SystemExit as exc:
         return int(exc.code)
     try:
+        progress_kwargs = {"collection_progress": load_collection_progress(args.resume_progress)} if args.resume_progress is not None else {}
         config = load_config(_environment(), args.project_root)
         if args.command == "check-config":
             # Validate adapter names and the complete keyword schema without
@@ -101,7 +106,7 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         runner = MonitorRunner(config)
         if args.command == "dry-run":
-            summary = runner.run(dry_run=True)
+            summary = runner.run(dry_run=True, **progress_kwargs)
             print(_json(_present(asdict(summary))))
             return 0 if summary.success else 1
         if args.command == "smoke":
@@ -110,7 +115,7 @@ def main(argv: list[str] | None = None) -> int:
             # the collector database. A partial run is
             # useful evidence (and recoverable by the scheduler); only an
             # all-source failure is a hard smoke failure.
-            summary = runner.run(dry_run=True)
+            summary = runner.run(dry_run=True, **progress_kwargs)
             result = {
                 "status": "ok" if summary.success and summary.failed_source_count == 0 else (
                     "partial" if summary.success else "failed"
@@ -123,7 +128,7 @@ def main(argv: list[str] | None = None) -> int:
             print(_json(result))
             return 0 if summary.success else 1
         if args.command == "run":
-            summary = runner.run(include_possible=args.possible)
+            summary = runner.run(include_possible=args.possible, **progress_kwargs)
             print(_json(_present(asdict(summary))))
             return 0 if summary.success else 1
         if args.command == "health":
@@ -144,7 +149,7 @@ def main(argv: list[str] | None = None) -> int:
             print(_json({"status": "ok", "output": str(args.output), "noticeCount": len(snapshot["notices"])}))
             return 0
         if args.command == "run-and-export":
-            summary = runner.run(include_possible=args.possible)
+            summary = runner.run(include_possible=args.possible, **progress_kwargs)
             if not summary.success:
                 print(_json({"status": "failed", "run": _present(asdict(summary))}))
                 return 1
@@ -175,11 +180,12 @@ def main(argv: list[str] | None = None) -> int:
                 args.endpoint,
                 include_possible=args.possible,
                 env=_environment(),
+                **progress_kwargs,
             )
             print(_json({"status": "ok", "run": _present(asdict(summary)), "sync": asdict(result)}))
             return 0
         if args.command == "run-and-sync-if-configured":
-            summary = runner.run(include_possible=args.possible)
+            summary = runner.run(include_possible=args.possible, **progress_kwargs)
             if not args.endpoint or not _environment().get("HOSPITAL_TENDER_SYNC_TOKEN", "").strip():
                 print(_json({"status": "ok", "run": _present(asdict(summary)), "sync": "not_configured"}))
                 return 0 if summary.success else 1

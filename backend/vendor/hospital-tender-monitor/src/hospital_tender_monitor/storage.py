@@ -11,6 +11,7 @@ import sqlite3
 from typing import Iterable
 
 from .models import ClassifiedNotice, NoticeType, RelevanceLevel, SourceHealth, TenderNotice
+from .progress import validate_collection_progress
 
 
 @dataclass(frozen=True, slots=True)
@@ -44,6 +45,7 @@ class RunRecord:
     inserted_count: int
     revised_count: int
     error: str = ""
+    partial_source_count: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -150,7 +152,7 @@ def _safe_error(error: str, default: str = "source failure") -> str:
 
 
 class Repository:
-    _SCHEMA_VERSION = 1
+    _SCHEMA_VERSION = 2
     _EXPECTED_TABLES = frozenset(
         {
             "schema_migrations",
@@ -159,6 +161,7 @@ class Repository:
             "notice_revisions",
             "source_health_history",
             "runs",
+            "collection_progress",
         }
     )
     _EXPECTED_INDEXES = frozenset(
@@ -253,8 +256,9 @@ class Repository:
                 "delivery_state",
                 "delivered_at",
             },
-            "source_health_history": {"id", "source_id", "checked_at", "success", "item_count", "error"},
-            "runs": {"id", "started_at", "finished_at", "success", "source_count", "successful_source_count", "failed_source_count", "notice_count", "inserted_count", "revised_count", "error"},
+            "source_health_history": {"id", "source_id", "checked_at", "success", "item_count", "error", "partial"},
+            "runs": {"id", "started_at", "finished_at", "success", "source_count", "successful_source_count", "failed_source_count", "notice_count", "inserted_count", "revised_count", "error", "partial_source_count"},
+            "collection_progress": {"source_id", "configuration_digest", "cursor_json"},
         }
         for table, expected in required_columns.items():
             columns = {str(row[1]) for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
@@ -325,7 +329,15 @@ class Repository:
                     if statement.strip():
                         conn.execute(statement)
                 conn.execute("INSERT INTO schema_migrations(version, applied_at) VALUES(1, ?)", (_to_db_timestamp(datetime.now(timezone.utc)),))
-            elif not self._schema_is_complete(conn):
+            if 2 not in versions:
+                conn.execute("ALTER TABLE source_health_history ADD COLUMN partial INTEGER NOT NULL DEFAULT 0 CHECK(partial IN (0,1))")
+                conn.execute("ALTER TABLE runs ADD COLUMN partial_source_count INTEGER NOT NULL DEFAULT 0 CHECK(partial_source_count >= 0)")
+                conn.execute("""CREATE TABLE collection_progress (
+                    source_id TEXT PRIMARY KEY REFERENCES sources(source_id),
+                    configuration_digest TEXT NOT NULL, cursor_json TEXT NOT NULL
+                )""")
+                conn.execute("INSERT INTO schema_migrations(version, applied_at) VALUES(2, ?)", (_to_db_timestamp(datetime.now(timezone.utc)),))
+            if not self._schema_is_complete(conn):
                 raise RuntimeError("partial database schema")
             conn.commit()
         except RepositoryError:
@@ -472,7 +484,7 @@ class Repository:
             self._close(conn)
 
     def record_source_health(self, health: SourceHealth) -> None:
-        if type(health.success) is not bool or type(health.item_count) is not int or health.item_count < 0:
+        if type(health.success) is not bool or type(health.item_count) is not int or health.item_count < 0 or type(health.partial) is not bool or (health.success and health.partial):
             raise ValueError("invalid source health")
         _require_aware_datetime(health.checked_at, "checked_at")
         stamp = _to_db_timestamp(health.checked_at)
@@ -485,7 +497,7 @@ class Repository:
             if not source_name:
                 raise ValueError("invalid source health")
             conn.execute("INSERT INTO sources(source_id,source_name,city,updated_at) VALUES(?,?,?,?) ON CONFLICT(source_id) DO UPDATE SET source_name=excluded.source_name, city=excluded.city, updated_at=excluded.updated_at", (health.source_id, source_name, city, stamp))
-            conn.execute("INSERT INTO source_health_history(source_id,checked_at,success,item_count,error) VALUES(?,?,?,?,?)", (health.source_id, stamp, int(health.success), health.item_count, _safe_error(health.error, "source failure")))
+            conn.execute("INSERT INTO source_health_history(source_id,checked_at,success,item_count,error,partial) VALUES(?,?,?,?,?,?)", (health.source_id, stamp, int(health.success), health.item_count, _safe_error(health.error, "source failure"), int(health.partial)))
             conn.commit()
         except sqlite3.Error:
             self._rollback_quietly(conn)
@@ -496,8 +508,56 @@ class Repository:
         finally:
             self._close(conn)
 
+    def retain_collection_progress(self, source_ids: Iterable[str]) -> None:
+        source_ids = tuple(source_ids)
+        conn = self._open_for("database collection progress write failed")
+        try:
+            conn.execute("BEGIN")
+            if source_ids:
+                placeholders = ",".join("?" for _source in source_ids)
+                conn.execute(f"DELETE FROM collection_progress WHERE source_id NOT IN ({placeholders})", source_ids)
+            else:
+                conn.execute("DELETE FROM collection_progress")
+            conn.commit()
+        except Exception:
+            self._rollback_quietly(conn)
+            raise RepositoryError("database collection progress write failed") from None
+        finally:
+            self._close(conn)
+
+    def record_collection_progress(self, entry: dict[str, object]) -> None:
+        entry = validate_collection_progress([entry])[0]
+        conn = self._open_for("database collection progress write failed")
+        try:
+            conn.execute("BEGIN")
+            conn.execute("""INSERT INTO collection_progress(source_id,configuration_digest,cursor_json)
+                VALUES(?,?,?) ON CONFLICT(source_id) DO UPDATE SET
+                configuration_digest=excluded.configuration_digest, cursor_json=excluded.cursor_json""",
+                (entry["sourceId"], entry["configurationDigest"], json.dumps(entry["cursor"], sort_keys=True)))
+            if conn.execute("SELECT COUNT(*) FROM collection_progress").fetchone()[0] > 200:
+                raise ValueError("invalid collection progress")
+            conn.commit()
+        except Exception:
+            self._rollback_quietly(conn)
+            raise RepositoryError("database collection progress write failed") from None
+        finally:
+            self._close(conn)
+
+    def collection_progress(self) -> list[dict[str, object]]:
+        conn = self._open_for("database collection progress read failed")
+        try:
+            rows = conn.execute("SELECT * FROM collection_progress ORDER BY source_id LIMIT 201").fetchall()
+            return validate_collection_progress([
+                {"sourceId": row["source_id"], "configurationDigest": row["configuration_digest"], "cursor": json.loads(row["cursor_json"])}
+                for row in rows
+            ])
+        except Exception:
+            raise RepositoryError("database collection progress read failed") from None
+        finally:
+            self._close(conn)
+
     def record_run(self, run: RunRecord) -> int:
-        fields = ("source_count", "successful_source_count", "failed_source_count", "notice_count", "inserted_count", "revised_count")
+        fields = ("source_count", "successful_source_count", "failed_source_count", "notice_count", "inserted_count", "revised_count", "partial_source_count")
         try:
             started_at = _require_aware_datetime(run.started_at, "started_at")
             finished_at = _require_aware_datetime(run.finished_at, "finished_at")
@@ -510,13 +570,14 @@ class Repository:
             or run.successful_source_count + run.failed_source_count != run.source_count
             or run.inserted_count + run.revised_count > run.notice_count
             or (run.success and run.failed_source_count != 0)
+            or run.partial_source_count > run.failed_source_count
         ):
             raise ValueError("invalid run summary")
         conn: sqlite3.Connection | None = None
         try:
             conn = self._open_for("database run write failed")
             conn.execute("BEGIN")
-            cur = conn.execute("INSERT INTO runs(started_at,finished_at,success,source_count,successful_source_count,failed_source_count,notice_count,inserted_count,revised_count,error) VALUES(?,?,?,?,?,?,?,?,?,?)", (_to_db_timestamp(started_at), _to_db_timestamp(finished_at), int(run.success), run.source_count, run.successful_source_count, run.failed_source_count, run.notice_count, run.inserted_count, run.revised_count, _safe_error(run.error, "run failure")))
+            cur = conn.execute("INSERT INTO runs(started_at,finished_at,success,source_count,successful_source_count,failed_source_count,notice_count,inserted_count,revised_count,error,partial_source_count) VALUES(?,?,?,?,?,?,?,?,?,?,?)", (_to_db_timestamp(started_at), _to_db_timestamp(finished_at), int(run.success), run.source_count, run.successful_source_count, run.failed_source_count, run.notice_count, run.inserted_count, run.revised_count, _safe_error(run.error, "run failure"), run.partial_source_count))
             conn.commit(); return int(cur.lastrowid)
         except sqlite3.Error:
             self._rollback_quietly(conn)
@@ -610,7 +671,7 @@ class Repository:
             source_rows = conn.execute("SELECT source_id, source_name FROM sources ORDER BY source_id").fetchall()
             for source in source_rows:
                 latest = conn.execute(
-                    "SELECT checked_at, success, item_count, error FROM source_health_history WHERE source_id=? ORDER BY checked_at DESC, id DESC LIMIT 1",
+                    "SELECT checked_at, success, item_count, error, partial FROM source_health_history WHERE source_id=? ORDER BY checked_at DESC, id DESC LIMIT 1",
                     (source["source_id"],),
                 ).fetchone()
                 success = conn.execute(
@@ -619,7 +680,7 @@ class Repository:
                 ).fetchone()
                 status = "unknown"
                 if latest:
-                    status = "healthy" if bool(latest["success"]) else "error"
+                    status = "healthy" if bool(latest["success"]) else ("degraded" if latest["partial"] else "error")
                 sources.append({
                     "sourceId": source["source_id"],
                     "sourceName": source["source_name"] or source["source_id"],
@@ -635,7 +696,7 @@ class Repository:
             runs = []
             for row in conn.execute("SELECT * FROM runs ORDER BY finished_at DESC, id DESC LIMIT 20").fetchall():
                 status = "success" if bool(row["success"]) else (
-                    "partial" if int(row["successful_source_count"]) > 0 else "failed"
+                    "partial" if int(row["successful_source_count"]) > 0 or int(row["partial_source_count"]) > 0 else "failed"
                 )
                 runs.append({
                     "id": f"run-{row['id']}",
@@ -654,6 +715,7 @@ class Repository:
                 "notices": notices,
                 "sources": sources,
                 "runs": runs,
+                "collectionProgress": self.collection_progress(),
             }
         except RepositoryError:
             raise
