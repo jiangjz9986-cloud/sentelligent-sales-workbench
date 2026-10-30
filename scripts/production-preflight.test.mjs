@@ -640,6 +640,28 @@ async function loadPreflightModule() {
 }
 
 describe("production preflight", () => {
+  it("detects a pending legacy tender notification before the new outbox baseline can silence it", async () => {
+    const workspace = makeWorkspace();
+    const filePath = join(workspace.root, "legacy.sqlite");
+    const db = new DatabaseSync(filePath);
+    try {
+      db.exec(`
+        CREATE TABLE hospital_tender_scheduler_state (snapshot_id TEXT, last_error TEXT);
+        CREATE TABLE hospital_tender_scheduler_snapshots (id TEXT PRIMARY KEY, status TEXT);
+        INSERT INTO hospital_tender_scheduler_snapshots VALUES ('snapshot', 'pending');
+        INSERT INTO hospital_tender_scheduler_state VALUES ('snapshot', NULL);
+      `);
+      db.close();
+      const { inspectSqlite } = await loadPreflightModule();
+      const inspection = await inspectSqlite(filePath);
+      assert.equal(inspection.quickCheck, "ok");
+      assert.equal(inspection.legacyTenderNotificationRecoveryRequired, true);
+    } finally {
+      if (db.isOpen) db.close();
+      workspace.cleanup();
+    }
+  });
+
   it("accepts the hardened project unit execution surface without backend-env leakage", async () => {
     const { validateSystemdExecutionSurface } = await loadPreflightModule();
     const plan = validLegacyServiceSnapshot();

@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, it } from "node:test";
 
 import { openDatabase } from "../src/db.js";
 import { createHospitalTenderLeadConversionService } from "../src/hospitalTender/leadConversion.js";
+import { matchNoticeToCustomers } from "../src/hospitalTender/matching.js";
 import { createHospitalTenderRepository } from "../src/hospitalTender/repository.js";
 
 const OWNER_A = "owner-a";
@@ -64,29 +65,15 @@ function noticeSnapshot(overrides = {}) {
   };
 }
 
-function noticeMatch(overrides = {}) {
-  return {
-    matchedCustomerIds: ["customer-a", "customer-a2", "customer-b"],
-    matchReasons: {
-      "customer-a": ["hospital_name", "city", "need"],
-      "customer-a2": ["city", "need"],
-      "customer-b": ["city", "need"],
-    },
-    matchedNeeds: {
-      "customer-a": ["PACS 双活"],
-      "customer-a2": ["存储"],
-      "customer-b": ["PACS"],
-    },
-    matchScore: 100,
-    ...overrides,
-  };
-}
-
 function upsertNotice(snapshotOverrides = {}, matchOverrides = {}) {
-  return tenderRepository.upsertNotice(
-    noticeSnapshot(snapshotOverrides),
-    noticeMatch(matchOverrides),
-  );
+  const snapshot = noticeSnapshot(snapshotOverrides);
+  const customers = db.prepare("SELECT id, name, region, needs, aliases, tags FROM customers WHERE deleted_at IS NULL ORDER BY id").all()
+    .map((row) => ({
+      id: row.id, name: row.name, city: row.region,
+      needs: JSON.parse(row.needs ?? "[]"), aliases: JSON.parse(row.aliases ?? "[]"), tags: JSON.parse(row.tags ?? "[]"),
+    }));
+  const match = matchNoticeToCustomers(snapshot, customers);
+  return tenderRepository.upsertNotice(snapshot, { ...match, ...matchOverrides });
 }
 
 beforeEach(() => {
@@ -249,7 +236,7 @@ describe("hospital tender lead conversion", () => {
     assert.deepEqual(counts(), { opportunities: 0, actionItems: 0, audits: 0 });
   });
 
-  it("binds previewDigest to every canonical persisted notice field that drafts can omit or truncate", () => {
+  it("binds previewDigest to in-place notice changes that drafts can omit or truncate", () => {
     const budgetPrefix = "预".repeat(100);
     const deadlinePrefix = "期".repeat(50);
     const matrixBase = {
@@ -264,10 +251,8 @@ describe("hospital tender lead conversion", () => {
         contentSha256: "a".repeat(64),
       }],
       ["purchaser", { purchaser: "青岛市中心医院采购办公室" }],
-      ["noticeType", { noticeType: "clarification" }],
       ["relevance", { relevance: "medium" }],
       ["city", { city: "青岛" }],
-      ["hospitalNames", { hospitalNames: ["青岛市中心医院", "青岛市第三医院"] }],
       ["sourceItemId", { sourceItemId: "item-lead-1-revision" }],
       ["budgetText tail after draft limit", { budgetText: `${budgetPrefix}乙` }],
       ["deadlineText tail after draft limit", { deadlineText: `${deadlinePrefix}乙` }],
@@ -288,6 +273,39 @@ describe("hospital tender lead conversion", () => {
       assert.notEqual(restored.previewDigest, baseline.previewDigest, `${label} restore revision binding`);
     }
     assert.deepEqual(counts(), { opportunities: 0, actionItems: 0, audits: 0 });
+  });
+
+  it("converts different notice stages independently without changing the original preview", () => {
+    const original = tenderRepository.getNotice(NOTICE_ID);
+    const originalPreview = service.preview(input());
+    const clarification = upsertNotice({ noticeType: "clarification" });
+    const clarificationPreview = service.preview(input({ noticeId: clarification.id }));
+
+    assert.notEqual(clarification.id, original.id);
+    assert.notEqual(clarification.canonicalNoticeId, original.canonicalNoticeId);
+    assert.notEqual(clarificationPreview.conversionIdentity, originalPreview.conversionIdentity);
+    assert.notEqual(clarificationPreview.noticeSnapshotDigest, originalPreview.noticeSnapshotDigest);
+    assert.equal(clarification.canonicalRevision, 1);
+    assert.deepEqual(service.preview(input()), originalPreview);
+    assert.equal(tenderRepository.getNotice(NOTICE_ID).noticeType, "tender");
+
+    const first = confirmFromPreview(originalPreview);
+    const second = confirmFromPreview(clarificationPreview, { noticeId: clarification.id, requestId: "confirm-clarification" });
+    assert.notEqual(first.opportunity.id, second.opportunity.id);
+    assert.notEqual(first.actionItem.id, second.actionItem.id);
+    assert.deepEqual(counts(), { opportunities: 2, actionItems: 2, audits: 2 });
+  });
+
+  it("keeps the reviewed preview stable for collector-only hospital array differences", () => {
+    const original = tenderRepository.getNotice(NOTICE_ID);
+    const preview = service.preview(input());
+    const refreshed = upsertNotice({ hospitalNames: ["青岛市中心医院", "青岛市第三医院"] });
+
+    assert.equal(refreshed.canonicalDigest, original.canonicalDigest);
+    assert.equal(refreshed.canonicalRevision, original.canonicalRevision);
+    assert.deepEqual(service.preview(input()), preview);
+    assert.equal(confirmFromPreview(preview).status, "confirmed");
+    assert.deepEqual(counts(), { opportunities: 1, actionItems: 1, audits: 1 });
   });
 
   it("rejects an old digest before the first write when only hidden notice content changed", () => {
@@ -461,8 +479,6 @@ describe("hospital tender lead conversion", () => {
     upsertNotice({}, {
       matchReasons: {
         "customer-a": ["hospital_name", "city"],
-        "customer-a2": ["city", "need"],
-        "customer-b": ["city", "need"],
       },
     });
 
@@ -503,6 +519,13 @@ describe("hospital tender lead conversion", () => {
   });
 
   it("converts two legal matched customers under the same owner independently", () => {
+    db.prepare("UPDATE customers SET needs = '[]' WHERE id = 'customer-a2'").run();
+    const jointNotice = upsertNotice({
+      purchaser: "青岛市中心医院、青岛市第二医院",
+      hospitalNames: ["青岛市中心医院", "青岛市第二医院"],
+    });
+    assert.deepEqual(jointNotice.match.matchedCustomerIds, ["customer-a", "customer-a2"]);
+    assert.deepEqual(jointNotice.match.matchReasons["customer-a2"], ["hospital_name", "city"]);
     const firstPreview = service.preview(input());
     const first = confirmFromPreview(firstPreview);
     const secondPreview = service.preview(input({ customerId: "customer-a2" }));
@@ -519,7 +542,7 @@ describe("hospital tender lead conversion", () => {
     assert.equal(first.opportunity.customerId, "customer-a");
     assert.equal(second.opportunity.customerId, "customer-a2");
     assert.equal(first.opportunity.probability, 100);
-    assert.equal(second.opportunity.probability, 40);
+    assert.equal(second.opportunity.probability, 75);
     assert.equal(first.actionItem.priority, "高");
     assert.equal(second.actionItem.priority, "中");
     assert.deepEqual(counts(), { opportunities: 2, actionItems: 2, audits: 2 });
@@ -564,6 +587,12 @@ describe("hospital tender lead conversion", () => {
   });
 
   it("keeps deterministic conversions separate for different owners", () => {
+    const jointNotice = upsertNotice({
+      purchaser: "青岛市中心医院、另一账号医院",
+      hospitalNames: ["青岛市中心医院", "另一账号医院"],
+    });
+    assert.deepEqual(jointNotice.match.matchedCustomerIds, ["customer-a", "customer-b"]);
+    assert.deepEqual(jointNotice.match.matchReasons["customer-b"], ["hospital_name", "city", "need"]);
     const previewA = service.preview(input());
     const first = confirmFromPreview(previewA);
     const previewB = service.preview(input({ owner: OWNER_B, customerId: "customer-b" }));

@@ -169,13 +169,19 @@ test("PushPlus Token records platform acceptance without claiming final delivery
     },
   });
 
-  assert.equal(await notifier.notify({ cycleNumber: 4, notices: [sampleNotice()] }), 1);
+  assert.equal(await notifier.notify({ cycleNumber: 4, notices: [sampleNotice({
+    matchedCustomerNames: ["济宁市第一人民医院"],
+    contentText: "项目概况：预算金额：323万元",
+  })] }), 1);
   assert.deepEqual(repository.statusCounts(), { queued: 0, submitting: 0, accepted: 1, sent: 0, failed: 0, uncertain: 0, total: 1 });
   const submission = JSON.parse(calls[0].options.body);
   assert.equal(calls[0].url, "https://www.pushplus.plus/send");
   assert.equal(submission.template, "markdown");
   assert.equal(submission.channel, "wechat");
   assert.equal(submission.token, "mock-token");
+  assert.match(submission.content, /客户名称：.*济宁市第一人民医院/u);
+  assert.match(submission.content, /预算金额：.*323万元/u);
+  assert.match(submission.content, /查看公共资源交易平台公告/u);
   assert.equal(Object.hasOwn(notifier, "pollPending"), false);
   assert.equal(calls.length, 1);
   assert.equal(repository.statusCounts().sent, 0);

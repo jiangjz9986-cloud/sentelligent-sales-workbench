@@ -34,6 +34,12 @@ export function normalizeBookkeepingEntryType(entryType) {
   return ENTRY_TYPE_ALIASES.get(entryType) ?? null;
 }
 
+export function normalizeBookkeepingSubcategory(subcategory) {
+  return subcategory === undefined || subcategory === null || subcategory === "" || subcategory === "无"
+    ? null
+    : subcategory;
+}
+
 export function resolveBookkeepingCategoryAgainstCatalog({
   catalog = DEFAULT_BOOKKEEPING_CATALOG,
   ledgerName,
@@ -64,10 +70,7 @@ export function resolveBookkeepingCategoryAgainstCatalog({
 
   if (!Object.hasOwn(categories, category)) validationError({ category: "notAllowed" });
   const allowedSubcategories = categories[category];
-  const normalizedSubcategory = subcategory === undefined || subcategory === null
-    || subcategory === "" || subcategory === "无"
-    ? null
-    : subcategory;
+  const normalizedSubcategory = normalizeBookkeepingSubcategory(subcategory);
   if (allowedSubcategories.length === 0) {
     if (normalizedSubcategory !== null) validationError({ subcategory: "notAllowed" });
   } else if (normalizedSubcategory !== null && !allowedSubcategories.includes(normalizedSubcategory)) {

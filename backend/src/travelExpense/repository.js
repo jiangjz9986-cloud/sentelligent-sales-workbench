@@ -872,9 +872,17 @@ export function createTravelExpenseRepository(db, {
     }
     const coveredCents = cents(input.coveredCents, "coveredCents", 0);
     const notes = optionalText(input.notes, "notes", 2000);
+    const sourceInboxId = optionalText(input.sourceInboxId, "sourceInboxId", 200);
     const id = generatedId(idFactory, "generated attachment id");
     const now = nowIso(clock);
     const write = (encodedDocumentBlob) => runTransaction(db, () => {
+      if (sourceInboxId && paymentIds.some((paymentId) => db.prepare(`
+        SELECT 1 FROM bookkeeping_proof_detachments
+        WHERE owner = $owner AND inbox_id = $inboxId
+          AND expense_id = $expenseId AND payment_id = $paymentId
+      `).get({ $owner: owner, $inboxId: sourceInboxId, $expenseId: expenseId, $paymentId: paymentId }))) {
+        throw new TravelExpenseDependencyConflictError("BOOKKEEPING_PROOF_DETACHED", "Source proof was detached by the user");
+      }
       for (const paymentId of paymentIds) {
         const payment = db.prepare(
           "SELECT id FROM travel_expense_payments WHERE id = $id AND expense_id = $expenseId",
@@ -966,6 +974,42 @@ export function createTravelExpenseRepository(db, {
     };
   }
 
+  function detachSourceProof(attachmentId, row, owner, actor, now, reason) {
+    if (row.kind !== "payment_proof") return;
+    const sources = db.prepare(`
+      SELECT DISTINCT inbox.id AS inbox_id, link.payment_id
+      FROM travel_expense_document_inbox inbox
+      JOIN travel_expense_attachment_payments link ON link.attachment_id = $attachmentId
+      JOIN travel_expense_payments payment
+        ON payment.id = link.payment_id AND payment.expense_id = $expenseId
+      WHERE inbox.owner = $owner AND inbox.source = 'weixin'
+        AND inbox.document_kind = 'payment_proof'
+        AND (
+          $notes = '微信图片记账:' || inbox.id
+          OR (inbox.matched_expense_id = $expenseId AND inbox.matched_payment_id = link.payment_id
+            AND json_extract(inbox.recognition_json, '$.attachmentId') = $attachmentId)
+        )
+    `).all({ $attachmentId: attachmentId, $expenseId: row.expense_id, $owner: owner, $notes: row.notes });
+    for (const source of sources) {
+      db.prepare(`
+        INSERT INTO bookkeeping_proof_detachments (
+          owner, inbox_id, expense_id, payment_id, attachment_id, reason, detached_by, detached_at
+        ) VALUES ($owner, $inboxId, $expenseId, $paymentId, $attachmentId, $reason, $actor, $now)
+        ON CONFLICT (owner, inbox_id, expense_id, payment_id) DO NOTHING
+      `).run({
+        $owner: owner, $inboxId: source.inbox_id, $expenseId: row.expense_id,
+        $paymentId: source.payment_id, $attachmentId: attachmentId, $reason: reason, $actor: actor, $now: now,
+      });
+      db.prepare(`
+        UPDATE travel_expense_document_inbox
+        SET recognition_json = json_remove(recognition_json, '$.attachmentId'),
+            actor = $actor, version = version + 1, updated_at = $now
+        WHERE id = $inboxId AND owner = $owner
+          AND json_extract(recognition_json, '$.attachmentId') = $attachmentId
+      `).run({ $inboxId: source.inbox_id, $owner: owner, $attachmentId: attachmentId, $actor: actor, $now: now });
+    }
+  }
+
   function deleteAttachment(id, input = {}) {
     const attachmentId = requiredText(id, "id", 200);
     const { owner, actor } = ownerAndActor(input);
@@ -973,13 +1017,14 @@ export function createTravelExpenseRepository(db, {
     const now = nowIso(clock);
     return runTransaction(db, () => {
       const row = db.prepare(`
-        SELECT a.expense_id, a.document_blob_id
+        SELECT a.expense_id, a.document_blob_id, a.kind, a.notes
         FROM travel_expense_attachments a
         JOIN travel_expenses e ON e.id = a.expense_id
         WHERE a.id = $id AND e.owner = $owner AND e.deleted_at IS NULL
       `).get({ $id: attachmentId, $owner: owner });
       if (!row) throw new TravelExpenseNotFoundError("Attachment was not found");
       bumpExpenseVersion(row.expense_id, owner, actor, version, now);
+      detachSourceProof(attachmentId, row, owner, actor, now, "deleted");
       db.prepare("DELETE FROM travel_expense_attachments WHERE id = $id").run({ $id: attachmentId });
       deleteDocumentBlobIfUnreferenced(db, { id: row.document_blob_id, owner });
       return hydrateExpense(anyExpense.get({ $id: row.expense_id, $owner: owner }));
@@ -1006,7 +1051,7 @@ export function createTravelExpenseRepository(db, {
     const now = nowIso(clock);
     const write = (encodedDocumentBlob) => runTransaction(db, () => {
       const row = db.prepare(`
-        SELECT a.expense_id, a.document_blob_id
+        SELECT a.expense_id, a.document_blob_id, a.kind, a.notes
         FROM travel_expense_attachments a
         JOIN travel_expenses e ON e.id = a.expense_id
         WHERE a.id = $id AND e.owner = $owner AND e.deleted_at IS NULL
@@ -1014,6 +1059,7 @@ export function createTravelExpenseRepository(db, {
       if (!row) throw new TravelExpenseNotFoundError("Attachment was not found");
 
       bumpExpenseVersion(row.expense_id, owner, actor, version, now);
+      detachSourceProof(attachmentId, row, owner, actor, now, "replaced");
       const documentBlob = putDocumentBlob(db, {
         owner,
         content,

@@ -165,15 +165,27 @@ class JiaozhouCentralHospitalAdapter(SourceAdapter):
     def fetch(self) -> SourceResult:
         notices: list[TenderNotice] = []
         seen: set[str] = set()
+        _, _, page_number = self.resume_position(last_page=1_000_000)
+        cursor = {"page": page_number}
+        completed = 0
         try:
             max_pages = _max_pages(self.source)
             page_url = source_text(self.source, "url")
-            page_number = 1
             seen_pages: set[int] = set()
             seen_fingerprints: set[tuple[str, ...]] = set()
             form_state: dict[str, str] | None = None
             current_url = page_url
+            if page_number > 1:
+                # ASP.NET state is fetched afresh, never stored in progress.
+                bootstrap = self.http.request("GET", page_url)
+                parser = _AspNetListParser()
+                parser.feed(bootstrap.text)
+                parser.close()
+                if bootstrap.status < 200 or bootstrap.status >= 300 or not parser.saw_list or not parser.hidden_fields.get("__VIEWSTATE"):
+                    raise ValueError("form state")
+                form_state = parser.hidden_fields
             for _ in range(max_pages):
+                cursor = {"page": page_number}
                 if page_number in seen_pages:
                     raise ValueError("pagination loop")
                 seen_pages.add(page_number)
@@ -217,18 +229,21 @@ class JiaozhouCentralHospitalAdapter(SourceAdapter):
                         continue
                     seen.add(notice.identity_key)
                     notices.append(notice)
+                completed += 1
                 next_page = _next_page(parser.next_argument)
                 if next_page is None:
                     break
-                if next_page <= page_number or next_page in seen_pages:
+                if next_page <= page_number or next_page in seen_pages or next_page > 1_000_000:
                     raise ValueError("pagination loop")
                 if not parser.hidden_fields.get("__VIEWSTATE"):
                     raise ValueError("form state")
                 form_state = parser.hidden_fields
                 current_url = response.url or current_url
                 page_number = next_page
-        except (HttpError, ValueError, TypeError, AttributeError):
-            return SourceResult(success=False, error="invalid source response")
+            else:
+                return SourceResult(tuple(notices), False, "source page limit", {"page": page_number}, True)
+        except (HttpError, OSError, ValueError, TypeError, AttributeError):
+            return SourceResult(tuple(notices), False, "invalid source response", cursor, bool(completed or notices))
         return SourceResult(notices=tuple(notices))
 
     def _notice(self, record: tuple[str, str, str]) -> TenderNotice | None:

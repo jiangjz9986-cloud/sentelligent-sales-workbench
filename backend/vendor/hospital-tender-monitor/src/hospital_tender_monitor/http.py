@@ -162,8 +162,8 @@ class HttpClient:
     @contextmanager
     def request_budget(self, seconds: float):
         """Bound all requests made by one source without weakening per-call limits."""
-        if not isinstance(seconds, (int, float)) or not 1 <= float(seconds) <= 300:
-            raise ValueError("request budget must be between 1 and 300 seconds")
+        if type(seconds) not in (int, float) or not 0 < float(seconds) <= 300:
+            raise ValueError("request budget must be greater than 0 and at most 300 seconds")
         previous = self._request_deadline
         deadline = self._monotonic() + float(seconds)
         self._request_deadline = deadline if previous is None else min(previous, deadline)

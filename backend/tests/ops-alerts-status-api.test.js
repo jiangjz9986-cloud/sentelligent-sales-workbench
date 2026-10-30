@@ -6,6 +6,8 @@ import { afterEach, beforeEach, describe, it } from "node:test";
 
 import { createServer } from "../src/server.js";
 import { createConnection } from "../src/db/connection.js";
+import { createHospitalTenderRepository } from "../src/hospitalTender/repository.js";
+import { createHospitalTenderSchedulerRepository } from "../src/hospitalTender/schedulerRepository.js";
 import { seedWeixinBinding } from "./helpers/weixin-binding-fixtures.js";
 
 const opsToken = ["fixture", "ops", "monitor", "token"].join("-");
@@ -64,6 +66,23 @@ afterEach(async () => {
 });
 
 describe("ops alerts status endpoint", () => {
+  it("reports the current source snapshot without reviving removed source failures", async () => {
+    const db = createConnection({ databaseUrl: join(tempDir, "ops-status.sqlite") });
+    try {
+      createHospitalTenderRepository(db).upsertSourceHealth({ sourceId: "retired", sourceName: "已移除来源", status: "error" });
+      createHospitalTenderSchedulerRepository(db).saveSnapshot({
+        cycleNumber: 1, generatedAt: "2026-10-25T00:00:00.000Z", status: "completed",
+        payload: { sources: [{ sourceId: "current", status: "healthy" }, { sourceId: "disabled", status: "disabled" }] },
+      });
+    } finally { db.close(); }
+    const result = await request("/api/integrations/ops-alerts/status", {
+      headers: { Authorization: `Bearer ${opsToken}` },
+    });
+    assert.equal(result.response.status, 200);
+    assert.deepEqual(result.body.item.schedulers.hospitalTender.sourceHealth, { total: 1, healthy: 1, degraded: 0, error: 0 });
+    assert.deepEqual(result.body.item.schedulers.hospitalTender.affectedSourceIds, []);
+  });
+
   it("enforces the machine auth matrix", async () => {
     const missing = await request("/api/integrations/ops-alerts/status");
     assert.equal(missing.response.status, 401);
@@ -109,6 +128,9 @@ describe("ops alerts status endpoint", () => {
     // test stack simply never starts the timer loop.
     assert.equal(item.schedulers.hospitalTender.enabled, true);
     assert.equal(item.schedulers.hospitalTender.lastError, null);
+    assert.deepEqual(item.schedulers.hospitalTender.sourceHealth, { total: 0, healthy: 0, degraded: 0, error: 0 });
+    assert.deepEqual(item.schedulers.hospitalTender.affectedSourceIds, []);
+    assert.equal(item.schedulers.hospitalTender.affectedCustomerCount, 0);
     assert.equal(item.schedulers.actionReminders.running, false);
     assert.equal(item.schedulers.dailyDigest.running, false);
     assert.equal(item.schedulers.proactiveNotifications.running, false);

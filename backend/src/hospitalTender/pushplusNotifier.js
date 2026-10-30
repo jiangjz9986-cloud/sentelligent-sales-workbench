@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
-import { hospitalTenderNoticeLine, renderHospitalTenderNoticeMessage } from "./weixinNotifier.js";
+import { hospitalTenderPushplusNoticeLine } from "./notificationMessage.js";
+import { renderHospitalTenderNoticeMessage } from "./weixinNotifier.js";
 
 const PUSHPLUS_SEND_URL = "https://www.pushplus.plus/send";
 const MAX_CONTENT_CHARS = 3_500;
@@ -55,8 +56,7 @@ export function createHospitalTenderPushplusNotifier({
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
       const response = await fetchImpl(url, { ...options, signal: controller.signal, redirect: "error" });
-      let body;
-      try { body = await response.json(); } catch { body = null; }
+      const body = await response.json();
       return { response, body };
     } finally {
       clearTimeout(timer);
@@ -68,7 +68,7 @@ export function createHospitalTenderPushplusNotifier({
     if (!normalizedToken) throw new Error("PUSHPLUS_TOKEN_NOT_CONFIGURED");
     if (!Array.isArray(notices) || notices.length === 0) return 0;
     if (notices.length > 500) throw new Error("PUSHPLUS_NOTICE_BATCH_TOO_LARGE");
-    const lines = notices.map(hospitalTenderNoticeLine);
+    const lines = notices.map(hospitalTenderPushplusNoticeLine);
     const chunks = chunksOf(lines);
     let acknowledged = 0;
     for (let index = 0; index < chunks.length; index += 1) {
@@ -93,7 +93,7 @@ export function createHospitalTenderPushplusNotifier({
       }
 
       const attempt = deliveryRepository.beginAttempt(item.id);
-      if (attempt.status !== "submitting") {
+      if (attempt?.status !== "submitting") {
         throw new Error("PUSHPLUS_DELIVERY_STATE_CONFLICT");
       }
       let result;
@@ -110,6 +110,12 @@ export function createHospitalTenderPushplusNotifier({
         continue;
       }
       const shortCode = safeShortCode(result.body?.data);
+      if (!validJsonResponse(result.body) || !Number.isSafeInteger(result.body.code)
+        || (result.body.code === 200 && (!shortCode || !result.response.ok))) {
+        deliveryRepository.setState(item.id, { status: "uncertain", errorCode: "PUSHPLUS_SUBMISSION_OUTCOME_UNKNOWN" });
+        acknowledged += chunks[index].length;
+        continue;
+      }
       if (!result.response.ok || !validJsonResponse(result.body) || result.body.code !== 200 || !shortCode) {
         const code = Number.isSafeInteger(result.body?.code) ? `PUSHPLUS_REJECTED_${result.body.code}` : "PUSHPLUS_REQUEST_REJECTED";
         deliveryRepository.setState(item.id, { status: "failed", errorCode: code });

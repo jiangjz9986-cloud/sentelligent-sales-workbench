@@ -20,6 +20,9 @@ export const CANONICAL_DIGEST_PATTERN = /^[0-9a-f]{64}$/u;
 export const CANONICAL_NOTICE_ID_MAX = 500;
 
 const CONTROL_CHARACTERS = /[\u0000-\u001f\u007f-\u009f]/u;
+const PUBLICATION_DAY = new Intl.DateTimeFormat("en-CA", {
+  timeZone: "Asia/Shanghai", year: "numeric", month: "2-digit", day: "2-digit",
+});
 
 function isPlainObject(value) {
   return value !== null
@@ -106,13 +109,38 @@ export function contentDigest(value) {
   return digestText(textValue(value) ?? "");
 }
 
-/**
- * Produce lookup candidates in priority order.  An explicit upstream
- * canonical id wins.  Project code and the source-independent notice
- * fingerprint let two collectors converge even when their source ids and
- * URLs differ; identityKey remains the lossless fallback for notices that do
- * not carry enough cross-source evidence.
- */
+/** Internal project grouping only; never use this value as a notice identity. */
+export function canonicalProjectIdentity(input = {}) {
+  const purchaser = normalizedIdentityPart(readValue(input, "purchaser"));
+  const projectCode = normalizedIdentityPart(readValue(input, "projectCode", "project_code"));
+  if (projectCode) {
+    return purchaser
+      ? `project:${digestText(`${purchaser}|${projectCode}`).slice(0, 48)}`
+      : `project-code:${digestText(projectCode).slice(0, 48)}`;
+  }
+  const title = normalizedIdentityPart(readValue(input, "title"));
+  const city = normalizedIdentityPart(readValue(input, "city"));
+  if (!title) return null;
+  return `project-title:${digestText(canonicalJson([purchaser, city, title])).slice(0, 48)}`;
+}
+
+export function canonicalNoticePublicationDate(input = {}) {
+  const raw = textValue(readValue(input, "publishedAt", "published_at"));
+  if (!raw) return null;
+  // Match the collector's UTC interpretation of timestamps without a zone.
+  const timestamp = Date.parse(/^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?$/u.test(raw) ? `${raw}Z` : raw);
+  if (Number.isNaN(timestamp)) return null;
+  const parts = Object.fromEntries(PUBLICATION_DAY.formatToParts(timestamp).map((part) => [part.type, part.value]));
+  return `${parts.year}-${parts.month}-${parts.day}`;
+}
+
+export function sameNoticePhase(left, right) {
+  return normalizedIdentityPart(readValue(left, "noticeType", "notice_type"))
+      === normalizedIdentityPart(readValue(right, "noticeType", "notice_type"))
+    && canonicalNoticePublicationDate(left) === canonicalNoticePublicationDate(right);
+}
+
+/** Every candidate is scoped to a stage and publication day, including legacy IDs. */
 export function canonicalNoticeIdentityCandidates(input = {}) {
   if (!isPlainObject(input)) throw new TypeError("notice must be an object");
 
@@ -122,37 +150,37 @@ export function canonicalNoticeIdentityCandidates(input = {}) {
       ?? readValue(input, "canonicalIdentity", "canonical_identity"),
   );
   const identityKey = boundedCanonicalId(readValue(input, "identityKey", "identity_key"));
-  const purchaser = normalizedIdentityPart(readValue(input, "purchaser"));
-  const projectCode = normalizedIdentityPart(readValue(input, "projectCode", "project_code"));
-  const projectCandidates = [];
-  if (projectCode) {
-    if (purchaser) {
-      projectCandidates.push(`project:${digestText(`${purchaser}|${projectCode}`).slice(0, 48)}`);
-    } else {
-      projectCandidates.push(`project-code:${digestText(projectCode).slice(0, 48)}`);
-    }
-  }
-
-  const title = normalizedIdentityPart(readValue(input, "title"));
-  const city = normalizedIdentityPart(readValue(input, "city"));
-  const hospitals = normalizedArray(readValue(input, "hospitalNames", "hospital_names_json"))
-    .map(normalizedIdentityPart)
-    .filter(Boolean);
-  const publishedAt = canonicalTimestamp(readValue(input, "publishedAt", "published_at"));
-  const fingerprintParts = [title, purchaser, city, publishedAt, ...hospitals].filter(Boolean);
-  const fingerprint = fingerprintParts.length >= 2
-    ? `fingerprint:${digestText(canonicalJson(fingerprintParts)).slice(0, 48)}`
+  const phase = normalizedIdentityPart(readValue(input, "noticeType", "notice_type"));
+  const publishedDate = canonicalNoticePublicationDate(input);
+  const scoped = (kind, value) => value
+    ? `notice:${digestText(canonicalJson([kind, value, phase, publishedDate])).slice(0, 48)}`
     : null;
+  const projectCode = normalizedIdentityPart(readValue(input, "projectCode", "project_code"));
+  const project = projectCode ? canonicalProjectIdentity(input) : null;
+  const title = normalizedIdentityPart(readValue(input, "title"));
+  const purchaser = normalizedIdentityPart(readValue(input, "purchaser"));
+  const city = normalizedIdentityPart(readValue(input, "city"));
+  // Collector hospitalNames are routing evidence, not the notice's identity.
+  const fingerprint = title && publishedDate
+    ? scoped("fingerprint", [title, purchaser, purchaser ? null : city, projectCode])
+    : null;
+  const sourceId = textValue(readValue(input, "sourceId", "source_id"));
 
   return [...new Set([
-    explicit,
-    ...projectCandidates,
+    scoped("canonical", explicit),
+    scoped("project", project),
     fingerprint,
-    identityKey,
+    identityKey ? scoped("source", [sourceId, identityKey]) : null,
   ].filter(Boolean))];
 }
 
 export function canonicalNoticeIdentity(input = {}) {
+  const explicit = boundedCanonicalId(
+    readValue(input, "canonicalNoticeId", "canonical_notice_id")
+      ?? readValue(input, "canonicalId", "canonical_id")
+      ?? readValue(input, "canonicalIdentity", "canonical_identity"),
+  );
+  if (explicit) return explicit;
   const [first] = canonicalNoticeIdentityCandidates(input);
   if (!first) throw new TypeError("identityKey is required");
   return first;

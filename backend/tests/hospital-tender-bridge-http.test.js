@@ -16,6 +16,7 @@ const PASSWORD_A = ["test", "tender", "bridge", "a", "password"].join("-");
 const PASSWORD_B = ["test", "tender", "bridge", "b", "password"].join("-");
 const SYNC_TOKEN = ["test", "tender", "bridge", "sync", "token"].join("-");
 const NOTICE_ID = "hospital-tender-bridge-http-1";
+const HOSPITAL_NAME = "Synthetic Hospital Consortium";
 const passwordField = "pass" + "word";
 
 let tempDir;
@@ -101,12 +102,12 @@ function snapshotPayload({ generatedAt, contentText }) {
       url: "https://example.test/tenders/bridge-http-1",
       publishedAt: "2026-09-06T00:00:00.000Z",
       noticeType: "tender",
-      purchaser: "Synthetic Hospital Consortium",
+      purchaser: HOSPITAL_NAME,
       projectCode: "BRIDGE-HTTP-2026-01",
       budgetText: "5000000",
       deadlineText: "2026-09-30",
       contentText,
-      hospitalNames: ["Synthetic Hospital Consortium"],
+      hospitalNames: [HOSPITAL_NAME],
       sourceItemId: "bridge-http-item-1",
       contentSha256: sha256(contentText),
       relevance: "high",
@@ -337,7 +338,7 @@ before(async () => {
   const createdA = await asA("/api/customers", {
     method: "POST",
     body: JSON.stringify({
-      name: "Synthetic Bridge Hospital A",
+      name: HOSPITAL_NAME,
       region: "Qingdao",
       needs: ["PACS"],
     }),
@@ -348,13 +349,14 @@ before(async () => {
   const createdB = await asB("/api/customers", {
     method: "POST",
     body: JSON.stringify({
-      name: "Synthetic Bridge Hospital B",
+      name: HOSPITAL_NAME,
       region: "Qingdao",
       needs: ["PACS"],
     }),
   });
   assertStatus(createdB, 201, "create owner B customer");
   customerB = createdB.body.item;
+  assert.notEqual(customerA.id, customerB.id);
 });
 
 after(async () => {

@@ -167,14 +167,24 @@ class QingdaoAdapter(SourceAdapter):
     def fetch(self) -> SourceResult:
         notices: list[TenderNotice] = []
         seen_notices: set[str] = set()
+        cursor = {}
+        completed = 0
         try:
             max_pages = _max_pages(self.source)
-            for area_code in _area_codes(self.source):
-                for flag, notice_type in FLAGS:
-                    page = 1
+            area_codes = _area_codes(self.source)
+            start_flag, start_area, start_page = self.resume_position(
+                categories=len(FLAGS), hospitals=len(area_codes), last_page=1_000_000,
+            )
+            for area_index in range(start_area, len(area_codes)):
+                area_code = area_codes[area_index]
+                flag_start = start_flag if area_index == start_area else 0
+                for flag_index in range(flag_start, len(FLAGS)):
+                    flag, notice_type = FLAGS[flag_index]
+                    page = start_page if (area_index, flag_index) == (start_area, start_flag) else 1
                     seen_pages: set[int] = set()
                     seen_fingerprints: set[tuple[str, ...]] = set()
                     for _ in range(max_pages):
+                        cursor = {"categoryIndex": flag_index, "hospitalIndex": area_index, "page": page}
                         if page in seen_pages:
                             raise ValueError("pagination loop")
                         seen_pages.add(page)
@@ -207,14 +217,18 @@ class QingdaoAdapter(SourceAdapter):
                                 continue
                             seen_notices.add(notice.identity_key)
                             notices.append(notice)
+                        completed += 1
                         if not parser.next_href:
                             break
                         next_page = _next_page(parser.next_href)
-                        if next_page is None or next_page <= page or next_page in seen_pages:
+                        if next_page is None or next_page <= page or next_page in seen_pages or next_page > 1_000_000:
                             raise ValueError("pagination loop")
                         page = next_page
-        except (HttpError, ValueError, TypeError, AttributeError):
-            return SourceResult(success=False, error="invalid source response")
+                    else:
+                        cursor["page"] = page
+                        return SourceResult(tuple(notices), False, "source page limit", cursor, True)
+        except (HttpError, OSError, ValueError, TypeError, AttributeError):
+            return SourceResult(tuple(notices), False, "invalid source response", cursor, bool(completed or notices))
         return SourceResult(notices=tuple(notices))
 
     def _list_url(self, area_code: str, flag: str, page: int) -> str:

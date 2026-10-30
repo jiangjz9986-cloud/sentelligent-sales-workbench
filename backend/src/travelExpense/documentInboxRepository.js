@@ -409,7 +409,32 @@ export function createTravelExpenseDocumentInboxRepository(db, {
     const matchedExpenseId = requiredText(input.matchedExpenseId, "matchedExpenseId", 200);
     const matchedPaymentId = requiredText(input.matchedPaymentId, "matchedPaymentId", 200);
     const attachmentId = requiredText(input.attachmentId, "attachmentId", 200);
-    const { item } = currentReviewItem(id, owner, input.expectedVersion);
+    const item = getDocument(id, { owner });
+    if (!item) throw new DocumentInboxNotFoundError();
+    if (item.version !== positiveVersion(input.expectedVersion)) {
+      throw new DocumentInboxVersionConflictError(item.version);
+    }
+    // A matched item's stale attachment reference may be repaired only within
+    // its original target; compensation cannot move a user's existing match.
+    if (item.status !== "review_required" && !(item.status === "matched"
+      && item.matchedExpenseId === matchedExpenseId && item.matchedPaymentId === matchedPaymentId)) {
+      throw new DocumentInboxStateConflictError(item.status);
+    }
+    const attachment = db.prepare(`
+      SELECT 1 FROM travel_expense_attachments attachment
+      JOIN travel_expenses expense ON expense.id = attachment.expense_id AND expense.owner = $owner
+      JOIN travel_expense_attachment_payments link ON link.attachment_id = attachment.id
+      JOIN travel_expense_payments payment ON payment.id = link.payment_id AND payment.expense_id = expense.id
+      WHERE attachment.id = $attachmentId AND attachment.expense_id = $expenseId
+        AND attachment.kind = 'payment_proof' AND link.payment_id = $paymentId AND expense.deleted_at IS NULL
+    `).get({ $owner: owner, $attachmentId: attachmentId, $expenseId: matchedExpenseId, $paymentId: matchedPaymentId });
+    if (!attachment) throw new DocumentInboxNotFoundError();
+    if (db.prepare(`
+      SELECT 1 FROM bookkeeping_proof_detachments
+      WHERE owner = $owner AND inbox_id = $inboxId AND expense_id = $expenseId AND payment_id = $paymentId
+    `).get({ $owner: owner, $inboxId: item.id, $expenseId: matchedExpenseId, $paymentId: matchedPaymentId })) {
+      throw new DocumentInboxStateConflictError("detached");
+    }
     const recognition = item.recognition && typeof item.recognition === "object" && !Array.isArray(item.recognition)
       ? { ...item.recognition, attachmentId }
       : { attachmentId };
@@ -420,18 +445,19 @@ export function createTravelExpenseDocumentInboxRepository(db, {
           matched_payment_id = $matchedPaymentId, recognition_json = $recognitionJson,
           error_code = NULL, actor = $actor, version = version + 1, updated_at = $now
       WHERE id = $id AND owner = $owner AND version = $expectedVersion
-        AND status = 'review_required'
+        AND status = $previousStatus
     `).run({
       $id: requiredText(id, "id", 200),
       $owner: owner,
       $actor: actor,
       $expectedVersion: input.expectedVersion,
+      $previousStatus: item.status,
       $matchedExpenseId: matchedExpenseId,
       $matchedPaymentId: matchedPaymentId,
       $recognitionJson: JSON.stringify(recognition),
       $now: now,
     });
-    if (result.changes !== 1) currentReviewItem(id, owner, input.expectedVersion);
+    if (result.changes !== 1) throw new DocumentInboxVersionConflictError(getDocument(id, { owner })?.version);
     return getDocument(id, { owner });
   }
 

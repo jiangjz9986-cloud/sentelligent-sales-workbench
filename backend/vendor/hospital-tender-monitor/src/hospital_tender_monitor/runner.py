@@ -3,17 +3,19 @@
 from __future__ import annotations
 
 from contextlib import contextmanager, nullcontext
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 import fcntl
 import logging
 from pathlib import Path
+import time
 from typing import Callable, Iterator, Mapping
 
 from .classifier import classify, load_keyword_rules
 from .config import AppConfig
 from .http import HttpClient
-from .models import ClassifiedNotice, RelevanceLevel, SourceHealth
+from .models import ClassifiedNotice, NoticeType, RelevanceLevel, SourceHealth
+from .progress import configuration_digest, validate_collection_progress, validate_cursor
 from .sources import (
     BinzhouAdapter,
     DongyingAdapter,
@@ -22,7 +24,7 @@ from .sources import (
     JiningAdapter,
     QingdaoAdapter,
 )
-from .sources.base import SourceResult
+from .sources.base import SourceResult, fetch_detail_budget
 from .storage import Repository, RepositoryError, RunRecord
 
 
@@ -43,6 +45,9 @@ def _source_priority(source: Mapping[str, object]) -> int:
 logger = logging.getLogger(__name__)
 DEFAULT_REQUEST_INTERVAL_SECONDS = 0.2
 DEFAULT_SOURCE_REQUEST_BUDGET_SECONDS = 45.0
+DEFAULT_COLLECTION_BUDGET_SECONDS = 270.0
+MAX_DETAIL_BUDGET_FETCHES_PER_SOURCE = 8
+DETAIL_BUDGET_LOOKBACK = timedelta(hours=72)
 
 
 class LockBusyError(RuntimeError):
@@ -118,6 +123,7 @@ class MonitorRunner:
         http_client: HttpClient | None = None,
         clock: Callable[[], datetime] | None = None,
         lock_path: Path | None = None,
+        monotonic: Callable[[], float] | None = None,
     ) -> None:
         self.config = config
         self.repository = repository or Repository(config.database_path)
@@ -128,6 +134,7 @@ class MonitorRunner:
         )
         self.clock = clock or (lambda: datetime.now(timezone.utc))
         self.lock_path = Path(lock_path or (Path(config.database_path).with_suffix(".lock")))
+        self.monotonic = monotonic or time.monotonic
 
     @contextmanager
     def _run_lock(self) -> Iterator[None]:
@@ -188,12 +195,22 @@ class MonitorRunner:
             extra_context=tuple(terms),
         )
 
-    def run(self, *, include_possible: bool | None = None, dry_run: bool = False) -> RunSummary:
+    def run(
+        self, *, include_possible: bool | None = None, dry_run: bool = False,
+        collection_progress: list[dict[str, object]] | None = None,
+    ) -> RunSummary:
         """Collect and process all enabled direct sources once."""
         # Keep the argument for callers of the former notification API. It has
         # no effect because delivery is intentionally retired from this worker.
         del include_possible
+        supplied_progress = None if collection_progress is None else validate_collection_progress(collection_progress)
+        sources = self._sources()
+        current_progress = validate_collection_progress([
+            {"sourceId": str(source.get("id", "")), "configurationDigest": configuration_digest(source), "cursor": {}}
+            for source, _adapter in sources
+        ])
         started = self._now()
+        deadline = self.monotonic() + DEFAULT_COLLECTION_BUDGET_SECONDS
         # Dry-run/smoke is intentionally side-effect free: no SQLite setup and
         # no lock-file creation. Persisted runs still take the process lock so
         # two scheduled collectors cannot overlap.
@@ -201,38 +218,88 @@ class MonitorRunner:
         with lock_context:
             if not dry_run:
                 self.repository.initialize()
+            read_progress = getattr(self.repository, "collection_progress", None)
+            previous = supplied_progress if supplied_progress is not None else (
+                read_progress() if not dry_run and callable(read_progress) else []
+            )
+            previous = {entry["sourceId"]: entry for entry in previous}
+            retain_progress = getattr(self.repository, "retain_collection_progress", None)
+            if not dry_run and callable(retain_progress):
+                retain_progress(entry["sourceId"] for entry in current_progress)
             rules = self._rules()
-            sources = self._sources()
             successful = failed = notice_count = inserted = revised = 0
+            partial_sources = 0
             health_rows: list[SourceHealth] = []
-            for source, adapter in sources:
+            for source_index, ((source, adapter), progress) in enumerate(zip(sources, current_progress)):
                 source_id = str(source.get("id", ""))
+                prior = previous.get(source_id)
+                cursor = dict(prior["cursor"]) if prior and prior["configurationDigest"] == progress["configurationDigest"] else {}
                 try:
+                    restore = getattr(adapter, "set_resume_cursor", None)
+                    if callable(restore):
+                        restore(cursor)
+                    remaining = deadline - self.monotonic()
+                    if remaining <= 0:
+                        raise RuntimeError("collection budget exhausted")
+                    # Reclaim unused time while reserving an equal share for
+                    # every pending source, including lower-priority hospitals.
+                    source_budget = min(DEFAULT_SOURCE_REQUEST_BUDGET_SECONDS, remaining / (len(sources) - source_index))
                     request_budget = getattr(self.http_client, "request_budget", None)
-                    budget_context = request_budget(DEFAULT_SOURCE_REQUEST_BUDGET_SECONDS) \
+                    budget_context = request_budget(source_budget) \
                         if callable(request_budget) else nullcontext()
                     with budget_context:
                         result = adapter.fetch()
-                    raw_success = getattr(result, "success", None)
-                    if type(raw_success) is not bool:
-                        raise RuntimeError("source failure")
-                    if not isinstance(result, SourceResult):
-                        # Duck-typed adapters remain usable in tests/integrations.
-                        result = SourceResult(
-                            notices=tuple(getattr(result, "notices", ()) or ()),
-                            success=raw_success,
-                            error=str(getattr(result, "error", "")),
-                        )
-                    if not result.success:
-                        raise RuntimeError("source failure")
-                    notices = tuple(result.notices)
-                    notice_count += len(notices)
-                    source_items: list[ClassifiedNotice] = []
-                    for notice in notices:
-                        item = classify(notice, rules)
-                        if item.level is RelevanceLevel.IRRELEVANT:
-                            continue
-                        source_items.append(item)
+                        raw_success = getattr(result, "success", None)
+                        if type(raw_success) is not bool:
+                            raise RuntimeError("source failure")
+                        if not isinstance(result, SourceResult):
+                            # Duck-typed adapters remain usable in tests/integrations.
+                            result = SourceResult(
+                                notices=tuple(getattr(result, "notices", ()) or ()),
+                                success=raw_success,
+                                error=str(getattr(result, "error", "")),
+                                cursor=getattr(result, "cursor", None),
+                                partial=getattr(result, "partial", False),
+                            )
+                        if type(result.partial) is not bool:
+                            raise RuntimeError("source failure")
+                        next_cursor = validate_cursor({} if result.cursor is None else result.cursor) if not result.success else {}
+                        notices = tuple(result.notices)
+                        notice_count += len(notices)
+                        source_items: list[ClassifiedNotice] = []
+                        detail_fetches = 0
+                        can_fetch_details = callable(getattr(self.http_client, "request", None))
+                        source_url = str(source.get("url", ""))
+                        now = self._now()
+                        for notice in notices:
+                            item = classify(notice, rules)
+                            eligible_type = notice.notice_type in {
+                                NoticeType.PLAN,
+                                NoticeType.PROCUREMENT,
+                                NoticeType.SINGLE_SOURCE,
+                                NoticeType.UNKNOWN,
+                            }
+                            published_at = notice.published_at
+                            recent = (
+                                published_at.tzinfo is not None
+                                and published_at >= now - DETAIL_BUDGET_LOOKBACK
+                            )
+                            if (
+                                can_fetch_details
+                                and not notice.budget_text
+                                and item.level is RelevanceLevel.HIGH
+                                and eligible_type
+                                and recent
+                                and detail_fetches < MAX_DETAIL_BUDGET_FETCHES_PER_SOURCE
+                            ):
+                                detail_fetches += 1
+                                budget_text = fetch_detail_budget(self.http_client, source_url, notice.url)
+                                if budget_text:
+                                    notice = replace(notice, budget_text=budget_text)
+                                    item = classify(notice, rules)
+                            if item.level is RelevanceLevel.IRRELEVANT:
+                                continue
+                            source_items.append(item)
                     if not dry_run and source_items:
                         outcomes = self.repository.save_notices(
                             source_items,
@@ -240,15 +307,22 @@ class MonitorRunner:
                         )
                         inserted += sum(int(outcome.inserted) for outcome in outcomes)
                         revised += sum(int(outcome.revised) for outcome in outcomes)
-                    successful += 1
+                    partial = not result.success and (bool(notices) or result.partial)
+                    if result.success:
+                        successful += 1
+                    else:
+                        failed += 1
+                        partial_sources += int(partial)
+                    cursor = next_cursor
                     health = SourceHealth(
                         source_id,
                         self._now(),
-                        True,
+                        result.success,
                         len(notices),
-                        "",
+                        "" if result.success else "source failure",
                         str(source.get("name", "")).strip(),
                         str(source.get("city", "")).strip(),
+                        partial=partial,
                     )
                 except Exception as exc:
                     failed += 1
@@ -265,9 +339,12 @@ class MonitorRunner:
                 health_rows.append(health)
                 if not dry_run:
                     self.repository.record_source_health(health)
+                    save_progress = getattr(self.repository, "record_collection_progress", None)
+                    if callable(save_progress):
+                        save_progress({**progress, "cursor": cursor})
 
             finished = self._now()
-            usable_collection = failed == 0 or successful > 0
+            usable_collection = failed == 0 or successful > 0 or partial_sources > 0
             success = usable_collection
             error = "source failure" if failed else ""
             if not dry_run:
@@ -287,6 +364,7 @@ class MonitorRunner:
                     inserted_count=inserted,
                     revised_count=revised,
                     error=error,
+                    partial_source_count=partial_sources,
                 ))
             return RunSummary(
                 started_at=started,
@@ -323,10 +401,13 @@ def run_once(
     *,
     include_possible: bool | None = None,
     dry_run: bool = False,
+    collection_progress: list[dict[str, object]] | None = None,
     **runner_kwargs,
 ) -> RunSummary:
     """Convenience API used by service wrappers and integrations."""
-    return MonitorRunner(config, **runner_kwargs).run(include_possible=include_possible, dry_run=dry_run)
+    return MonitorRunner(config, **runner_kwargs).run(
+        include_possible=include_possible, dry_run=dry_run, collection_progress=collection_progress,
+    )
 
 
 build_source_adapter = source_factory

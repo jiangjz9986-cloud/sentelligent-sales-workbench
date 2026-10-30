@@ -17,6 +17,7 @@ const PASSWORD_A = "test-tender-owner-a-password";
 const PASSWORD_B = "test-tender-owner-b-password";
 const passwordField = "pass" + "word";
 const NOTICE_ID = "owner-isolation-tender-notice";
+const HOSPITAL_NAME = "Synthetic Hospital";
 
 let tempDir;
 let server;
@@ -86,12 +87,12 @@ function noticeSnapshot() {
     url: "https://example.test/tenders/owner-isolation-1",
     publishedAt: "2026-09-05T08:00:00.000Z",
     noticeType: "tender",
-    purchaser: "Synthetic Hospital",
+    purchaser: HOSPITAL_NAME,
     projectCode: "OWNER-ISOLATION-1",
     budgetText: "5000000",
     deadlineText: "2026-09-30",
     contentText: "Synthetic PACS tender for owner-scoped bridge references.",
-    hospitalNames: ["Synthetic Hospital"],
+    hospitalNames: [HOSPITAL_NAME],
     sourceItemId: "owner-isolation-item-1",
     contentSha256: "b".repeat(64),
     relevance: "high",
@@ -163,17 +164,18 @@ before(async () => {
 
   const createdA = await asA("/api/customers", {
     method: "POST",
-    body: JSON.stringify({ name: "Synthetic Hospital A", region: "Qingdao", needs: ["PACS"] }),
+    body: JSON.stringify({ name: HOSPITAL_NAME, region: "Qingdao", needs: ["PACS"] }),
   });
   assertStatus(createdA, 201, "create owner A tender customer");
   customerA = createdA.body.item;
 
   const createdB = await asB("/api/customers", {
     method: "POST",
-    body: JSON.stringify({ name: "Synthetic Hospital B", region: "Qingdao", needs: ["PACS"] }),
+    body: JSON.stringify({ name: HOSPITAL_NAME, region: "Qingdao", needs: ["PACS"] }),
   });
   assertStatus(createdB, 201, "create owner B tender customer");
   customerB = createdB.body.item;
+  assert.notEqual(customerA.id, customerB.id);
 
   // The server intentionally does not expose its repository as a public test
   // seam. Insert only synthetic notice data through a second local SQLite
@@ -185,6 +187,9 @@ before(async () => {
       customerSnapshotFromRow(customerA),
       customerSnapshotFromRow(customerB),
     ]);
+    assert.deepEqual(match.matchedCustomerIds, [customerA.id, customerB.id]);
+    assert.ok(match.matchReasons[customerA.id].includes("hospital_name"));
+    assert.ok(match.matchReasons[customerB.id].includes("hospital_name"));
     const now = new Date().toISOString();
     tenderDb.prepare(`
       INSERT INTO hospital_tender_notices (

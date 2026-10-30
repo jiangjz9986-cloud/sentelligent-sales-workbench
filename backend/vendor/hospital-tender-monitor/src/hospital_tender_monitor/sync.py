@@ -119,8 +119,10 @@ def run_and_sync(
     *,
     include_possible: bool = False,
     env: dict[str, str] | None = None,
+    collection_progress: list[dict[str, object]] | None = None,
 ) -> tuple[object, SyncResult]:
-    summary = runner.run(include_possible=include_possible)
+    progress_kwargs = {"collection_progress": collection_progress} if collection_progress is not None else {}
+    summary = runner.run(include_possible=include_possible, **progress_kwargs)
     if not getattr(summary, "success", False):
         raise SyncError("monitor run failed; snapshot was not sent")
     snapshot = build_snapshot(repository)

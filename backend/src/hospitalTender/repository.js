@@ -11,6 +11,8 @@ import {
   canonicalNoticeDigest,
   canonicalNoticeIdentity,
   canonicalNoticeIdentityCandidates,
+  canonicalNoticePublicationDate,
+  canonicalProjectIdentity,
   contentDigest,
   hospitalTenderBridgeId,
   isSha256,
@@ -18,6 +20,7 @@ import {
   normalizeSha256,
   parseBridgeRefs,
   stableDigest,
+  sameNoticePhase,
 } from "./canonicalBridge.js";
 
 export {
@@ -316,7 +319,14 @@ export function normalizeNoticeMatch(input = {}) {
  * accumulate instead of being replaced by the latest ten-customer slice.
  */
 export function mergeNoticeMatches(previous = {}, next = {}) {
-  const before = normalizeNoticeMatch(previous);
+  const legacy = normalizeNoticeMatch(previous);
+  const retainedIds = legacy.matchedCustomerIds.filter((id) => legacy.matchReasons[id]?.includes("hospital_name"));
+  const before = {
+    matchedCustomerIds: retainedIds,
+    matchReasons: Object.fromEntries(retainedIds.map((id) => [id, legacy.matchReasons[id]])),
+    matchedNeeds: Object.fromEntries(retainedIds.map((id) => [id, legacy.matchedNeeds[id] ?? []])),
+    matchScore: retainedIds.length > 0 ? legacy.matchScore : 0,
+  };
   const after = normalizeNoticeMatch(next);
   const matchedCustomerIds = [...new Set([
     ...before.matchedCustomerIds,
@@ -667,6 +677,8 @@ export function createHospitalTenderRepository(db, {
     "bridge_refs_json",
   ].every((column) => noticeColumns.has(column));
   const bridgeStorage = tableExists(db, "hospital_tender_bridges");
+  const sourceStorage = noticeColumns.has("project_identity")
+    && tableExists(db, "hospital_tender_notice_sources");
 
   function requireBridgeStorage() {
     if (!canonicalStorage || !bridgeStorage) throw bridgeLookupError();
@@ -933,9 +945,24 @@ export function createHospitalTenderRepository(db, {
 
   function matchingCanonicalNoticeRows(snapshot) {
     const candidates = new Set(canonicalNoticeIdentityCandidates(snapshot));
+    const mappedIds = sourceStorage ? new Set(db.prepare(`
+      SELECT notice_id FROM hospital_tender_notice_sources
+       WHERE source_id = $sourceId AND notice_type = $noticeType AND published_date = $publishedDate
+         AND (identity_key = $identityKey OR ($sourceItemId IS NOT NULL AND source_item_id = $sourceItemId))
+    `).all({
+      $sourceId: snapshot.sourceId,
+      $noticeType: snapshot.noticeType,
+      $publishedDate: canonicalNoticePublicationDate(snapshot),
+      $identityKey: snapshot.identityKey,
+      $sourceItemId: snapshot.sourceItemId,
+    }).map((row) => row.notice_id)) : new Set();
     const rows = rawNoticeRows().filter((row) => {
-      if (row.identity_key === snapshot.identityKey) return true;
-      if (row.canonical_notice_id && candidates.has(row.canonical_notice_id)) return true;
+      // Even a legacy canonical ID may denote an entire project. Check the
+      // notice stage before any source, explicit-ID, or derived-ID fallback.
+      if (!sameNoticePhase(snapshot, row)) return false;
+      if (mappedIds.has(row.id)) return true;
+      if (row.source_id === snapshot.sourceId && row.identity_key === snapshot.identityKey) return true;
+      if (snapshot.canonicalNoticeId && row.canonical_notice_id === snapshot.canonicalNoticeId) return true;
       return canonicalNoticeIdentityCandidates(rawNoticeInput(row))
         .some((candidate) => candidates.has(candidate));
     });
@@ -958,14 +985,44 @@ export function createHospitalTenderRepository(db, {
   }
 
   function upsertNotice(input, match = {}, options = {}) {
+    // SAVEPOINT composes with the caller's ingestion/event transaction.
+    db.exec("SAVEPOINT hospital_tender_notice_upsert");
+    try {
+      const result = persistNotice(input, match, options);
+      db.exec("RELEASE hospital_tender_notice_upsert");
+      return result;
+    } catch (error) {
+      db.exec("ROLLBACK TO hospital_tender_notice_upsert");
+      db.exec("RELEASE hospital_tender_notice_upsert");
+      throw error;
+    }
+  }
+
+  function persistNotice(input, match = {}, options = {}) {
     if (!canonicalStorage) return upsertLegacyNotice(input, match, options);
-    const snapshot = normalizeNoticeSnapshot(input);
+    const incomingSnapshot = normalizeNoticeSnapshot(input);
     if (!isPlainObject(options)) throw new TypeError("options must be an object");
     assertKnownKeys(options, new Set(["mergeExistingMatch"]), "options");
 
-    const existingRow = findCanonicalNotice(snapshot);
+    const existingRow = findCanonicalNotice(incomingSnapshot);
     const existing = existingRow ? hydrateNoticeRow(existingRow) : null;
-    const canonicalNoticeId = existing?.canonicalNoticeId ?? canonicalNoticeIdentity(snapshot);
+    // A later list-only refresh must not erase a budget already extracted from
+    // the public notice detail page.
+    const budgetSnapshot = existing?.budgetText && !incomingSnapshot.budgetText
+      ? { ...incomingSnapshot, budgetText: existing.budgetText }
+      : incomingSnapshot;
+    // Keep legacy digest inputs stable for source-only metadata differences.
+    const snapshot = existing ? {
+      ...budgetSnapshot,
+      hospitalNames: existing.hospitalNames,
+      publishedAt: existing.publishedAt,
+    } : budgetSnapshot;
+    const requestedCanonicalId = canonicalNoticeIdentity(snapshot);
+    const canonicalIdInUse = db.prepare(`
+      SELECT id FROM hospital_tender_notices WHERE canonical_notice_id = $canonicalNoticeId
+    `).get({ $canonicalNoticeId: requestedCanonicalId });
+    const canonicalNoticeId = existing?.canonicalNoticeId
+      ?? (canonicalIdInUse ? canonicalNoticeIdentity({ ...snapshot, canonicalNoticeId: null }) : requestedCanonicalId);
     const canonicalDigest = canonicalNoticeDigest(snapshot, { canonicalNoticeId });
     const canonicalRevision = existing === null
       ? 1
@@ -979,13 +1036,17 @@ export function createHospitalTenderRepository(db, {
     const normalizedMatch = options.mergeExistingMatch
       ? mergeNoticeMatches(existing?.match ?? {}, match)
       : normalizeNoticeMatch(match);
-    const id = existing?.id ?? snapshot.id ?? generatedId(idFactory, "generated notice id");
+    let id = existing?.id ?? snapshot.id ?? generatedId(idFactory, "generated notice id");
     const conflictingId = rawNoticeById(id);
     if (conflictingId && conflictingId.id !== existing?.id) {
-      throw bridgeConflictError("NOTICE_ID_CONFLICT", "A different notice already uses this id");
+      if (sameNoticePhase(snapshot, conflictingId)) {
+        throw bridgeConflictError("NOTICE_ID_CONFLICT", "A different notice already uses this id");
+      }
+      id = `tender-notice-${stableDigest([id, canonicalNoticeId]).slice(0, 32)}`;
     }
     const conflictingIdentity = rawNoticeByIdentity(snapshot.identityKey);
-    if (conflictingIdentity && conflictingIdentity.id !== existing?.id) {
+    if (conflictingIdentity && conflictingIdentity.id !== existing?.id
+      && conflictingIdentity.source_id === snapshot.sourceId && sameNoticePhase(snapshot, conflictingIdentity)) {
       throw bridgeConflictError(
         "NOTICE_IDENTITY_CONFLICT",
         "A different notice already uses this identity key",
@@ -995,7 +1056,10 @@ export function createHospitalTenderRepository(db, {
     const now = nowIso(clock);
     const values = {
       $id: id,
-      $identityKey: persistedSnapshot.identityKey,
+      $identityKey: existing?.identityKey ?? (conflictingIdentity
+        ? `notice-source:${stableDigest([snapshot.sourceId, snapshot.identityKey, snapshot.noticeType,
+          canonicalNoticePublicationDate(snapshot)])}`
+        : persistedSnapshot.identityKey),
       $sourceId: persistedSnapshot.sourceId,
       $sourceName: persistedSnapshot.sourceName,
       $city: persistedSnapshot.city,
@@ -1084,6 +1148,31 @@ export function createHospitalTenderRepository(db, {
     }
     if (existing && existing.canonicalDigest !== canonicalDigest) {
       markBridgesStale(canonicalNoticeId, canonicalRevision, canonicalDigest, now);
+    }
+    if (sourceStorage) {
+      db.prepare("UPDATE hospital_tender_notices SET project_identity = $projectIdentity WHERE id = $id")
+        .run({ $id: id, $projectIdentity: canonicalProjectIdentity(snapshot) });
+      db.prepare(`
+        INSERT INTO hospital_tender_notice_sources (
+          source_id, identity_key, notice_type, published_date, notice_id,
+          source_name, source_item_id, url, first_seen_at, last_seen_at
+        ) VALUES (
+          $sourceId, $identityKey, $noticeType, $publishedDate, $noticeId,
+          $sourceName, $sourceItemId, $url, $now, $now
+        ) ON CONFLICT(source_id, identity_key, notice_type, published_date) DO UPDATE SET
+          source_name = excluded.source_name, source_item_id = excluded.source_item_id,
+          url = excluded.url, last_seen_at = excluded.last_seen_at
+      `).run({
+        $sourceId: incomingSnapshot.sourceId,
+        $identityKey: incomingSnapshot.identityKey,
+        $noticeType: incomingSnapshot.noticeType,
+        $publishedDate: canonicalNoticePublicationDate(incomingSnapshot),
+        $noticeId: id,
+        $sourceName: incomingSnapshot.sourceName,
+        $sourceItemId: incomingSnapshot.sourceItemId,
+        $url: incomingSnapshot.url,
+        $now: now,
+      });
     }
     updateNoticeBridgeProjection(canonicalNoticeId);
     return getNotice(id);

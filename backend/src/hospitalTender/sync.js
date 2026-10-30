@@ -8,6 +8,7 @@ import {
   normalizeNoticeMatch,
 } from "./repository.js";
 import { matchNoticeToCustomers } from "./matching.js";
+import { normalizeCollectionProgress } from "./collectionProgress.js";
 
 const SNAPSHOT_SCHEMA_VERSION = "hospital-tender-snapshot-v1";
 const MAX_NOTICES_PER_SYNC = 500;
@@ -192,7 +193,7 @@ function normalizeRun(input) {
 
 export function normalizeHospitalTenderSyncPayload(input) {
   assertPlainObject(input, "snapshot");
-  const allowed = new Set(["schemaVersion", "generatedAt", "notices", "sources", "runs"]);
+  const allowed = new Set(["schemaVersion", "generatedAt", "notices", "sources", "runs", "collectionProgress"]);
   assertAllowedKeys(input, allowed, "snapshot");
   if (input.schemaVersion !== SNAPSHOT_SCHEMA_VERSION && input.schemaVersion !== 1) {
     throw new TypeError("snapshot.schemaVersion is invalid");
@@ -213,6 +214,7 @@ export function normalizeHospitalTenderSyncPayload(input) {
     notices: input.notices.map(normalizeIncomingNotice),
     sources: input.sources.map(normalizeSource),
     runs: (input.runs ?? []).map(normalizeRun),
+    ...(input.collectionProgress === undefined ? {} : { collectionProgress: normalizeCollectionProgress(input.collectionProgress) }),
   };
 }
 

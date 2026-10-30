@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { createExecutionDrain } from "../services/executionDrain.js";
 
 import { ingestHospitalTenderSnapshot, customerSnapshotFromRow } from "./sync.js";
+import { createHospitalTenderNotificationEventRepository } from "./notificationEventRepository.js";
 
 const DEFAULT_INTERVAL_MINUTES = 60;
 const DEFAULT_BATCH_SIZE = 10;
@@ -212,6 +213,7 @@ export function createHospitalTenderScheduler({
   const leaseMs = Number.isSafeInteger(lockLeaseMs) && lockLeaseMs > 0 ? lockLeaseMs : DEFAULT_LOCK_LEASE_MS;
   let timer = null;
   let started = false;
+  const notificationEvents = createHospitalTenderNotificationEventRepository(db, { clock });
 
   function now() {
     return validClock(clock);
@@ -304,7 +306,37 @@ export function createHospitalTenderScheduler({
       }
 
       let customers = currentCustomers();
+      let notificationsEnabled = false;
+      try { notificationsEnabled = Boolean(notifier && notificationEnabled()); } catch {}
+      let recoveredNotificationCount = 0;
+      if (notificationsEnabled) {
+        const waiting = notificationEvents.pending({ activeCustomerIds: customers.map((item) => item.id) });
+        try {
+          for (const pending of waiting) {
+            const notified = await notifier(pending.payload);
+            const count = Number.isSafeInteger(notified) && notified >= 0 ? notified : pending.payload.notices.length;
+            if (count !== pending.payload.notices.length) throw new Error("notification incomplete");
+            notificationEvents.settle(pending.id);
+            recoveredNotificationCount += count;
+          }
+        } catch {
+          const finishedAt = now().toISOString();
+          const error = "招标通知发送失败";
+          const highRelevanceCount = waiting.reduce((count, item) => count + item.payload.notices.length, 0);
+          const pendingState = repository.updateState({
+            lastFinishedAt: finishedAt, lastStatus: "partial", lastError: error,
+            lastHighRelevanceCount: highRelevanceCount, notificationCount: recoveredNotificationCount,
+            nextRunAt: nextScheduledRunAt(finishedAt, current),
+          });
+          repository.recordRun({
+            cycleNumber: current.cycleNumber, batchCount: 0, startedAt: nowIso, finishedAt,
+            status: "partial", highRelevanceCount, notificationCount: recoveredNotificationCount, errorText: error,
+          });
+          return { status: "partial", error, acceptedCount: 0, rejectedCount: 0, state: pendingState };
+        }
+      }
       if (customers.length === 0) {
+        notificationEvents.pending({ activeCustomerIds: [] });
         const pendingSnapshot = current.snapshotId ? repository.getSnapshot(current.snapshotId) : null;
         if (pendingSnapshot?.status === "pending") {
           repository.updateSnapshot(pendingSnapshot.id, { status: "completed", completedAt: nowIso });
@@ -344,6 +376,7 @@ export function createHospitalTenderScheduler({
             // customer-aware keyword context while the main system performs
             // the durable ten-customer matching batches below.
             customerHospitals: collectorCustomers(customers),
+            collectionProgress: notificationEvents.collectionProgress(),
           });
         } catch (error) {
           const finishedAt = now().toISOString();
@@ -362,26 +395,32 @@ export function createHospitalTenderScheduler({
             lastStatus: "failed",
             lastError: errorText,
             lastHighRelevanceCount: 0,
-            notificationCount: 0,
+            notificationCount: recoveredNotificationCount,
             nextRunAt: nextScheduledRunAt(finishedAt, current),
           });
           throw error;
         }
-        snapshot = repository.saveSnapshot({
-          cycleNumber,
-          generatedAt: collected.payload.generatedAt,
-          payload: collected.payload,
-          status: "pending",
-        });
-        current = repository.updateState({
-          cycleNumber,
-          snapshotId: snapshot.id,
-          cursorCustomerId: null,
-          cycleCustomerCount: customers.length,
-          cycleProcessedCount: 0,
-          lastStartedAt: nowIso,
-          lastStatus: "running",
-          lastError: null,
+        snapshot = transaction(db, () => {
+          const saved = repository.saveSnapshot({
+            cycleNumber,
+            generatedAt: collected.payload.generatedAt,
+            payload: collected.payload,
+            status: "pending",
+          });
+          if (collected.payload.collectionProgress !== undefined) {
+            notificationEvents.saveCollectionProgress(collected.payload.collectionProgress);
+          }
+          current = repository.updateState({
+            cycleNumber,
+            snapshotId: saved.id,
+            cursorCustomerId: null,
+            cycleCustomerCount: customers.length,
+            cycleProcessedCount: 0,
+            lastStartedAt: nowIso,
+            lastStatus: "running",
+            lastError: null,
+          });
+          return saved;
         });
       }
 
@@ -425,6 +464,7 @@ export function createHospitalTenderScheduler({
       });
 
       let result;
+      const batchCustomerIds = new Set(batch.map((item) => item.id));
       try {
         result = transaction(db, () => {
           const ingested = ingestHospitalTenderSnapshot({
@@ -445,7 +485,16 @@ export function createHospitalTenderScheduler({
             rejectedBatch.rejectedCount = ingested.rejectedCount;
             throw rejectedBatch;
           }
-          return ingested;
+          const queued = notificationEvents.enqueue({
+            notices: ingested.notices.filter((notice) => notice.relevance === "high"
+              && notice.match?.matchedCustomerIds?.some((id) => batchCustomerIds.has(id))),
+            sourceNotices: snapshot.payload.notices,
+            customers,
+            batchCustomerIds: [...batchCustomerIds],
+            cycleNumber: current.cycleNumber,
+            enabled: notificationsEnabled,
+          });
+          return { ...ingested, notificationNoticeCount: queued.noticeCount };
         });
       } catch (error) {
         const finishedAt = now().toISOString();
@@ -517,35 +566,18 @@ export function createHospitalTenderScheduler({
       )).length;
       const partialSourceSnapshot = sourceFailureCount > 0 || snapshot.payload.runs.some((run) => run.status === "partial");
 
-      const batchCustomerIds = new Set(batch.map((item) => item.id));
-      const retryingNotification = current.lastStatus === "partial"
-        && current.lastError === "招标通知发送失败"
-        && current.lastBatchStartCustomerId === batch[0].id
-        && current.lastBatchEndCustomerId === batch.at(-1).id;
-      const newHighNotices = result.notices.filter((notice) => (
-        notice.relevance === "high"
-        && (notice.firstSeenAt === notice.lastSeenAt || retryingNotification)
-        && notice.match?.matchedCustomerIds?.some((id) => batchCustomerIds.has(id))
-      ));
-      let notificationCount = 0;
-      let notificationsEnabled = false;
-      try {
-        notificationsEnabled = Boolean(notificationEnabled());
-      } catch {
-        notificationsEnabled = false;
-      }
-      if (notifier && notificationsEnabled && newHighNotices.length > 0) {
+      const pendingBatches = notificationEvents.pending({ activeCustomerIds: customers.map((item) => item.id) });
+      const pendingNoticeCount = pendingBatches.reduce((count, item) => count + item.payload.notices.length, 0);
+      const highRelevanceCount = recoveredNotificationCount + Math.max(result.notificationNoticeCount, pendingNoticeCount);
+      let notificationCount = recoveredNotificationCount;
+      if (notificationsEnabled && pendingBatches.length > 0) {
         try {
-          const notified = await notifier({
-            cycleNumber: current.cycleNumber,
-            batchCustomerIds: batch.map((item) => item.id),
-            notices: newHighNotices,
-          });
-          notificationCount = Number.isSafeInteger(notified) && notified >= 0
-            ? notified
-            : newHighNotices.length;
-          if (notificationCount !== newHighNotices.length) {
-            throw new Error("notification incomplete");
+          for (const pending of pendingBatches) {
+            const notified = await notifier(pending.payload);
+            const count = Number.isSafeInteger(notified) && notified >= 0 ? notified : pending.payload.notices.length;
+            if (count !== pending.payload.notices.length) throw new Error("notification incomplete");
+            notificationEvents.settle(pending.id);
+            notificationCount += count;
           }
         } catch (error) {
           const finishedAt = now().toISOString();
@@ -557,7 +589,7 @@ export function createHospitalTenderScheduler({
             status: "partial",
             acceptedCount: result.acceptedCount,
             rejectedCount: result.rejectedCount,
-            highRelevanceCount: newHighNotices.length,
+            highRelevanceCount,
             errorText,
           });
           repository.updateState({
@@ -566,7 +598,7 @@ export function createHospitalTenderScheduler({
             lastError: errorText,
             lastAcceptedCount: result.acceptedCount,
             lastRejectedCount: result.rejectedCount,
-            lastHighRelevanceCount: newHighNotices.length,
+            lastHighRelevanceCount: highRelevanceCount,
             notificationCount: 0,
             nextRunAt: nextScheduledRunAt(finishedAt, current),
           });
@@ -590,7 +622,7 @@ export function createHospitalTenderScheduler({
         lastBatchCount: batch.length,
         lastAcceptedCount: result.acceptedCount,
         lastRejectedCount: result.rejectedCount,
-        lastHighRelevanceCount: newHighNotices.length,
+        lastHighRelevanceCount: highRelevanceCount,
         notificationCount,
         cycleProcessedCount: Math.min(
           customers.length,
@@ -603,7 +635,7 @@ export function createHospitalTenderScheduler({
         status: partialSourceSnapshot ? "partial" : "success",
         acceptedCount: result.acceptedCount,
         rejectedCount: result.rejectedCount,
-        highRelevanceCount: newHighNotices.length,
+        highRelevanceCount,
         notificationCount,
         errorText: partialSourceSnapshot ? "部分公开来源失败" : null,
       });

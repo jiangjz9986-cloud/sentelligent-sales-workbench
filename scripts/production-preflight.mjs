@@ -1144,10 +1144,18 @@ export async function inspectSqlite(
                   : []),
               ])].sort()
             : [];
+          const legacyTenderNotificationRecoveryRequired = !tableNames.has("hospital_tender_notification_batches")
+            && tableNames.has("hospital_tender_scheduler_state") && tableNames.has("hospital_tender_scheduler_snapshots")
+            && Boolean(database.prepare(`
+              SELECT 1 FROM hospital_tender_scheduler_state state
+              JOIN hospital_tender_scheduler_snapshots snapshot ON snapshot.id = state.snapshot_id
+              WHERE snapshot.status = 'pending'
+            `).get());
           return {
             quickCheck,
             foreignKeyViolations: foreignKeyViolations.length,
             businessOwners,
+            legacyTenderNotificationRecoveryRequired,
           };
         } finally {
           database.close();
@@ -2799,9 +2807,11 @@ export async function runProductionPreflight({
     ),
     makeCheck(
       "database.quickCheck",
-      database.quickCheck === "ok",
+      database.quickCheck === "ok" && database.legacyTenderNotificationRecoveryRequired !== true,
       "Primary database PRAGMA quick_check returned ok.",
-      database.error ?? "Primary database PRAGMA quick_check failed.",
+      database.legacyTenderNotificationRecoveryRequired === true
+        ? "LEGACY_TENDER_NOTIFICATION_RECOVERY_REQUIRED: reconcile the old scheduler's failed notification batch with its original delivery keys before upgrading."
+        : database.error ?? "Primary database PRAGMA quick_check failed.",
     ),
     makeCheck(
       "database.foreignKeys",

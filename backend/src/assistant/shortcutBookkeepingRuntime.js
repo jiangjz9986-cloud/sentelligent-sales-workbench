@@ -902,12 +902,21 @@ export function createShortcutBookkeepingAssistantRuntime({
     const sourceDocument = sourceDocumentFor(entry, account);
     if (!sourceDocument) return { status: "not_available" };
     try {
+      const detached = db.prepare(`
+        SELECT 1 FROM bookkeeping_proof_detachments
+        WHERE owner = $owner AND inbox_id = $inboxId AND expense_id = $expenseId AND payment_id = $paymentId
+      `).get({ $owner: account, $inboxId: sourceDocument.inboxId, $expenseId: accepted.expenseId, $paymentId: accepted.paymentId });
+      if (detached) return { status: "detached", inboxId: sourceDocument.inboxId };
       let expense = travelExpenseRepository.getExpense(accepted.expenseId, { owner: account });
       if (!expense) return { status: "not_available" };
       const marker = "微信图片记账:" + sourceDocument.inboxId;
       let attachment = expense.attachments.find((candidate) => (
         candidate.kind === "payment_proof"
-        && candidate.notes === marker
+        && candidate.paymentIds.includes(accepted.paymentId)
+        && (candidate.notes === marker || (sourceDocument.item.status === "matched"
+          && sourceDocument.item.matchedExpenseId === expense.id
+          && sourceDocument.item.matchedPaymentId === accepted.paymentId
+          && sourceDocument.item.recognition?.attachmentId === candidate.id))
       ));
       if (!attachment) {
         const updated = travelExpenseRepository.addAttachment(accepted.expenseId, {
@@ -921,6 +930,7 @@ export function createShortcutBookkeepingAssistantRuntime({
           content: sourceDocument.content,
           coveredCents: expense.payments.find((payment) => payment.id === accepted.paymentId)?.reimbursementCents ?? 0,
           notes: marker,
+          sourceInboxId: sourceDocument.inboxId,
         });
         const beforeIds = new Set(expense.attachments.map((candidate) => candidate.id));
         attachment = updated.attachments.find((candidate) => !beforeIds.has(candidate.id));
@@ -929,10 +939,12 @@ export function createShortcutBookkeepingAssistantRuntime({
       if (!attachment) throw new Error("BOOKKEEPING_PAYMENT_PROOF_ATTACHMENT_MISSING");
       const inbox = travelExpenseDocumentInboxRepository.getDocument(sourceDocument.inboxId, { owner: account });
       if (!inbox) return { status: "not_available" };
-      if (inbox.status === "matched") {
+      if (inbox.status === "matched" && (inbox.matchedExpenseId !== expense.id
+        || inbox.matchedPaymentId !== accepted.paymentId
+        || inbox.recognition?.attachmentId === attachment.id)) {
         return { status: "matched", attachmentId: attachment.id, inboxId: sourceDocument.inboxId, replayed: true };
       }
-      if (inbox.status !== "review_required") return { status: "pending", code: "DOCUMENT_INBOX_STATE_CONFLICT" };
+      if (!["review_required", "matched"].includes(inbox.status)) return { status: "pending", code: "DOCUMENT_INBOX_STATE_CONFLICT" };
       const matched = withImmediateTransaction(db, () => {
         const result = travelExpenseDocumentInboxRepository.markMatched(sourceDocument.inboxId, {
           owner: account,
@@ -1054,8 +1066,21 @@ export function createShortcutBookkeepingAssistantRuntime({
         AND entry.entry_type = 'expense'
         AND entry.expense_id IS NOT NULL
         AND entry.payment_id IS NOT NULL
+        AND NOT EXISTS (
+          SELECT 1 FROM bookkeeping_proof_detachments detached
+          WHERE detached.owner = entry.owner AND detached.inbox_id = inbox.id
+            AND detached.expense_id = entry.expense_id AND detached.payment_id = entry.payment_id
+        )
         AND (
           inbox.status = 'review_required'
+          OR (inbox.matched_expense_id = entry.expense_id AND inbox.matched_payment_id = entry.payment_id
+            AND NOT EXISTS (
+              SELECT 1 FROM travel_expense_attachments attachment
+              JOIN travel_expense_attachment_payments link ON link.attachment_id = attachment.id
+              WHERE attachment.id = json_extract(inbox.recognition_json, '$.attachmentId')
+                AND attachment.expense_id = entry.expense_id AND attachment.kind = 'payment_proof'
+                AND link.payment_id = entry.payment_id
+            ))
           OR NOT EXISTS (
             SELECT 1
             FROM travel_expense_attachments attachment
@@ -1063,7 +1088,9 @@ export function createShortcutBookkeepingAssistantRuntime({
               ON link.attachment_id = attachment.id
             WHERE attachment.expense_id = entry.expense_id
               AND attachment.kind = 'payment_proof'
-              AND attachment.notes = '微信图片记账:' || inbox.id
+              AND (attachment.notes = '微信图片记账:' || inbox.id
+                OR (inbox.matched_expense_id = entry.expense_id AND inbox.matched_payment_id = entry.payment_id
+                  AND attachment.id = json_extract(inbox.recognition_json, '$.attachmentId')))
               AND link.payment_id = entry.payment_id
           )
         )
@@ -1358,6 +1385,7 @@ export function createShortcutBookkeepingAssistantRuntime({
              entry.note,
              entry.purpose,
              entry.amount_cents,
+             payment.amount_cents AS ledger_amount_cents,
              entry.expense_id,
              entry.payment_id,
              expense.reference_code AS expense_reference_code,
@@ -1378,6 +1406,8 @@ export function createShortcutBookkeepingAssistantRuntime({
       LEFT JOIN travel_expenses expense
         ON expense.id = entry.expense_id
        AND expense.owner = entry.owner
+      LEFT JOIN travel_expense_payments payment
+        ON payment.id = entry.payment_id AND payment.expense_id = expense.id
       WHERE batch.id = $batchId AND batch.owner = $owner
       ORDER BY item.sequence ASC
     `).all({
@@ -1406,17 +1436,33 @@ export function createShortcutBookkeepingAssistantRuntime({
     }));
   }
 
+  function batchReceiptState(rows) {
+    if (rows.length < 2) return null;
+    const terminal = rows.every((row) => {
+      if (!row.action_id || !row.entry_id) return false;
+      if (row.action_status === "executed" && row.entry_status === "accepted") {
+        return row.entry_type !== "expense" || row.ledger_amount_cents !== null;
+      }
+      if (row.action_status === "cancelled") return row.entry_status === "rejected";
+      return row.action_status === "expired" && ["review_required", "rejected"].includes(row.entry_status);
+    });
+    if (!terminal) return null;
+    return {
+      acceptedRows: rows.filter((row) => row.action_status === "executed" && row.entry_status === "accepted"),
+      expiredCount: rows.filter((row) => row.action_status === "expired").length,
+      cancelledCount: rows.filter((row) => row.action_status === "cancelled").length,
+    };
+  }
+
   function maybeEnqueueBatchAcceptedReceipt({ account, batchId } = {}) {
     const normalizedAccount = requiredText(account, "account", 200);
     const normalizedBatchId = requiredText(batchId, "batchId", 200);
     const rows = batchReceiptRows(normalizedAccount, normalizedBatchId);
-    if (rows.length < 2) return null;
-    if (rows.some((row) => !row.action_id || !row.entry_id)) return null;
-    if (rows.some((row) => !["executed", "cancelled"].includes(row.action_status))) return null;
-    if (rows.some((row) => !["accepted", "rejected"].includes(row.entry_status))) return null;
+    const state = batchReceiptState(rows);
+    if (!state) return null;
     if (activeBookkeepingQueueExists(normalizedAccount)) return null;
 
-    const acceptedRows = rows.filter((row) => row.entry_status === "accepted");
+    const { acceptedRows } = state;
     if (acceptedRows.length === 0) return null;
     const conversationId = conversationForOrNull(normalizedAccount);
     if (!conversationId) return null;
@@ -1714,15 +1760,13 @@ export function createShortcutBookkeepingAssistantRuntime({
       if (payload.batchVersion !== 1) throw new Error("accepted_batch_version_invalid");
       const batchId = requiredText(payload.batchId, "batchId", 200);
       const rows = batchReceiptRows(outboxItem.owner, batchId);
-      const acceptedRows = rows.filter((row) => row.entry_status === "accepted");
+      const state = batchReceiptState(rows);
+      const acceptedRows = state?.acceptedRows ?? [];
       const expectedEntryIds = Array.isArray(payload.entryIds)
         ? payload.entryIds.map((entryId) => requiredText(entryId, "entryId", 200))
         : [];
       const actualEntryIds = acceptedRows.map((row) => row.entry_id);
-      if (rows.length < 2
-        || rows.some((row) => !row.action_id || !row.entry_id)
-        || rows.some((row) => !["executed", "cancelled"].includes(row.action_status))
-        || rows.some((row) => !["accepted", "rejected"].includes(row.entry_status))
+      if (!state || acceptedRows.length === 0
         || expectedEntryIds.length !== actualEntryIds.length
         || expectedEntryIds.some((entryId, index) => entryId !== actualEntryIds[index])) {
         throw new Error("accepted_batch_incomplete");
@@ -1752,11 +1796,14 @@ export function createShortcutBookkeepingAssistantRuntime({
           : invoiceMatch
             ? "，已关联发票"
             : "";
-        return `${index + 1}. ${dateLabel}${note}，${formatMoney(Number(row.amount_cents))}${invoiceSuffix}`;
+        const amountCents = row.entry_type === "expense" ? row.ledger_amount_cents : row.amount_cents;
+        return `${index + 1}. ${dateLabel}${note}，${formatMoney(Number(amountCents))}${invoiceSuffix}`;
       });
       return [
         `本次已确认并录入小小记账，共 ${acceptedRows.length} 笔：`,
         ...lines,
+        ...(state.expiredCount > 0 ? [`另有过期 ${state.expiredCount} 笔，未入账。`] : []),
+        ...(state.cancelledCount > 0 ? [`另有取消 ${state.cancelledCount} 笔，未入账。`] : []),
       ].join("\n");
     }
     if (payload.kind === SHORTCUT_ADVANCE_ALLOCATION_KIND) {
@@ -1915,7 +1962,8 @@ export function createShortcutBookkeepingAssistantRuntime({
       WHERE action.channel = $channel
         AND action.action_type = $actionType
         AND entry.status IN ('accepted', 'rejected')
-        AND NOT EXISTS (
+        AND (action.status <> CASE entry.status WHEN 'accepted' THEN 'executed' ELSE 'cancelled' END
+        OR NOT EXISTS (
           SELECT 1
           FROM weixin_bookkeeping_batch_items batch_item
           WHERE batch_item.owner = action.owner
@@ -1925,7 +1973,7 @@ export function createShortcutBookkeepingAssistantRuntime({
               FROM weixin_bookkeeping_batch_items batch_size
               WHERE batch_size.batch_id = batch_item.batch_id
             ) > 1
-        )
+        ))
         AND NOT EXISTS (
           SELECT 1 FROM weixin_confirmation_outbox outbox
           WHERE outbox.owner = action.owner

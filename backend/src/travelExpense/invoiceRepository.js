@@ -1641,13 +1641,10 @@ export function createInvoiceRepository(db, {
         || String(left.paymentId).localeCompare(String(right.paymentId)));
 
       const exact = candidates.filter((candidate) => candidate.exactAmount);
-      const exactPriority = exact.filter((candidate) => candidate.weekPriority && candidate.dateOrderEligible);
-      const exactCrossWeekWithinWindow = exact.filter(
-        (candidate) => !candidate.weekPriority
-          && candidate.dateWindowEligible
+      const exactPool = exact.filter(
+        (candidate) => candidate.dateWindowEligible
           && candidate.dateOrderEligible,
       );
-      const exactPool = exactPriority.length ? exactPriority : exactCrossWeekWithinWindow;
       if (exactPool.length === 1) {
         const selected = exactPool[0];
         const allocatedCents = Math.min(
@@ -1697,7 +1694,7 @@ export function createInvoiceRepository(db, {
           ? "multiple_exact_amounts"
           : exact.length > 0 && exact.every((candidate) => !candidate.dateOrderEligible)
             ? "invoice_before_payment_date"
-            : exact.length > 0 && exact.every((candidate) => !candidate.weekPriority && !candidate.dateWindowEligible)
+            : exact.length > 0 && exact.every((candidate) => !candidate.dateWindowEligible)
               ? "exact_amount_outside_date_window"
               : "no_unique_exact_amount",
         generatedAt: timestamp,
